@@ -133,10 +133,8 @@ class UdfGenerator {
     appendFootnotesSection() {
         // Add a separator line
         const separator = '────────────────────';
-        this.content += '\n';
-        this.currentOffset += 1;
 
-        // Empty line before separator
+        // Empty line before separator (element references this newline)
         this.elements.push(`<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0"><content startOffset="${this.currentOffset}" length="1" family="Times New Roman" size="12" /></paragraph>`);
         this.content += '\n';
         this.currentOffset += 1;
@@ -331,6 +329,21 @@ class UdfGenerator {
                     paraElements.push(`<image startOffset="${this.currentOffset}" length="1" imageData="${run.data}" width="${run.width}" height="${run.height}" />`);
                     this.content += '\uFFFC';
                     this.currentOffset += 1;
+                } else if (run.type === 'footnoteRef') {
+                    // Handle footnote reference in table cells
+                    const footnoteNum = run.id;
+                    const footnoteText = run.content;
+
+                    // Collect footnote for later
+                    this.collectedFootnotes.push({
+                        number: footnoteNum,
+                        text: footnoteText
+                    });
+
+                    // Add the superscript footnote number
+                    paraElements.push(`<content startOffset="${this.currentOffset}" length="${footnoteNum.length}" family="Times New Roman" size="10" superscript="true" />`);
+                    this.content += footnoteNum;
+                    this.currentOffset += footnoteNum.length;
                 }
             }
 

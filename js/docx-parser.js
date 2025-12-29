@@ -232,11 +232,12 @@ class DocxParser {
         const footnoteRefs = run.getElementsByTagNameNS(WORD_NS, 'footnoteReference');
         if (footnoteRefs.length > 0) {
             const footnoteId = footnoteRefs[0].getAttribute('w:id');
-            if (footnoteId && this.footnotes[footnoteId]) {
+            // Use 'in' to check key presence - empty string is still valid
+            if (footnoteId && footnoteId in this.footnotes) {
                 return {
                     type: 'footnoteRef',
                     id: footnoteId,
-                    content: this.footnotes[footnoteId]
+                    content: this.footnotes[footnoteId] || '[Empty footnote]'
                 };
             }
         }
