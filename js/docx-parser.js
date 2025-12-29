@@ -9,6 +9,7 @@ class DocxParser {
         this.document = null;
         this.relationships = {};
         this.images = {};
+        this.footnotes = {};
     }
 
     /**
@@ -27,6 +28,9 @@ class DocxParser {
             // Extract images
             await this.extractImages();
 
+            // Parse footnotes
+            await this.parseFootnotes();
+
             // Parse the main document content
             const documentXml = await this.zip.file('word/document.xml').async('string');
             this.document = parseXml(documentXml);
@@ -36,7 +40,8 @@ class DocxParser {
 
             return {
                 elements: elements,
-                images: this.images
+                images: this.images,
+                footnotes: this.footnotes
             };
         } catch (error) {
             console.error('Error parsing DOCX:', error);
@@ -82,6 +87,45 @@ class DocxParser {
             const base64 = arrayBufferToBase64(data);
             const filename = path.replace('word/media/', '');
             this.images[filename] = base64;
+        }
+    }
+
+    /**
+     * Parse footnotes from word/footnotes.xml
+     */
+    async parseFootnotes() {
+        const footnotesFile = this.zip.file('word/footnotes.xml');
+        if (!footnotesFile) return;
+
+        try {
+            const footnotesXml = await footnotesFile.async('string');
+            const footnotesDoc = parseXml(footnotesXml);
+            const footnotes = footnotesDoc.getElementsByTagNameNS(WORD_NS, 'footnote');
+
+            for (const footnote of footnotes) {
+                const id = footnote.getAttribute('w:id');
+                // Skip separator and continuationSeparator footnotes (id 0 and -1)
+                if (id === '0' || id === '-1') continue;
+
+                // Extract text content from the footnote
+                const paragraphs = footnote.getElementsByTagNameNS(WORD_NS, 'p');
+                let footnoteText = '';
+
+                for (const para of paragraphs) {
+                    const runs = para.getElementsByTagNameNS(WORD_NS, 'r');
+                    for (const run of runs) {
+                        const textElements = run.getElementsByTagNameNS(WORD_NS, 't');
+                        for (const t of textElements) {
+                            footnoteText += t.textContent || '';
+                        }
+                    }
+                    footnoteText += ' ';
+                }
+
+                this.footnotes[id] = footnoteText.trim();
+            }
+        } catch (error) {
+            console.warn('Could not parse footnotes:', error);
         }
     }
 
@@ -182,6 +226,19 @@ class DocxParser {
         let text = '';
         for (const t of textElements) {
             text += t.textContent || '';
+        }
+
+        // Check for footnote reference
+        const footnoteRefs = run.getElementsByTagNameNS(WORD_NS, 'footnoteReference');
+        if (footnoteRefs.length > 0) {
+            const footnoteId = footnoteRefs[0].getAttribute('w:id');
+            if (footnoteId && this.footnotes[footnoteId]) {
+                return {
+                    type: 'footnoteRef',
+                    id: footnoteId,
+                    content: this.footnotes[footnoteId]
+                };
+            }
         }
 
         // Check for tab
