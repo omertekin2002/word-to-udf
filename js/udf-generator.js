@@ -8,6 +8,8 @@ class UdfGenerator {
         this.content = '';
         this.elements = [];
         this.currentOffset = 0;
+        this.collectedFootnotes = []; // Store footnotes to append at end
+        this.footnoteCounter = 0; // Track display numbers for footnotes
     }
 
     /**
@@ -20,6 +22,8 @@ class UdfGenerator {
         this.content = '';
         this.elements = [];
         this.currentOffset = 0;
+        this.collectedFootnotes = [];
+        this.footnoteCounter = 0;
 
         // Process all document elements
         for (const element of document.elements) {
@@ -28,6 +32,11 @@ class UdfGenerator {
             } else if (element.type === 'table') {
                 this.processTable(element);
             }
+        }
+
+        // Append footnotes section at the end if there are any
+        if (this.collectedFootnotes.length > 0) {
+            this.appendFootnotesSection();
         }
 
         // Ensure we have at least one paragraph
@@ -77,13 +86,37 @@ class UdfGenerator {
                 paraContent.push('\n');
                 this.currentOffset += 1;
             } else if (run.type === 'pageBreak') {
-                // Handle page break
+                // Handle page break - first flush any pending footnotes
                 this.content += paraContent.join('');
                 if (paraElements.length > 0) {
                     this.elements.push(this.buildParagraphElement(paragraph, paraElements));
                 }
+
+                // Insert footnotes for this page before the page break
+                if (this.collectedFootnotes.length > 0) {
+                    this.appendFootnotesSection();
+                    this.collectedFootnotes = []; // Clear for next page
+                }
+
                 this.elements.push('<page-break />');
                 return;
+            } else if (run.type === 'footnoteRef') {
+                // Handle footnote reference - insert superscript number only
+                // Use counter for display number (w:id can be non-contiguous)
+                this.footnoteCounter++;
+                const displayNum = String(this.footnoteCounter);
+                const footnoteText = run.content;
+
+                // Collect footnote for later
+                this.collectedFootnotes.push({
+                    number: displayNum,
+                    text: footnoteText
+                });
+
+                // Add the superscript footnote number in text
+                paraElements.push(`<content startOffset="${this.currentOffset}" length="${displayNum.length}" family="Times New Roman" size="10" superscript="true" />`);
+                paraContent.push(displayNum);
+                this.currentOffset += displayNum.length;
             }
         }
 
@@ -96,6 +129,45 @@ class UdfGenerator {
 
         this.content += paraContent.join('');
         this.elements.push(this.buildParagraphElement(paragraph, paraElements));
+    }
+
+    /**
+     * Append footnotes section at the end of the document
+     */
+    appendFootnotesSection() {
+        // Add a separator line
+        const separator = '────────────────────';
+
+        // Empty line before separator (element references this newline)
+        this.elements.push(`<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0"><content startOffset="${this.currentOffset}" length="1" family="Times New Roman" size="12" /></paragraph>`);
+        this.content += '\n';
+        this.currentOffset += 1;
+
+        // Separator line
+        this.elements.push(`<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0"><content startOffset="${this.currentOffset}" length="${separator.length}" family="Times New Roman" size="10" /></paragraph>`);
+        this.content += separator;
+        this.currentOffset += separator.length;
+
+        // Add each footnote
+        for (const footnote of this.collectedFootnotes) {
+            // Create paragraph with superscript number and regular text
+            const numPart = footnote.number + '. ';
+            const textPart = footnote.text;
+
+            const paraElements = [];
+
+            // Superscript number
+            paraElements.push(`<content startOffset="${this.currentOffset}" length="${numPart.length}" family="Times New Roman" size="10" superscript="true" />`);
+            this.content += numPart;
+            this.currentOffset += numPart.length;
+
+            // Footnote text
+            paraElements.push(`<content startOffset="${this.currentOffset}" length="${textPart.length}" family="Times New Roman" size="10" />`);
+            this.content += textPart;
+            this.currentOffset += textPart.length;
+
+            this.elements.push(`<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0">${paraElements.join('')}</paragraph>`);
+        }
     }
 
     /**
@@ -255,6 +327,23 @@ class UdfGenerator {
                     paraElements.push(`<image startOffset="${this.currentOffset}" length="1" imageData="${run.data}" width="${run.width}" height="${run.height}" />`);
                     this.content += '\uFFFC';
                     this.currentOffset += 1;
+                } else if (run.type === 'footnoteRef') {
+                    // Handle footnote reference in table cells
+                    // Use counter for display number (w:id can be non-contiguous)
+                    this.footnoteCounter++;
+                    const displayNum = String(this.footnoteCounter);
+                    const footnoteText = run.content;
+
+                    // Collect footnote for later
+                    this.collectedFootnotes.push({
+                        number: displayNum,
+                        text: footnoteText
+                    });
+
+                    // Add the superscript footnote number
+                    paraElements.push(`<content startOffset="${this.currentOffset}" length="${displayNum.length}" family="Times New Roman" size="10" superscript="true" />`);
+                    this.content += displayNum;
+                    this.currentOffset += displayNum.length;
                 }
             }
 
