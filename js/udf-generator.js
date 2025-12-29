@@ -150,12 +150,6 @@ class UdfGenerator {
 
         // Add each footnote
         for (const footnote of this.collectedFootnotes) {
-            const footnoteText = `${footnote.number}. ${footnote.text}`;
-
-            // Add newline before footnote
-            this.content += '\n';
-            this.currentOffset += 1;
-
             // Create paragraph with superscript number and regular text
             const numPart = footnote.number + '. ';
             const textPart = footnote.text;
