@@ -9,6 +9,7 @@ class UdfGenerator {
         this.elements = [];
         this.currentOffset = 0;
         this.collectedFootnotes = []; // Store footnotes to append at end
+        this.footnoteCounter = 0; // Track display numbers for footnotes
     }
 
     /**
@@ -22,6 +23,7 @@ class UdfGenerator {
         this.elements = [];
         this.currentOffset = 0;
         this.collectedFootnotes = [];
+        this.footnoteCounter = 0;
 
         // Process all document elements
         for (const element of document.elements) {
@@ -100,19 +102,21 @@ class UdfGenerator {
                 return;
             } else if (run.type === 'footnoteRef') {
                 // Handle footnote reference - insert superscript number only
-                const footnoteNum = run.id;
+                // Use counter for display number (w:id can be non-contiguous)
+                this.footnoteCounter++;
+                const displayNum = String(this.footnoteCounter);
                 const footnoteText = run.content;
 
                 // Collect footnote for later
                 this.collectedFootnotes.push({
-                    number: footnoteNum,
+                    number: displayNum,
                     text: footnoteText
                 });
 
                 // Add the superscript footnote number in text
-                paraElements.push(`<content startOffset="${this.currentOffset}" length="${footnoteNum.length}" family="Times New Roman" size="10" superscript="true" />`);
-                paraContent.push(footnoteNum);
-                this.currentOffset += footnoteNum.length;
+                paraElements.push(`<content startOffset="${this.currentOffset}" length="${displayNum.length}" family="Times New Roman" size="10" superscript="true" />`);
+                paraContent.push(displayNum);
+                this.currentOffset += displayNum.length;
             }
         }
 
@@ -331,19 +335,21 @@ class UdfGenerator {
                     this.currentOffset += 1;
                 } else if (run.type === 'footnoteRef') {
                     // Handle footnote reference in table cells
-                    const footnoteNum = run.id;
+                    // Use counter for display number (w:id can be non-contiguous)
+                    this.footnoteCounter++;
+                    const displayNum = String(this.footnoteCounter);
                     const footnoteText = run.content;
 
                     // Collect footnote for later
                     this.collectedFootnotes.push({
-                        number: footnoteNum,
+                        number: displayNum,
                         text: footnoteText
                     });
 
                     // Add the superscript footnote number
-                    paraElements.push(`<content startOffset="${this.currentOffset}" length="${footnoteNum.length}" family="Times New Roman" size="10" superscript="true" />`);
-                    this.content += footnoteNum;
-                    this.currentOffset += footnoteNum.length;
+                    paraElements.push(`<content startOffset="${this.currentOffset}" length="${displayNum.length}" family="Times New Roman" size="10" superscript="true" />`);
+                    this.content += displayNum;
+                    this.currentOffset += displayNum.length;
                 }
             }
 
