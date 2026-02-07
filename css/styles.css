@@ -763,6 +763,11 @@ h6 {
   width: 28px;
   height: 28px;
   opacity: 0.7;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 0;
 }
 
 .social-icon svg {
