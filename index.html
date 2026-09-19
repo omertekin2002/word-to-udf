@@ -7,146 +7,196 @@
   <meta name="description"
     content="Convert Word documents (.docx) to UYAP UDF format online. Free, fast, and secure - your files never leave your browser.">
   <title>Word to UDF Converter | UYAP Document Converter</title>
+  <link rel="icon" href="/favicon.ico?v=8" sizes="any">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=8">
+  <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png?v=8">
+  <!-- 1996 catalog styles: system fonts only, no webfonts -->
   <link rel="stylesheet" href="css/styles.css">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link
-    href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Space+Mono:wght@400;700&display=swap"
-    rel="stylesheet">
 </head>
 
 <body>
-  <div class="noise-overlay" aria-hidden="true"></div>
 
-  <div class="site-frame">
-    <nav class="nav-bar">
-      <div class="nav-brand"><span class="brand-owner">omertekin2002</span>/<span class="brand-project">WORD-TO-UDF</span> <span class="blink">_</span></div>
-      <div class="nav-links">
-        <a href="https://github.com/omertekin2002/word-to-udf" target="_blank" rel="noopener noreferrer" class="gh-link" aria-label="Source on GitHub"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg></a>
+  <!-- Shared icon glyphs -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-github" viewBox="0 0 24 24"><path fill="currentColor" d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 32 32"><path d="M7 3h13l6 6v20H7z" fill="#fff" stroke="#000" stroke-width="2"/><path d="M20 3v6h6" fill="#fcc20f" stroke="#000" stroke-width="2"/><path d="M11 14h11M11 18h11M11 22h8" stroke="#000" stroke-width="2"/></symbol>
+    <symbol id="i-in" viewBox="0 0 32 32"><rect x="3" y="3" width="26" height="26" fill="#8c9ae0" stroke="#000" stroke-width="2"/><path d="M9 13v10M9 9v1M14 23V13m0 4c0-3 2-4 4-4s4 1 4 4v6" fill="none" stroke="#000" stroke-width="2.5"/></symbol>
+    <symbol id="i-house" viewBox="0 0 32 32"><path d="M4 15L16 4l12 11" fill="none" stroke="#000" stroke-width="2"/><path d="M7 13v15h18V13" fill="#d77a7a" stroke="#000" stroke-width="2"/><rect x="13" y="19" width="6" height="9" fill="#fff" stroke="#000" stroke-width="2"/></symbol>
+    <symbol id="i-wrench" viewBox="0 0 32 32"><path d="M20 4a7 7 0 0 0-6 10L4 24l4 4 10-10a7 7 0 0 0 10-6l-4 3-4-1-1-4z" fill="#c0d4a7" stroke="#000" stroke-width="2" stroke-linejoin="round"/></symbol>
+    <symbol id="i-floppy" viewBox="0 0 32 32"><path d="M4 4h20l4 4v20H4z" fill="#8c9ae0" stroke="#000" stroke-width="2"/><rect x="9" y="4" width="13" height="8" fill="#fff" stroke="#000" stroke-width="2"/><rect x="17" y="6" width="3" height="4" fill="#000"/><rect x="8" y="17" width="16" height="11" fill="#fff" stroke="#000" stroke-width="2"/><path d="M11 21h10M11 24h7" stroke="#000" stroke-width="1.5"/></symbol>
+    <symbol id="i-docx" viewBox="0 0 48 48"><path d="M10 4h20l10 10v30H10z" fill="#fff" stroke="#000" stroke-width="2.5"/><path d="M30 4v10h10" fill="#fcc20f" stroke="#000" stroke-width="2.5"/><rect x="4" y="20" width="26" height="14" fill="#9ab6c8" stroke="#000" stroke-width="2.5"/><text x="17" y="31" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="9" text-anchor="middle" fill="#000">DOCX</text><path d="M16 39h18" stroke="#000" stroke-width="2.5"/></symbol>
+  </svg>
+
+  <div class="page-frame" id="top">
+
+    <!-- TOP BANNER -->
+    <header class="top-banner">
+      <div class="banner-id">
+        <a href="#top" class="wordmark">WORD TO UDF</a>
+        <p class="tagline">CONVERT .DOCX TO UYAP UDF. ONLINE.</p>
       </div>
-    </nav>
+      <div class="banner-right">
+        <a href="https://omertekin2002.github.io/" class="sticker-tab">BY <span class="stripe">ömer</span> TEKIN</a>
+        <p class="phone-callout">.DOCX &rarr; .UDF</p>
+      </div>
+    </header>
 
-    <main class="content-grid">
-      <section class="grid-cell full-width hero-cell">
-        <div class="hero-content">
-          <h1>Word to <span>UDF</span></h1>
-          <p class="hero-desc">Convert your .docx documents to UYAP UDF format directly in your browser.</p>
+    <div class="layout">
 
-          <div class="upload-card" id="uploadCard">
-            <div class="upload-zone" id="uploadZone">
-              <input type="file" id="fileInput" accept=".docx" class="file-input" aria-label="Upload Word document">
-              <div class="upload-content">
-                <div class="upload-icon">
-                  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path
-                      d="M21 15V19C21 19.5304 20.7893 20.0391 20.4142 20.4142C20.0391 20.7893 19.5304 21 19 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V15"
-                      stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-                    <polyline points="17,8 12,3 7,8" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                      stroke-linejoin="round" />
-                    <line x1="12" y1="3" x2="12" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                      stroke-linejoin="round" />
-                  </svg>
-                </div>
-                <p class="upload-text">Drag and drop your <strong>.docx</strong> file here</p>
-                <p class="upload-subtext">or click to browse</p>
-              </div>
-            </div>
+      <!-- LEFT RAIL -->
+      <aside class="rail">
+        <nav class="icon-grid" aria-label="Quick links">
+          <a href="https://omertekin2002.github.io/">
+            <svg aria-hidden="true"><use href="#i-house"/></svg><span>HOME</span>
+          </a>
+          <a href="https://github.com/omertekin2002/word-to-udf" target="_blank" rel="noopener noreferrer">
+            <svg aria-hidden="true" class="gh"><use href="#i-github"/></svg><span>SOURCE</span>
+          </a>
+          <a href="https://www.linkedin.com/in/ömer-tekin" target="_blank" rel="noopener noreferrer">
+            <svg aria-hidden="true"><use href="#i-in"/></svg><span>LINKEDIN</span>
+          </a>
+          <a href="https://omertekin2002.github.io/resume/" target="_blank" rel="noopener noreferrer">
+            <svg aria-hidden="true"><use href="#i-doc"/></svg><span>CV</span>
+          </a>
+        </nav>
 
-            <div class="file-info hidden" id="fileInfo">
-              <div class="file-icon">
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path
-                    d="M14 2H6C5.46957 2 4.96086 2.21071 4.58579 2.58579C4.21071 2.96086 4 3.46957 4 4V20C4 20.5304 4.21071 21.0391 4.58579 21.4142C4.96086 21.7893 5.46957 22 6 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V8L14 2Z"
-                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-                  <polyline points="14,2 14,8 20,8" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                    stroke-linejoin="round" />
-                </svg>
-              </div>
-              <div class="file-details">
-                <p class="file-name" id="fileName">document.docx</p>
-                <p class="file-size" id="fileSize">0 KB</p>
-              </div>
-              <button class="remove-file" id="removeFile" aria-label="Remove file">
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <line x1="18" y1="6" x2="6" y2="18" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                    stroke-linejoin="round" />
-                  <line x1="6" y1="6" x2="18" y2="18" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                    stroke-linejoin="round" />
-                </svg>
-              </button>
-            </div>
+        <div class="cta-red">
+          <p><b>Your files never leave your browser.</b> The whole conversion runs on your own computer &mdash;
+            nothing is uploaded to a server.</p>
+          <p>Drop in a .docx, press convert, and download a .udf ready for UYAP.</p>
+        </div>
 
-            <div class="progress-container hidden" id="progressContainer">
-              <div class="progress-bar">
-                <div class="progress-fill" id="progressFill"></div>
-              </div>
-              <p class="progress-text" id="progressText">Converting...</p>
-            </div>
-
-            <button class="convert-btn" id="convertBtn" disabled>
-              <span class="btn-text">Convert to UDF</span>
-              <span class="btn-icon">
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M5 12H19" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                    stroke-linejoin="round" />
-                  <path d="M12 5L19 12L12 19" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                    stroke-linejoin="round" />
-                </svg>
-              </span>
-            </button>
-
-            <div class="download-section hidden" id="downloadSection">
-              <div class="success-icon">
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path
-                    d="M22 11.08V12C21.9988 14.1564 21.3005 16.2547 20.0093 17.9818C18.7182 19.709 16.9033 20.9725 14.8354 21.5839C12.7674 22.1953 10.5573 22.1219 8.53447 21.3746C6.51168 20.6273 4.78465 19.2461 3.61096 17.4371C2.43727 15.628 1.87979 13.4881 2.02168 11.3363C2.16356 9.18455 2.99721 7.13631 4.39828 5.49706C5.79935 3.85781 7.69279 2.71537 9.79619 2.24013C11.8996 1.7649 14.1003 1.98232 16.07 2.85999"
-                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-                  <polyline points="22,4 12,14.01 9,11.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                    stroke-linejoin="round" />
-                </svg>
-              </div>
-              <p class="success-text">Conversion complete</p>
-              <button class="download-btn" id="downloadBtn">
-                <span class="btn-text">Download UDF File</span>
-                <span class="btn-icon">
-                  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path
-                      d="M21 15V19C21 19.5304 20.7893 20.0391 20.4142 20.4142C20.0391 20.7893 19.5304 21 19 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V15"
-                      stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-                    <polyline points="7,10 12,15 17,10" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                      stroke-linejoin="round" />
-                    <line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                      stroke-linejoin="round" />
-                  </svg>
-                </span>
-              </button>
-              <button class="convert-another" id="convertAnother">Convert another file</button>
-            </div>
-
-            <div class="error-message hidden" id="errorMessage">
-              <div class="error-icon">
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                    stroke-linejoin="round" />
-                  <line x1="15" y1="9" x2="9" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                    stroke-linejoin="round" />
-                  <line x1="9" y1="9" x2="15" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                    stroke-linejoin="round" />
-                </svg>
-              </div>
-              <p class="error-text" id="errorText">An error occurred</p>
-            </div>
+        <div class="seal-row">
+          <div class="cert-seal" aria-label="100% client-side">
+            <span class="seal-top">100%</span>
+            <span class="seal-mid word">LOCAL</span>
+            <span class="seal-bot">NO UPLOAD</span>
+          </div>
+          <div class="cert-seal" aria-label="Free and open source">
+            <span class="seal-top">OPEN</span>
+            <span class="seal-mid word">FREE</span>
+            <span class="seal-bot">SOURCE</span>
           </div>
         </div>
-      </section>
 
-      <footer class="grid-cell full-width footer-cell">
-        <div class="social-links">
-          <a href="https://www.linkedin.com/in/ömer-tekin" target="_blank" rel="noopener noreferrer">[ LINKEDIN ]</a>
-          <a href="https://github.com/omertekin2002" target="_blank" rel="noopener noreferrer">[ GITHUB ]</a>
+        <div class="rail-box">
+          <h3 class="rail-title">CONVERTS</h3>
+          <ul class="spec-list">
+            <li>Bold, italic, fonts</li>
+            <li>Alignment</li>
+            <li>Tables &amp; borders</li>
+            <li>Images</li>
+          </ul>
         </div>
-      </footer>
-    </main>
+
+        <div class="rail-box">
+          <h3 class="rail-title">NOT YET</h3>
+          <ul class="spec-list">
+            <li>Headers &amp; footers</li>
+            <li>Track changes, comments</li>
+            <li>Embedded OLE objects</li>
+          </ul>
+        </div>
+      </aside>
+
+      <!-- MAIN STACK -->
+      <main class="stack">
+
+        <section id="convert">
+          <h2 class="eyebrow tint-olive">CONVERT</h2>
+
+          <article class="ribbon tool" id="uploadCard">
+            <h3 class="ribbon-title">SELECT A WORD DOCUMENT</h3>
+            <div class="tool-body tint-sky">
+
+              <div class="upload-zone" id="uploadZone">
+                <input type="file" id="fileInput" accept=".docx" class="file-input" aria-label="Upload Word document">
+                <div class="upload-content">
+                  <svg class="upload-icon" aria-hidden="true"><use href="#i-docx"/></svg>
+                  <p class="upload-text">Drag and drop your <strong>.docx</strong> file here</p>
+                  <p class="upload-subtext">or <u>click to browse</u></p>
+                </div>
+              </div>
+
+              <div class="file-info hidden" id="fileInfo">
+                <svg class="file-icon" aria-hidden="true"><use href="#i-docx"/></svg>
+                <div class="file-details">
+                  <p class="file-name" id="fileName">document.docx</p>
+                  <p class="file-size" id="fileSize">0 KB</p>
+                </div>
+                <button class="remove-file" id="removeFile" aria-label="Remove file">REMOVE</button>
+              </div>
+
+              <div class="progress-container hidden" id="progressContainer">
+                <div class="progress-bar">
+                  <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <p class="progress-text" id="progressText">Converting...</p>
+              </div>
+
+              <button class="btn btn-primary convert-btn" id="convertBtn" disabled>CONVERT TO UDF &rarr;</button>
+
+              <div class="download-section hidden" id="downloadSection">
+                <span class="new-burst" aria-hidden="true">DONE!</span>
+                <svg class="success-icon" aria-hidden="true"><use href="#i-floppy"/></svg>
+                <p class="success-text">Conversion complete.</p>
+                <button class="btn btn-primary download-btn" id="downloadBtn">DOWNLOAD UDF FILE</button>
+                <button class="convert-another" id="convertAnother">Convert another file</button>
+              </div>
+
+              <div class="error-message hidden" id="errorMessage" role="alert">
+                <span class="error-icon" aria-hidden="true">ERROR</span>
+                <p class="error-text" id="errorText">An error occurred</p>
+              </div>
+
+            </div>
+          </article>
+        </section>
+
+        <section id="how">
+          <h2 class="eyebrow tint-salmon">HOW IT WORKS</h2>
+
+          <article class="ribbon">
+            <h3 class="ribbon-title">1. PARSE THE DOCX</h3>
+            <div class="ribbon-body tint-peach">
+              <p>Your .docx is opened in the browser and its paragraphs, tables and images are read out.</p>
+            </div>
+          </article>
+
+          <article class="ribbon">
+            <h3 class="ribbon-title">2. BUILD THE UDF</h3>
+            <div class="ribbon-body tint-lime">
+              <p>The text is laid into UYAP's offset-based content.xml, keeping formatting and table structure.</p>
+            </div>
+          </article>
+
+          <article class="ribbon">
+            <h3 class="ribbon-title">3. DOWNLOAD</h3>
+            <div class="ribbon-body tint-periwinkle">
+              <p>Everything is zipped into a .udf file you can open in the UYAP Document Editor.</p>
+            </div>
+          </article>
+        </section>
+
+      </main>
+    </div>
+
+    <!-- FOOTER -->
+    <footer class="footer-band">
+      <nav class="icon-nav" aria-label="Footer">
+        <a href="https://omertekin2002.github.io/"><svg aria-hidden="true"><use href="#i-house"/></svg><span>HOME</span></a>
+        <a href="#convert"><svg aria-hidden="true"><use href="#i-docx"/></svg><span>CONVERT</span></a>
+        <a href="https://github.com/omertekin2002/word-to-udf" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#i-wrench"/></svg><span>SOURCE</span></a>
+        <a href="https://omertekin2002.github.io/resume/" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#i-doc"/></svg><span>CV</span></a>
+      </nav>
+      <p class="legal">
+        <a href="https://www.linkedin.com/in/ömer-tekin" target="_blank" rel="noopener noreferrer">LinkedIn</a> &middot;
+        <a href="https://github.com/omertekin2002" target="_blank" rel="noopener noreferrer">GitHub</a> &middot;
+        <a href="#top">Copyright</a> &copy; Ömer Tekin. MIT License.
+      </p>
+      <p class="small-print">This site is best viewed with browser versions 3.0 and higher.</p>
+    </footer>
+
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>

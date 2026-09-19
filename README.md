@@ -9,7 +9,6 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 - 📋 **Formatting**: Preserves bold, italic, fonts, and alignment
 - 📊 **Tables**: Handles table structure with cells and borders
 - 🖼️ **Images**: Embeds images as base64
-- 🌙 **Dark/Light Mode**: Premium UI with theme support
 
 ## Usage
 
