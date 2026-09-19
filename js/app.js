@@ -21,7 +21,6 @@ class WordToUdfApp {
         this.convertAnother = document.getElementById('convertAnother');
         this.errorMessage = document.getElementById('errorMessage');
         this.errorText = document.getElementById('errorText');
-        this.themeToggle = document.getElementById('themeToggle');
 
         // State
         this.selectedFile = null;
@@ -38,7 +37,6 @@ class WordToUdfApp {
 
     init() {
         this.bindEvents();
-        this.initTheme();
     }
 
     bindEvents() {
@@ -61,39 +59,6 @@ class WordToUdfApp {
 
         // Convert another
         this.convertAnother.addEventListener('click', () => this.handleConvertAnother());
-
-        // Theme toggle
-        this.themeToggle.addEventListener('click', () => this.toggleTheme());
-    }
-
-    initTheme() {
-        // Check for saved theme preference - light mode by default
-        const savedTheme = localStorage.getItem('theme');
-
-        if (savedTheme === 'dark') {
-            document.documentElement.setAttribute('data-theme', 'dark');
-            this.themeToggle.querySelector('.icon').textContent = '🌙';
-        } else {
-            // Light mode is default (no data-theme attribute needed)
-            document.documentElement.removeAttribute('data-theme');
-            this.themeToggle.querySelector('.icon').textContent = '☀️';
-        }
-    }
-
-    toggleTheme() {
-        const currentTheme = document.documentElement.getAttribute('data-theme');
-
-        if (currentTheme === 'dark') {
-            // Switch to light
-            document.documentElement.removeAttribute('data-theme');
-            this.themeToggle.querySelector('.icon').textContent = '☀️';
-            localStorage.setItem('theme', 'light');
-        } else {
-            // Switch to dark
-            document.documentElement.setAttribute('data-theme', 'dark');
-            this.themeToggle.querySelector('.icon').textContent = '🌙';
-            localStorage.setItem('theme', 'dark');
-        }
     }
 
     handleDragOver(e) {
