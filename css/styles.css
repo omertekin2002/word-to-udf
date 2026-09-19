@@ -111,6 +111,21 @@ a:hover {
   white-space: nowrap;
 }
 
+.gh-link {
+  display: block;
+}
+
+.gh-link svg {
+  display: block;
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.gh-link:hover {
+  background: none;
+  color: var(--accent);
+}
+
 /* Grid Layout */
 .content-grid {
   display: grid;
@@ -162,37 +177,11 @@ a:hover {
   text-transform: uppercase;
 }
 
-/* Upload card — same window chrome as the terminal box on the main site */
+/* Upload card */
 .upload-card {
   border: var(--rule) solid var(--border);
   background: var(--bg);
   max-width: 760px;
-}
-
-.win-bar {
-  border-bottom: var(--rule) solid var(--border);
-  padding: 0.6rem 1rem;
-  background: var(--fg);
-  display: flex;
-  gap: 0.5rem;
-}
-
-.win-btn {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #ff5f57;
-}
-
-.win-btn:nth-child(2) {
-  background: #febc2e;
-}
-
-.win-btn:nth-child(3) {
-  background: #28c840;
-}
-
-.upload-body {
   padding: 1.5rem;
 }
 
@@ -457,7 +446,7 @@ a:hover {
     padding: 3rem 1.25rem;
   }
 
-  .upload-body {
+  .upload-card {
     padding: 1rem;
   }
 
