@@ -261,6 +261,7 @@ p {
 
 .seal-row {
   display: flex;
+  margin-top: 16px;
   justify-content: center;
   gap: 12px;
 }
@@ -329,6 +330,13 @@ p {
   color: var(--ink);
   font: 900 36px/1 var(--font-display);
   overflow-wrap: anywhere;
+}
+
+/* Converts / not-yet boxes */
+
+.rail-title[class*="tint-"] {
+  color: var(--ink);
+  border-bottom: 1px solid var(--ink);
 }
 
 /* Ribbon cards */
@@ -620,16 +628,16 @@ p {
 .icon-nav {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  max-width: 480px;
+  grid-template-columns: repeat(2, 1fr);
+  max-width: 240px;
   margin: 0 auto 16px;
 }
 
 .icon-nav::before {
   content: "";
   position: absolute;
-  left: 12%;
-  right: 12%;
+  left: 25%;
+  right: 25%;
   top: 22px;
   height: 2px;
   background: var(--rule-green);
@@ -689,7 +697,7 @@ p {
   }
 
   .icon-grid {
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(2, 1fr);
   }
 
   .icon-grid a,

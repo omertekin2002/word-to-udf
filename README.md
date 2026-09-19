@@ -58,7 +58,7 @@ The format uses an offset-based content model where all text is stored in a CDAT
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
 
 ## Resources
 
