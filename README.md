@@ -34,6 +34,17 @@ php -S localhost:8000
 
 Then open `http://localhost:8000` in your browser.
 
+## Running tests
+
+The tests load the browser scripts into Node with [jsdom](https://github.com/jsdom/jsdom) and run whole conversions on small `.docx` files built in memory. They need Node 22+ and [bun](https://bun.sh):
+
+```bash
+bun install
+bun run test
+```
+
+The site itself still has no build step; `package.json` exists only for the tests.
+
 ## Technical Details
 
 ### UDF Format
