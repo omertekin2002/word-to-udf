@@ -9,12 +9,13 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 - 📋 **Formatting**: Preserves bold, italic, fonts, and alignment
 - 📊 **Tables**: Handles table structure with cells and borders
 - 🖼️ **Images**: Embeds images as base64
+- 🇹🇷 **Turkish UI**: The page is in Turkish by default, with a TR | EN toggle for English (or open it with `?lang=en`)
 
 ## Usage
 
 1. Open `index.html` in a web browser
 2. Drag and drop a `.docx` file (or click to browse)
-3. Click "Convert to UDF"
+3. Click "UDF’YE DÖNÜŞTÜR" ("Convert to UDF" in English)
 4. Download the converted `.udf` file
 
 ## Local Development
