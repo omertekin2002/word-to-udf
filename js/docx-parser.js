@@ -137,13 +137,52 @@ class DocxParser {
         const body = this.document.getElementsByTagNameNS(WORD_NS, 'body')[0];
         if (!body) return [];
 
+        return this.parseBlocks(body);
+    }
+
+    /**
+     * Children of a body, cell, row or table, looking through block-level
+     * content controls (w:sdt) and custom XML wrappers
+     * @param {Element} container - The containing element
+     * @returns {Array<Element>} Word ML children in document order
+     */
+    contentChildren(container) {
+        const children = [];
+
+        for (const child of childElements(container)) {
+            if (child.localName === 'customXml') {
+                children.push(...this.contentChildren(child));
+            } else if (child.localName === 'sdt') {
+                const sdtContent = childElement(child, 'sdtContent');
+                if (sdtContent) children.push(...this.contentChildren(sdtContent));
+            } else {
+                children.push(child);
+            }
+        }
+
+        return children;
+    }
+
+    /**
+     * Parse the block-level content (paragraphs and tables) of a body, cell or text box
+     * @param {Element} container - The containing element
+     * @returns {Array<Object>} Parsed paragraphs and tables in document order
+     */
+    parseBlocks(container) {
         const elements = [];
 
-        for (const child of body.children) {
+        for (const child of this.contentChildren(container)) {
             const localName = child.localName;
 
             if (localName === 'p') {
-                elements.push(this.parseParagraph(child));
+                const runs = this.paragraphRuns(child);
+                elements.push(this.parseParagraph(child, runs));
+                // Text boxes anchored in the paragraph follow it as their own blocks
+                for (const run of runs) {
+                    for (const textBox of this.findTextBoxes(run)) {
+                        elements.push(...this.parseBlocks(textBox));
+                    }
+                }
             } else if (localName === 'tbl') {
                 elements.push(this.parseTable(child));
             }
@@ -153,11 +192,76 @@ class DocxParser {
     }
 
     /**
+     * Collect the runs of a paragraph, including runs inside inline wrappers
+     * (hyperlinks, insertions, content controls, smart tags, fields, ...).
+     * Deleted and moved-away text is skipped.
+     * @param {Element} container - The paragraph or an inline wrapper
+     * @param {Array<Element>} [runs] - Accumulator
+     * @returns {Array<Element>} w:r elements in document order
+     */
+    paragraphRuns(container, runs = []) {
+        const skipped = ['pPr', 'rPr', 'sdtPr', 'sdtEndPr', 'customXmlPr', 'smartTagPr', 'del', 'moveFrom'];
+
+        for (const child of container.children) {
+            if (child.namespaceURI === MARKUP_COMPATIBILITY_NS) {
+                if (child.localName === 'AlternateContent') {
+                    const branch = this.alternateContentBranch(child);
+                    if (branch) this.paragraphRuns(branch, runs);
+                }
+            } else if (child.namespaceURI !== WORD_NS) {
+                // e.g. Office Math (m:oMath), which can hold w:r
+                this.paragraphRuns(child, runs);
+            } else if (child.localName === 'r') {
+                runs.push(child);
+            } else if (!skipped.includes(child.localName)) {
+                this.paragraphRuns(child, runs);
+            }
+        }
+
+        return runs;
+    }
+
+    /**
+     * Pick the one branch of mc:AlternateContent to read: the first mc:Choice,
+     * or mc:Fallback when there is no choice. Reading both would duplicate content.
+     * @param {Element} alternateContent - The mc:AlternateContent element
+     * @returns {Element|null} The branch to read
+     */
+    alternateContentBranch(alternateContent) {
+        return childElement(alternateContent, 'Choice', MARKUP_COMPATIBILITY_NS)
+            || childElement(alternateContent, 'Fallback', MARKUP_COMPATIBILITY_NS);
+    }
+
+    /**
+     * Find the text box contents (w:txbxContent) anchored in an element, once each.
+     * Only one branch of mc:AlternateContent is read, and text boxes nested in
+     * another text box are left for that text box's own parse.
+     * @param {Element} element - Element to search (usually a run)
+     * @param {Array<Element>} [found] - Accumulator
+     * @returns {Array<Element>} w:txbxContent elements in document order
+     */
+    findTextBoxes(element, found = []) {
+        for (const child of element.children) {
+            if (child.namespaceURI === WORD_NS && child.localName === 'txbxContent') {
+                found.push(child);
+            } else if (child.namespaceURI === MARKUP_COMPATIBILITY_NS && child.localName === 'AlternateContent') {
+                const branch = this.alternateContentBranch(child);
+                if (branch) this.findTextBoxes(branch, found);
+            } else {
+                this.findTextBoxes(child, found);
+            }
+        }
+
+        return found;
+    }
+
+    /**
      * Parse a paragraph element
      * @param {Element} para - The paragraph element
+     * @param {Array<Element>} [runs] - The paragraph's runs, if already collected
      * @returns {Object} Parsed paragraph
      */
-    parseParagraph(para) {
+    parseParagraph(para, runs = this.paragraphRuns(para)) {
         const paragraph = {
             type: 'paragraph',
             alignment: 'left',
@@ -166,17 +270,17 @@ class DocxParser {
         };
 
         // Get paragraph properties
-        const pPr = para.getElementsByTagNameNS(WORD_NS, 'pPr')[0];
+        const pPr = childElement(para, 'pPr');
         if (pPr) {
             // Alignment
-            const jc = pPr.getElementsByTagNameNS(WORD_NS, 'jc')[0];
+            const jc = childElement(pPr, 'jc');
             if (jc) {
                 const val = jc.getAttribute('w:val');
                 paragraph.alignment = this.mapAlignment(val);
             }
 
             // Indentation
-            const ind = pPr.getElementsByTagNameNS(WORD_NS, 'ind')[0];
+            const ind = childElement(pPr, 'ind');
             if (ind) {
                 paragraph.leftIndent = this.twipsToPoints(ind.getAttribute('w:left') || '0');
                 paragraph.rightIndent = this.twipsToPoints(ind.getAttribute('w:right') || '0');
@@ -184,10 +288,10 @@ class DocxParser {
             }
 
             // Numbering
-            const numPr = pPr.getElementsByTagNameNS(WORD_NS, 'numPr')[0];
+            const numPr = childElement(pPr, 'numPr');
             if (numPr) {
-                const ilvl = numPr.getElementsByTagNameNS(WORD_NS, 'ilvl')[0];
-                const numId = numPr.getElementsByTagNameNS(WORD_NS, 'numId')[0];
+                const ilvl = childElement(numPr, 'ilvl');
+                const numId = childElement(numPr, 'numId');
                 if (ilvl && numId) {
                     paragraph.numbering = {
                         level: parseInt(ilvl.getAttribute('w:val') || '0'),
@@ -198,7 +302,6 @@ class DocxParser {
         }
 
         // Get runs (text with formatting)
-        const runs = para.getElementsByTagNameNS(WORD_NS, 'r');
         for (const run of runs) {
             paragraph.runs.push(...this.parseRun(run));
         }
@@ -249,7 +352,8 @@ class DocxParser {
                 // w:drawing, or a drawing wrapped in mc:AlternateContent
                 const drawing = localName === 'drawing' ? child
                     : child.getElementsByTagNameNS(WORD_NS, 'drawing')[0];
-                if (drawing) {
+                // A text box shape is not an image; its content is parsed as blocks
+                if (drawing && !drawing.getElementsByTagNameNS(WORD_NS, 'txbxContent').length) {
                     items.push(this.parseDrawing(drawing));
                 }
             }
@@ -275,7 +379,7 @@ class DocxParser {
             fontSize: 12
         };
 
-        const rPr = run.getElementsByTagNameNS(WORD_NS, 'rPr')[0];
+        const rPr = childElement(run, 'rPr');
         if (rPr) {
             // Bold
             const b = rPr.getElementsByTagNameNS(WORD_NS, 'b')[0];
@@ -389,9 +493,9 @@ class DocxParser {
         };
 
         // Get table grid (column widths)
-        const tblGrid = tbl.getElementsByTagNameNS(WORD_NS, 'tblGrid')[0];
+        const tblGrid = childElement(tbl, 'tblGrid');
         if (tblGrid) {
-            const gridCols = tblGrid.getElementsByTagNameNS(WORD_NS, 'gridCol');
+            const gridCols = childElements(tblGrid, 'gridCol');
             for (const col of gridCols) {
                 const w = col.getAttribute('w:w');
                 table.columnWidths.push(this.twipsToPoints(w || '0'));
@@ -399,15 +503,15 @@ class DocxParser {
         }
 
         // Get table properties
-        const tblPr = tbl.getElementsByTagNameNS(WORD_NS, 'tblPr')[0];
+        const tblPr = childElement(tbl, 'tblPr');
         if (tblPr) {
-            const tblBorders = tblPr.getElementsByTagNameNS(WORD_NS, 'tblBorders')[0];
+            const tblBorders = childElement(tblPr, 'tblBorders');
             if (tblBorders) {
                 // Check if borders are set to none
                 const borders = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'];
                 let allNone = true;
                 for (const borderName of borders) {
-                    const border = tblBorders.getElementsByTagNameNS(WORD_NS, borderName)[0];
+                    const border = childElement(tblBorders, borderName);
                     if (border) {
                         const val = border.getAttribute('w:val');
                         if (val && val !== 'none' && val !== 'nil') {
@@ -422,10 +526,11 @@ class DocxParser {
             }
         }
 
-        // Get rows
-        const rows = tbl.getElementsByTagNameNS(WORD_NS, 'tr');
-        for (const row of rows) {
-            table.rows.push(this.parseTableRow(row));
+        // Get rows (only this table's own, not those of nested tables)
+        for (const row of this.contentChildren(tbl)) {
+            if (row.localName === 'tr') {
+                table.rows.push(this.parseTableRow(row));
+            }
         }
 
         return table;
@@ -442,9 +547,10 @@ class DocxParser {
             cells: []
         };
 
-        const cells = tr.getElementsByTagNameNS(WORD_NS, 'tc');
-        for (const cell of cells) {
-            row.cells.push(this.parseTableCell(cell));
+        for (const cell of this.contentChildren(tr)) {
+            if (cell.localName === 'tc') {
+                row.cells.push(this.parseTableCell(cell));
+            }
         }
 
         return row;
@@ -466,16 +572,16 @@ class DocxParser {
         };
 
         // Get cell properties
-        const tcPr = tc.getElementsByTagNameNS(WORD_NS, 'tcPr')[0];
+        const tcPr = childElement(tc, 'tcPr');
         if (tcPr) {
             // Grid span (colspan)
-            const gridSpan = tcPr.getElementsByTagNameNS(WORD_NS, 'gridSpan')[0];
+            const gridSpan = childElement(tcPr, 'gridSpan');
             if (gridSpan) {
                 cell.colspan = parseInt(gridSpan.getAttribute('w:val') || '1');
             }
 
             // Vertical merge
-            const vMerge = tcPr.getElementsByTagNameNS(WORD_NS, 'vMerge')[0];
+            const vMerge = childElement(tcPr, 'vMerge');
             if (vMerge) {
                 const val = vMerge.getAttribute('w:val');
                 if (!val || val === 'continue') {
@@ -486,13 +592,13 @@ class DocxParser {
             }
 
             // Vertical alignment
-            const vAlign = tcPr.getElementsByTagNameNS(WORD_NS, 'vAlign')[0];
+            const vAlign = childElement(tcPr, 'vAlign');
             if (vAlign) {
                 cell.vAlign = vAlign.getAttribute('w:val') || 'top';
             }
 
             // Background color
-            const shd = tcPr.getElementsByTagNameNS(WORD_NS, 'shd')[0];
+            const shd = childElement(tcPr, 'shd');
             if (shd) {
                 const fill = shd.getAttribute('w:fill');
                 if (fill && fill !== 'auto') {
@@ -501,13 +607,35 @@ class DocxParser {
             }
         }
 
-        // Get paragraphs in cell
-        const paragraphs = tc.getElementsByTagNameNS(WORD_NS, 'p');
-        for (const para of paragraphs) {
-            cell.paragraphs.push(this.parseParagraph(para));
-        }
+        // Get paragraphs in cell. Nested tables can't be represented yet, so
+        // their paragraphs are flattened into this cell in reading order.
+        cell.paragraphs = this.flattenToParagraphs(this.parseBlocks(tc));
 
         return cell;
+    }
+
+    /**
+     * Flatten parsed blocks to paragraphs, reading tables row by row, cell by cell
+     * @param {Array<Object>} blocks - Parsed paragraphs and tables
+     * @returns {Array<Object>} Paragraphs in reading order
+     */
+    flattenToParagraphs(blocks) {
+        const paragraphs = [];
+
+        for (const block of blocks) {
+            if (block.type === 'paragraph') {
+                paragraphs.push(block);
+            } else if (block.type === 'table') {
+                for (const row of block.rows) {
+                    for (const cell of row.cells) {
+                        // Cell paragraphs are already flattened
+                        paragraphs.push(...cell.paragraphs);
+                    }
+                }
+            }
+        }
+
+        return paragraphs;
     }
 
     /**

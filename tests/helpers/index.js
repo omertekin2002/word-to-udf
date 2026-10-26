@@ -30,7 +30,13 @@ function loadConverter() {
 
 const NAMESPACES = [
     'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"',
-    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"',
+    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"',
+    'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"',
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"',
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"',
+    'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"',
+    'xmlns:v="urn:schemas-microsoft-com:vml"'
 ].join(' ');
 
 /**
@@ -38,6 +44,8 @@ const NAMESPACES = [
  * @param {string} bodyXml - Contents of <w:body>
  * @param {Object} [options]
  * @param {Object<string,string>} [options.footnotes] - Footnote id -> inner XML (paragraphs)
+ * @param {Object<string,Buffer>} [options.media] - File name under word/media/ -> bytes. Each gets
+ *   a document relationship with id `rId_<name without extension>`, e.g. image1.png -> rId_image1
  * @returns {Promise<Buffer>}
  */
 async function buildDocx(bodyXml, options = {}) {
@@ -66,6 +74,18 @@ async function buildDocx(bodyXml, options = {}) {
             '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>' +
             '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>' +
             `${notes}</w:footnotes>`);
+    }
+
+    if (options.media) {
+        const rels = Object.entries(options.media).map(([name, data]) => {
+            zip.file(`word/media/${name}`, data);
+            return `<Relationship Id="rId_${name.replace(/\.[^.]*$/, '')}" ` +
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" ' +
+                `Target="media/${name}"/>`;
+        }).join('');
+        zip.file('word/_rels/document.xml.rels',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+            `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels}</Relationships>`);
     }
 
     return zip.generateAsync({ type: 'nodebuffer' });
