@@ -164,7 +164,7 @@ const drawing = '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>
     '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
 
 test('block-level alternate content is read once, in the body and in table cells', async () => {
-    const alternate = text => '<mc:AlternateContent>' +
+    const alternate = text => '<mc:AlternateContent xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">' +
         `<mc:Choice Requires="w14">${p(r(text))}</mc:Choice>` +
         `<mc:Fallback>${p(r(text))}</mc:Fallback></mc:AlternateContent>`;
     const { doc, content } = await convertBody(alternate('BodyAlt') + tbl([[alternate('CellAlt')]]));
@@ -172,6 +172,24 @@ test('block-level alternate content is read once, in the body and in table cells
     assert.equal(occurrences(content, 'BodyAlt'), 1, JSON.stringify(content));
     assert.equal(paragraphTexts(doc, content)[0], 'BodyAlt');
     assert.deepEqual(cellTexts(doc, content), ['CellAlt']);
+});
+
+test('the first supported alternate-content choice is read, else the fallback', async () => {
+    const math = '<mc:AlternateContent xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">' +
+        '<mc:Choice Requires="m"><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></mc:Choice>' +
+        `<mc:Fallback>${r('MathFallback')}</mc:Fallback></mc:AlternateContent>`;
+    const chart = '<mc:AlternateContent xmlns:cx1="http://schemas.microsoft.com/office/drawing/2015/9/8/chartex">' +
+        `<mc:Choice Requires="cx1">${r('ChartChoice')}</mc:Choice>` +
+        `<mc:Choice Requires="wps">${r('ShapeChoice')}</mc:Choice>` +
+        `<mc:Fallback>${r('ChartFallback')}</mc:Fallback></mc:AlternateContent>`;
+    const { content } = await convertBody(p(math) + p(chart));
+    assert.equal(content, 'MathFallbackShapeChoice');
+});
+
+test('a text box reads the DrawingML choice, not the VML fallback', async () => {
+    const box = textBox(p(r('Same'))).replace(/Same(?![\s\S]*Same)/, 'Fallback').replace('Same', 'Choice');
+    const { content } = await convertBody(p(r('Anchor') + box));
+    assert.equal(content, 'AnchorChoice');
 });
 
 test('a picture grouped with a text box still embeds, and the text box picture embeds once', async () => {

@@ -3,6 +3,19 @@
  * Parses Word .docx files and extracts content with formatting
  */
 
+// Namespaces an mc:Choice may require and still be read: text lives in w:p / w:r,
+// text boxes in w:txbxContent and pictures in DrawingML
+const SUPPORTED_CHOICE_NAMESPACES = [
+    WORD_NS,
+    DRAWING_NS,
+    PICTURE_NS,
+    WORDML_DRAWING_NS,
+    'http://schemas.microsoft.com/office/word/2010/wordml',
+    'http://schemas.microsoft.com/office/word/2010/wordprocessingShape',
+    'http://schemas.microsoft.com/office/word/2010/wordprocessingGroup',
+    'http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing'
+];
+
 class DocxParser {
     constructor() {
         this.zip = null;
@@ -227,14 +240,20 @@ class DocxParser {
     }
 
     /**
-     * Pick the one branch of mc:AlternateContent to read: the first mc:Choice,
-     * or mc:Fallback when there is no choice. Reading both would duplicate content.
+     * Pick the one branch of mc:AlternateContent to read: the first mc:Choice whose
+     * required namespaces this parser understands, else mc:Fallback. Reading both
+     * would duplicate content.
      * @param {Element} alternateContent - The mc:AlternateContent element
      * @returns {Element|null} The branch to read
      */
     alternateContentBranch(alternateContent) {
-        return childElement(alternateContent, 'Choice', MARKUP_COMPATIBILITY_NS)
-            || childElement(alternateContent, 'Fallback', MARKUP_COMPATIBILITY_NS);
+        const choices = childElements(alternateContent, 'Choice', MARKUP_COMPATIBILITY_NS);
+        const supported = choices.find(choice =>
+            (choice.getAttribute('Requires') || '').split(/\s+/).filter(Boolean)
+                .every(prefix => SUPPORTED_CHOICE_NAMESPACES.includes(choice.lookupNamespaceURI(prefix))));
+
+        // With no usable choice and no fallback, a choice is still better than nothing
+        return supported || childElement(alternateContent, 'Fallback', MARKUP_COMPATIBILITY_NS) || choices[0] || null;
     }
 
     /**
