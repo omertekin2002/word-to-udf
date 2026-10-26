@@ -200,10 +200,7 @@ class DocxParser {
         // Get runs (text with formatting)
         const runs = para.getElementsByTagNameNS(WORD_NS, 'r');
         for (const run of runs) {
-            const parsedRun = this.parseRun(run);
-            if (parsedRun) {
-                paragraph.runs.push(parsedRun);
-            }
+            paragraph.runs.push(...this.parseRun(run));
         }
 
         return paragraph;
@@ -212,58 +209,64 @@ class DocxParser {
     /**
      * Parse a run element (text with formatting)
      * @param {Element} run - The run element
-     * @returns {Object|null} Parsed run
+     * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image, footnoteRef)
      */
     parseRun(run) {
-        // Check for images first
-        const drawings = run.getElementsByTagNameNS(WORD_NS, 'drawing');
-        if (drawings.length > 0) {
-            return this.parseDrawing(drawings[0]);
-        }
+        const items = [];
+        let formatting = null;
 
-        // Get text content
-        const textElements = run.getElementsByTagNameNS(WORD_NS, 't');
-        let text = '';
-        for (const t of textElements) {
-            text += t.textContent || '';
-        }
+        for (const child of run.children) {
+            const localName = child.localName;
 
-        // Check for footnote reference
-        const footnoteRefs = run.getElementsByTagNameNS(WORD_NS, 'footnoteReference');
-        if (footnoteRefs.length > 0) {
-            const footnoteId = footnoteRefs[0].getAttribute('w:id');
-            // Use 'in' to check key presence - empty string is still valid
-            if (footnoteId && footnoteId in this.footnotes) {
-                return {
-                    type: 'footnoteRef',
-                    id: footnoteId,
-                    content: this.footnotes[footnoteId] || '[Empty footnote]'
-                };
+            if (localName === 't') {
+                const text = child.textContent || '';
+                if (!text) continue;
+                const last = items[items.length - 1];
+                if (last && last.type === 'text') {
+                    last.text += text;
+                } else {
+                    if (!formatting) formatting = this.parseRunFormatting(run);
+                    items.push({ ...formatting, text: text });
+                }
+            } else if (localName === 'tab') {
+                items.push({ type: 'tab' });
+            } else if (localName === 'br') {
+                const breakType = child.getAttribute('w:type');
+                items.push({ type: breakType === 'page' ? 'pageBreak' : 'break' });
+            } else if (localName === 'cr') {
+                items.push({ type: 'break' });
+            } else if (localName === 'footnoteReference') {
+                const footnoteId = child.getAttribute('w:id');
+                // Use 'in' to check key presence - empty string is still valid
+                if (footnoteId && footnoteId in this.footnotes) {
+                    items.push({
+                        type: 'footnoteRef',
+                        id: footnoteId,
+                        content: this.footnotes[footnoteId] || '[Empty footnote]'
+                    });
+                }
+            } else if (localName !== 'rPr') {
+                // w:drawing, or a drawing wrapped in mc:AlternateContent
+                const drawing = localName === 'drawing' ? child
+                    : child.getElementsByTagNameNS(WORD_NS, 'drawing')[0];
+                if (drawing) {
+                    items.push(this.parseDrawing(drawing));
+                }
             }
         }
 
-        // Check for tab
-        const tabs = run.getElementsByTagNameNS(WORD_NS, 'tab');
-        if (tabs.length > 0) {
-            return { type: 'tab' };
-        }
+        return items;
+    }
 
-        // Check for break
-        const breaks = run.getElementsByTagNameNS(WORD_NS, 'br');
-        if (breaks.length > 0) {
-            const breakType = breaks[0].getAttribute('w:type');
-            if (breakType === 'page') {
-                return { type: 'pageBreak' };
-            }
-            return { type: 'break' };
-        }
-
-        if (!text) return null;
-
+    /**
+     * Parse a run's character formatting
+     * @param {Element} run - The run element
+     * @returns {Object} Text item template (without text)
+     */
+    parseRunFormatting(run) {
         // Get run properties
         const formatting = {
             type: 'text',
-            text: text,
             bold: false,
             italic: false,
             underline: false,
