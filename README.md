@@ -45,6 +45,8 @@ bun run test
 
 The site itself still has no build step; `package.json` exists only for the tests.
 
+`tests/petitions.test.js` converts whole synthetic petitions built in `tests/fixtures/petitions.js`. Known conversion gaps show up as `todo` tests: they are listed in the output but don't fail the run. The fixtures use invented placeholder content only (`Ad Soyad`, `00000000000`, `2026/0000`); never add real names, ID numbers, case numbers or addresses to them.
+
 ## Technical Details
 
 ### UDF Format

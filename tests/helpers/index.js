@@ -39,54 +39,87 @@ const NAMESPACES = [
     'xmlns:v="urn:schemas-microsoft-com:vml"'
 ].join(' ');
 
+const RELATIONSHIP_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/';
+const WORDML_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.';
+const MEDIA_CONTENT_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif' };
+
 /**
- * Build a minimal .docx in memory.
+ * Build a minimal .docx in memory. Optional parts get the content-type override and
+ * document relationship a Word-saved file gives them.
  * @param {string} bodyXml - Contents of <w:body>
  * @param {Object} [options]
  * @param {Object<string,string>} [options.footnotes] - Footnote id -> inner XML (paragraphs)
  * @param {Object<string,Buffer>} [options.media] - File name under word/media/ -> bytes. Each gets
  *   a document relationship with id `rId_<name without extension>`, e.g. image1.png -> rId_image1
+ * @param {string} [options.styles] - Contents of <w:styles> in word/styles.xml
+ * @param {string} [options.numbering] - Contents of <w:numbering> in word/numbering.xml
+ * @param {string} [options.sectPr] - Contents of the body's final <w:sectPr>
  * @returns {Promise<Buffer>}
  */
 async function buildDocx(bodyXml, options = {}) {
+    const parts = [];
+    const defaults = [];
+    const overrides = [];
+    const rels = [];
+    const wordPart = (name, rootTag, inner) => {
+        parts.push([`word/${name}`,
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:${rootTag} ${NAMESPACES}>${inner}</w:${rootTag}>`]);
+        overrides.push(`<Override PartName="/word/${name}" ContentType="${WORDML_CONTENT_TYPE}${rootTag}+xml"/>`);
+        rels.push(`<Relationship Id="rId_${rootTag}" Type="${RELATIONSHIP_TYPE}${rootTag}" Target="${name}"/>`);
+    };
+
+    const sectPr = options.sectPr === undefined ? '' : `<w:sectPr>${options.sectPr}</w:sectPr>`;
+    parts.push(['word/document.xml',
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NAMESPACES}><w:body>${bodyXml}${sectPr}</w:body></w:document>`]);
+
+    if (options.styles !== undefined) wordPart('styles.xml', 'styles', options.styles);
+    if (options.numbering !== undefined) wordPart('numbering.xml', 'numbering', options.numbering);
+
+    if (options.footnotes) {
+        const notes = Object.entries(options.footnotes)
+            .map(([id, inner]) => `<w:footnote w:id="${id}">${inner}</w:footnote>`)
+            .join('');
+        wordPart('footnotes.xml', 'footnotes',
+            '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>' +
+            '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>' +
+            notes);
+    }
+
+    if (options.media) {
+        for (const [name, data] of Object.entries(options.media)) {
+            parts.push([`word/media/${name}`, data]);
+            rels.push(`<Relationship Id="rId_${name.replace(/\.[^.]*$/, '')}" ` +
+                `Type="${RELATIONSHIP_TYPE}image" Target="media/${name}"/>`);
+            const extension = name.split('.').pop().toLowerCase();
+            const entry = `<Default Extension="${extension}" ` +
+                `ContentType="${MEDIA_CONTENT_TYPES[extension] || 'application/octet-stream'}"/>`;
+            if (!defaults.includes(entry)) defaults.push(entry);
+        }
+    }
+
+    if (rels.length > 0) {
+        parts.push(['word/_rels/document.xml.rels',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+            `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join('')}</Relationships>`]);
+    }
+
+    // Package parts first, the way Word orders the archive
     const zip = new JSZip();
     zip.file('[Content_Types].xml',
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
         '<Default Extension="xml" ContentType="application/xml"/>' +
-        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+        defaults.join('') +
+        `<Override PartName="/word/document.xml" ContentType="${WORDML_CONTENT_TYPE}document.main+xml"/>` +
+        overrides.join('') +
         '</Types>');
     zip.file('_rels/.rels',
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+        `<Relationship Id="rId1" Type="${RELATIONSHIP_TYPE}officeDocument" Target="word/document.xml"/>` +
         '</Relationships>');
-    zip.file('word/document.xml',
-        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NAMESPACES}><w:body>${bodyXml}</w:body></w:document>`);
-
-    if (options.footnotes) {
-        const notes = Object.entries(options.footnotes)
-            .map(([id, inner]) => `<w:footnote w:id="${id}">${inner}</w:footnote>`)
-            .join('');
-        zip.file('word/footnotes.xml',
-            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:footnotes ${NAMESPACES}>` +
-            '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>' +
-            '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>' +
-            `${notes}</w:footnotes>`);
-    }
-
-    if (options.media) {
-        const rels = Object.entries(options.media).map(([name, data]) => {
-            zip.file(`word/media/${name}`, data);
-            return `<Relationship Id="rId_${name.replace(/\.[^.]*$/, '')}" ` +
-                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" ' +
-                `Target="media/${name}"/>`;
-        }).join('');
-        zip.file('word/_rels/document.xml.rels',
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
-            `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels}</Relationships>`);
-    }
+    for (const [name, data] of parts) zip.file(name, data);
 
     return zip.generateAsync({ type: 'nodebuffer' });
 }
