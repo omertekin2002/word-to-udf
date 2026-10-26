@@ -163,6 +163,34 @@ const drawing = '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>
     '<pic:pic><pic:blipFill><a:blip r:embed="rId_image1"/></pic:blipFill></pic:pic>' +
     '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
 
+test('block-level alternate content is read once, in the body and in table cells', async () => {
+    const alternate = text => '<mc:AlternateContent>' +
+        `<mc:Choice Requires="w14">${p(r(text))}</mc:Choice>` +
+        `<mc:Fallback>${p(r(text))}</mc:Fallback></mc:AlternateContent>`;
+    const { doc, content } = await convertBody(alternate('BodyAlt') + tbl([[alternate('CellAlt')]]));
+
+    assert.equal(occurrences(content, 'BodyAlt'), 1, JSON.stringify(content));
+    assert.equal(paragraphTexts(doc, content)[0], 'BodyAlt');
+    assert.deepEqual(cellTexts(doc, content), ['CellAlt']);
+});
+
+test('a picture grouped with a text box still embeds, and the text box picture embeds once', async () => {
+    const sibling = Buffer.from('sibling');
+    const boxed = Buffer.from('boxed');
+    const boxedDrawing = drawing.replace('rId_image1', 'rId_image2');
+    const group = '<w:r><w:drawing><wp:anchor><wp:extent cx="914400" cy="457200"/>' +
+        '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">' +
+        '<wpg:wgp xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">' +
+        `<wps:wsp><wps:txbx><w:txbxContent>${p(boxedDrawing)}</w:txbxContent></wps:txbx></wps:wsp>` +
+        '<pic:pic><pic:blipFill><a:blip r:embed="rId_image1"/></pic:blipFill></pic:pic>' +
+        '</wpg:wgp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+    const { doc } = await convertBody(p(r('Anchor') + group),
+        { media: { 'image1.png': sibling, 'image2.png': boxed } });
+
+    const images = [...doc.querySelectorAll('elements image')].map(img => img.getAttribute('imageData'));
+    assert.deepEqual(images, [sibling.toString('base64'), boxed.toString('base64')]);
+});
+
 test('a picture inside a text box embeds once', async () => {
     const { doc } = await convertBody(p(r('Anchor') + textBox(p(drawing))), { media: { 'image1.png': png } });
     assert.equal(doc.querySelectorAll('elements image').length, 1);

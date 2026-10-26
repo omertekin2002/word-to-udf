@@ -142,15 +142,20 @@ class DocxParser {
 
     /**
      * Children of a body, cell, row or table, looking through block-level
-     * content controls (w:sdt) and custom XML wrappers
+     * content controls (w:sdt), custom XML wrappers and one branch of mc:AlternateContent
      * @param {Element} container - The containing element
      * @returns {Array<Element>} Word ML children in document order
      */
     contentChildren(container) {
         const children = [];
 
-        for (const child of childElements(container)) {
-            if (child.localName === 'customXml') {
+        for (const child of container.children) {
+            if (child.namespaceURI === MARKUP_COMPATIBILITY_NS && child.localName === 'AlternateContent') {
+                const branch = this.alternateContentBranch(child);
+                if (branch) children.push(...this.contentChildren(branch));
+            } else if (child.namespaceURI !== WORD_NS) {
+                continue;
+            } else if (child.localName === 'customXml') {
                 children.push(...this.contentChildren(child));
             } else if (child.localName === 'sdt') {
                 const sdtContent = childElement(child, 'sdtContent');
@@ -352,8 +357,7 @@ class DocxParser {
                 // w:drawing, or a drawing wrapped in mc:AlternateContent
                 const drawing = localName === 'drawing' ? child
                     : child.getElementsByTagNameNS(WORD_NS, 'drawing')[0];
-                // A text box shape is not an image; its content is parsed as blocks
-                if (drawing && !drawing.getElementsByTagNameNS(WORD_NS, 'txbxContent').length) {
+                if (drawing) {
                     items.push(this.parseDrawing(drawing));
                 }
             }
@@ -463,8 +467,10 @@ class DocxParser {
             image.height = Math.round(cy / 914400 * 72);
         }
 
-        // Get embedded image reference
-        const blips = drawing.getElementsByTagNameNS(DRAWING_NS, 'blip');
+        // Get embedded image reference. Pictures inside a text box belong to the
+        // text box's own paragraphs, which are parsed separately.
+        const blips = Array.from(drawing.getElementsByTagNameNS(DRAWING_NS, 'blip'))
+            .filter(blip => !this.isInTextBox(blip, drawing));
         if (blips.length > 0) {
             const embed = blips[0].getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'embed');
             if (embed && this.relationships[embed]) {
@@ -477,6 +483,19 @@ class DocxParser {
         }
 
         return image;
+    }
+
+    /**
+     * Whether an element sits inside a text box (w:txbxContent) below an ancestor
+     * @param {Element} element - The element to check
+     * @param {Element} ancestor - Where to stop looking
+     * @returns {boolean}
+     */
+    isInTextBox(element, ancestor) {
+        for (let el = element.parentElement; el && el !== ancestor; el = el.parentElement) {
+            if (el.namespaceURI === WORD_NS && el.localName === 'txbxContent') return true;
+        }
+        return false;
     }
 
     /**
