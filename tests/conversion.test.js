@@ -37,7 +37,8 @@ test('a line break between two texts in one run keeps both, in order', async () 
     const { doc, content } = await convertBody(p('<w:r><w:t>A</w:t><w:br/><w:t>B</w:t></w:r>'));
 
     assert.equal(content, 'A\nB');
-    assert.deepEqual(contentElements(doc).map(el => textOf(el, content)), ['A', 'B']);
+    // The newline is referenced too, so the element tree keeps the break
+    assert.deepEqual(contentElements(doc).map(el => textOf(el, content)), ['A', '\n', 'B']);
 });
 
 test('w:cr is treated as a line break', async () => {
@@ -49,7 +50,7 @@ test('run formatting applies to every text piece in the run', async () => {
     const { doc, content } = await convertBody(
         p('<w:r><w:rPr><w:b/></w:rPr><w:tab/><w:t>Bold</w:t><w:br/><w:t>Also bold</w:t></w:r>'));
 
-    const els = contentElements(doc);
+    const els = contentElements(doc).filter(el => textOf(el, content) !== '\n');
     assert.deepEqual(els.map(el => textOf(el, content)), ['Bold', 'Also bold']);
     for (const el of els) assert.equal(el.getAttribute('bold'), 'true');
 });
@@ -87,6 +88,18 @@ test('a list paragraph split by a page break stays one list item', async () => {
     assert.equal(after.getAttribute('LeftIndent'), '36.0');
 });
 
+test('a list paragraph that starts with a page break keeps its numbering', async () => {
+    const { doc } = await convertBody(p(
+        '<w:r><w:br w:type="page"/><w:t>Y</w:t></w:r>',
+        '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:ind w:left="720" w:firstLine="360"/></w:pPr>'));
+
+    const order = [...doc.querySelector('elements').children].map(el => el.localName);
+    assert.deepEqual(order, ['page-break', 'paragraph']);
+    const para = doc.querySelector('elements paragraph');
+    assert.equal(para.getAttribute('Numbered'), 'true');
+    assert.equal(para.getAttribute('FirstLineIndent'), '18.0');
+});
+
 test('a paragraph holding only a page break emits just the page break', async () => {
     const { doc } = await convertBody(
         p('<w:r><w:t>One</w:t></w:r>') + p('<w:r><w:br w:type="page"/></w:r>') + p('<w:r><w:t>Two</w:t></w:r>'));
@@ -107,7 +120,7 @@ test('a line break inside a table cell is preserved in the cell content', async 
 
     assert.ok(content.includes('Line one\nLine two'), JSON.stringify(content));
     const cell = doc.querySelector('elements cell');
-    assert.deepEqual(contentElements(doc, cell).map(el => textOf(el, content)), ['Line one', 'Line two']);
+    assert.deepEqual(contentElements(doc, cell).map(el => textOf(el, content)), ['Line one', '\n', 'Line two']);
 });
 
 test('a page break inside a table cell becomes a line break', async () => {
@@ -118,6 +131,8 @@ test('a page break inside a table cell becomes a line break', async () => {
 
     assert.ok(content.includes('Top\nBottom'), JSON.stringify(content));
     assert.equal(doc.querySelector('elements page-break'), null);
+    const cell = doc.querySelector('elements cell');
+    assert.deepEqual(contentElements(doc, cell).map(el => textOf(el, content)), ['Top', '\n', 'Bottom']);
 });
 
 test('regression: plain text with bold and italic runs', async () => {
