@@ -62,9 +62,9 @@ The format uses an offset-based content model where all text is stored in a CDAT
 
 ## Limitations
 
-- Complex nested tables may not render perfectly
+- Nested tables are flattened: their text goes into the containing cell, in reading order
 - Embedded OLE objects are not supported
-- Track changes / comments are not preserved
+- Track changes / comments are not preserved (inserted text is kept, deleted text is dropped)
 - Headers/footers not yet implemented
 
 ## License
