@@ -63,6 +63,8 @@ class UdfGenerator {
         const paraContent = [];
         const paraElements = [];
         let paraOffset = this.currentOffset;
+        let afterPageBreak = false;
+        let paraProps = paragraph;
 
         // Process runs
         for (const run of paragraph.runs) {
@@ -83,13 +85,16 @@ class UdfGenerator {
                     this.currentOffset += 1;
                 }
             } else if (run.type === 'break') {
+                // Reference the newline so the element tree keeps the break
+                paraElements.push(`<content startOffset="${this.currentOffset}" length="1" family="Times New Roman" size="12" />`);
                 paraContent.push('\n');
                 this.currentOffset += 1;
             } else if (run.type === 'pageBreak') {
                 // Handle page break - first flush any pending footnotes
                 this.content += paraContent.join('');
-                if (paraElements.length > 0) {
-                    this.elements.push(this.buildParagraphElement(paragraph, paraElements));
+                const emittedFragment = paraElements.length > 0;
+                if (emittedFragment) {
+                    this.elements.push(this.buildParagraphElement(paraProps, paraElements));
                 }
 
                 // Insert footnotes for this page before the page break
@@ -99,7 +104,16 @@ class UdfGenerator {
                 }
 
                 this.elements.push('<page-break />');
-                return;
+
+                // Runs after the break continue in a new paragraph on the next page.
+                // It is the same Word paragraph, so it must not start another list
+                // item or repeat the first-line indent.
+                paraContent.length = 0;
+                paraElements.length = 0;
+                afterPageBreak = true;
+                if (emittedFragment) {
+                    paraProps = { ...paragraph, numbering: null, firstLineIndent: 0 };
+                }
             } else if (run.type === 'footnoteRef') {
                 // Handle footnote reference - insert superscript number only
                 // Use counter for display number (w:id can be non-contiguous)
@@ -120,15 +134,16 @@ class UdfGenerator {
             }
         }
 
-        // If paragraph is empty, add placeholder
+        // If paragraph is empty, add placeholder (unless it only held a page break)
         if (paraContent.length === 0) {
+            if (afterPageBreak) return;
             paraContent.push('\u200B'); // Zero-width space
             paraElements.push(`<content startOffset="${this.currentOffset}" length="1" family="Times New Roman" size="12" />`);
             this.currentOffset += 1;
         }
 
         this.content += paraContent.join('');
-        this.elements.push(this.buildParagraphElement(paragraph, paraElements));
+        this.elements.push(this.buildParagraphElement(paraProps, paraElements));
     }
 
     /**
@@ -322,6 +337,11 @@ class UdfGenerator {
                 } else if (run.type === 'tab') {
                     paraElements.push(`<tab startOffset="${this.currentOffset}" length="1" />`);
                     this.content += '\t';
+                    this.currentOffset += 1;
+                } else if (run.type === 'break' || run.type === 'pageBreak') {
+                    // A page break can't split a cell, so treat it as a line break
+                    paraElements.push(`<content startOffset="${this.currentOffset}" length="1" family="Times New Roman" size="12" />`);
+                    this.content += '\n';
                     this.currentOffset += 1;
                 } else if (run.type === 'image' && run.data) {
                     paraElements.push(`<image startOffset="${this.currentOffset}" length="1" imageData="${run.data}" width="${run.width}" height="${run.height}" />`);
