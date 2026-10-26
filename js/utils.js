@@ -109,9 +109,34 @@ function getXmlText(element, tagName, namespace) {
   return el ? el.textContent : null;
 }
 
+/**
+ * Direct child elements of an element, optionally filtered by namespace and local name.
+ * Unlike getElementsByTagNameNS, this never matches deeper descendants.
+ * @param {Element} element - The parent element
+ * @param {string} [localName] - Local name to match (any if omitted)
+ * @param {string} [namespace] - XML namespace (defaults to Word ML)
+ * @returns {Array<Element>} Matching children in document order
+ */
+function childElements(element, localName, namespace = WORD_NS) {
+  return Array.from(element.children).filter(child =>
+    child.namespaceURI === namespace && (!localName || child.localName === localName));
+}
+
+/**
+ * First direct child element with the given local name
+ * @param {Element} element - The parent element
+ * @param {string} localName - Local name to match
+ * @param {string} [namespace] - XML namespace (defaults to Word ML)
+ * @returns {Element|null} The child or null
+ */
+function childElement(element, localName, namespace = WORD_NS) {
+  return childElements(element, localName, namespace)[0] || null;
+}
+
 // Word ML namespace
 const WORD_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const DRAWING_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main';
 const RELATIONSHIPS_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const PICTURE_NS = 'http://schemas.openxmlformats.org/drawingml/2006/picture';
 const WORDML_DRAWING_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing';
+const MARKUP_COMPATIBILITY_NS = 'http://schemas.openxmlformats.org/markup-compatibility/2006';

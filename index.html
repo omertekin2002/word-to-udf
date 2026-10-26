@@ -1,12 +1,12 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="tr">
 
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description"
-    content="Convert Word documents (.docx) to UYAP UDF format online. Free, fast, and secure - your files never leave your browser.">
-  <title>Word to UDF Converter | UYAP Document Converter</title>
+  <meta name="description" data-i18n-attr="content:meta.description"
+    content="Word belgelerini (.docx) çevrimiçi olarak UYAP UDF biçimine dönüştürün. Ücretsiz, hızlı ve güvenli: dosyalarınız tarayıcınızdan hiç çıkmaz.">
+  <title>Word’den UDF’ye Dönüştürücü | UYAP Belge Dönüştürücü</title>
   <link rel="icon" href="favicon.ico?v=1" sizes="any">
   <link rel="icon" type="image/svg+xml" href="favicon.svg?v=1">
   <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=1">
@@ -31,11 +31,16 @@
     <header class="top-banner">
       <div class="banner-id">
         <a href="#top" class="wordmark">WORD TO UDF</a>
-        <p class="tagline">CONVERT .DOCX TO UYAP UDF. ONLINE.</p>
+        <p class="tagline" data-i18n="banner.tagline">.DOCX’TEN UYAP UDF’YE. ÇEVRİMİÇİ.</p>
       </div>
       <div class="banner-right">
         <a href="https://omertekin2002.github.io/" class="sticker-tab">BY <span class="stripe">ömer</span> TEKIN</a>
-        <p class="phone-callout">.DOCX &rarr; .UDF</p>
+        <p class="phone-callout">.DOCX &rarr; .UDF
+          <span class="lang-toggle" role="group" aria-label="Dil" data-i18n-attr="aria-label:lang.label">
+            <button type="button" class="lang-btn" data-set-lang="tr" lang="tr" aria-label="Türkçe" aria-pressed="true">TR</button>
+            <button type="button" class="lang-btn" data-set-lang="en" lang="en" aria-label="English" aria-pressed="false">EN</button>
+          </span>
+        </p>
       </div>
     </header>
 
@@ -43,9 +48,9 @@
 
       <!-- LEFT RAIL -->
       <aside class="rail">
-        <nav class="icon-grid" aria-label="Quick links">
+        <nav class="icon-grid" aria-label="Hızlı bağlantılar" data-i18n-attr="aria-label:nav.quickLinks">
           <a href="https://github.com/omertekin2002/word-to-udf" target="_blank" rel="noopener noreferrer">
-            <svg aria-hidden="true" class="gh"><use href="#i-github"/></svg><span>SOURCE</span>
+            <svg aria-hidden="true" class="gh"><use href="#i-github"/></svg><span data-i18n="nav.source">KAYNAK</span>
           </a>
           <a href="https://www.linkedin.com/in/ömer-tekin" target="_blank" rel="noopener noreferrer">
             <svg aria-hidden="true"><use href="#i-in"/></svg><span>LINKEDIN</span>
@@ -53,26 +58,26 @@
         </nav>
 
         <div class="cta-red">
-          <p><b>Your files never leave your browser.</b> The whole conversion runs on your own computer &mdash;
-            nothing is uploaded to a server.</p>
+          <p><b data-i18n="privacy.lead">Dosyalarınız tarayıcınızdan hiç çıkmaz.</b>
+            <span data-i18n="privacy.body">Dönüştürme tamamen kendi bilgisayarınızda yapılır; hiçbir şey bir sunucuya yüklenmez.</span></p>
         </div>
 
         <div class="rail-box">
-          <h3 class="rail-title tint-lime">CONVERTS</h3>
+          <h3 class="rail-title tint-lime" data-i18n="converts.title">DÖNÜŞTÜRÜLENLER</h3>
           <ul class="spec-list">
-            <li>Bold, italic, fonts</li>
-            <li>Alignment</li>
-            <li>Tables &amp; borders</li>
-            <li>Images</li>
+            <li data-i18n="converts.formatting">Kalın, italik, yazı tipleri</li>
+            <li data-i18n="converts.alignment">Hizalama</li>
+            <li data-i18n="converts.tables">Tablolar ve kenarlıklar</li>
+            <li data-i18n="converts.images">Görseller</li>
           </ul>
         </div>
 
         <div class="rail-box">
-          <h3 class="rail-title tint-salmon">NOT YET</h3>
+          <h3 class="rail-title tint-salmon" data-i18n="notYet.title">HENÜZ YOK</h3>
           <ul class="spec-list">
-            <li>Headers &amp; footers</li>
-            <li>Track changes, comments</li>
-            <li>Embedded OLE objects</li>
+            <li data-i18n="notYet.headers">Üst ve alt bilgiler</li>
+            <li data-i18n="notYet.trackChanges">Değişiklik izleme, açıklamalar</li>
+            <li data-i18n="notYet.ole">Gömülü OLE nesneleri</li>
           </ul>
         </div>
       </aside>
@@ -81,18 +86,18 @@
       <main class="stack">
 
         <section id="convert">
-          <h2 class="eyebrow tint-olive">CONVERT</h2>
+          <h2 class="eyebrow tint-olive" data-i18n="convert.heading">DÖNÜŞTÜR</h2>
 
           <article class="ribbon tool" id="uploadCard">
-            <h3 class="ribbon-title">SELECT A WORD DOCUMENT</h3>
+            <h3 class="ribbon-title" data-i18n="upload.title">BİR WORD BELGESİ SEÇİN</h3>
             <div class="tool-body tint-sky">
 
               <div class="upload-zone" id="uploadZone">
-                <input type="file" id="fileInput" accept=".docx" class="file-input" aria-label="Upload Word document">
+                <input type="file" id="fileInput" accept=".docx" class="file-input" aria-label="Word belgesi yükleyin" data-i18n-attr="aria-label:upload.inputLabel">
                 <div class="upload-content">
                   <svg class="upload-icon" aria-hidden="true"><use href="#i-docx"/></svg>
-                  <p class="upload-text">Drag and drop your <strong>.docx</strong> file here</p>
-                  <p class="upload-subtext">or <u>click to browse</u></p>
+                  <p class="upload-text" data-i18n-html="upload.text"><strong>.docx</strong> dosyanızı buraya sürükleyip bırakın</p>
+                  <p class="upload-subtext" data-i18n-html="upload.subtext">ya da <u>göz atmak için tıklayın</u></p>
                 </div>
               </div>
 
@@ -102,44 +107,44 @@
                   <p class="file-name" id="fileName">document.docx</p>
                   <p class="file-size" id="fileSize">0 KB</p>
                 </div>
-                <button class="remove-file" id="removeFile" aria-label="Remove file">REMOVE</button>
+                <button class="remove-file" id="removeFile" aria-label="Dosyayı kaldır" data-i18n="file.remove" data-i18n-attr="aria-label:file.removeLabel">KALDIR</button>
               </div>
 
               <div class="progress-container hidden" id="progressContainer">
                 <div class="progress-bar">
                   <div class="progress-fill" id="progressFill"></div>
                 </div>
-                <p class="progress-text" id="progressText">Converting...</p>
+                <p class="progress-text" id="progressText" data-i18n="progress.converting">UDF biçimine dönüştürülüyor...</p>
               </div>
 
-              <button class="btn btn-primary convert-btn" id="convertBtn" disabled>CONVERT TO UDF &rarr;</button>
+              <button class="btn btn-primary convert-btn" id="convertBtn" disabled data-i18n="convert.button">UDF’YE DÖNÜŞTÜR &rarr;</button>
 
               <div class="download-section hidden" id="downloadSection">
-                <span class="new-burst" aria-hidden="true">DONE!</span>
+                <span class="new-burst" aria-hidden="true" data-i18n="download.burst">TAMAM!</span>
                 <svg class="success-icon" aria-hidden="true"><use href="#i-floppy"/></svg>
-                <p class="success-text">Conversion complete.</p>
-                <button class="btn btn-primary download-btn" id="downloadBtn">DOWNLOAD UDF FILE</button>
-                <button class="convert-another" id="convertAnother">Convert another file</button>
+                <p class="success-text" data-i18n="download.success">Dönüştürme tamamlandı.</p>
+                <button class="btn btn-primary download-btn" id="downloadBtn" data-i18n="download.button">UDF DOSYASINI İNDİR</button>
+                <button class="convert-another" id="convertAnother" data-i18n="download.another">Başka bir dosya dönüştür</button>
               </div>
 
               <div class="error-message hidden" id="errorMessage" role="alert">
-                <span class="error-icon" aria-hidden="true">ERROR</span>
-                <p class="error-text" id="errorText">An error occurred</p>
+                <span class="error-icon" aria-hidden="true" data-i18n="error.icon">HATA</span>
+                <p class="error-text" id="errorText" data-i18n="error.default">Bir hata oluştu</p>
               </div>
 
             </div>
           </article>
 
           <div class="seal-row">
-            <div class="cert-seal" aria-label="100% client-side">
-              <span class="seal-top">100%</span>
-              <span class="seal-mid word">LOCAL</span>
-              <span class="seal-bot">NO UPLOAD</span>
+            <div class="cert-seal" aria-label="%100 tarayıcıda" data-i18n-attr="aria-label:seal.local.label">
+              <span class="seal-top" data-i18n="seal.local.top">%100</span>
+              <span class="seal-mid word" data-i18n="seal.local.mid">YEREL</span>
+              <span class="seal-bot" data-i18n="seal.local.bot">SUNUCUSUZ</span>
             </div>
-            <div class="cert-seal" aria-label="Free and open source">
-              <span class="seal-top">OPEN</span>
-              <span class="seal-mid word">FREE</span>
-              <span class="seal-bot">SOURCE</span>
+            <div class="cert-seal" aria-label="Ücretsiz ve açık kaynak" data-i18n-attr="aria-label:seal.open.label">
+              <span class="seal-top" data-i18n="seal.open.top">ÜCRETSİZ</span>
+              <span class="seal-mid word" data-i18n="seal.open.mid">AÇIK</span>
+              <span class="seal-bot" data-i18n="seal.open.bot">KAYNAK</span>
             </div>
           </div>
         </section>
@@ -149,16 +154,16 @@
 
     <!-- FOOTER -->
     <footer class="footer-band">
-      <nav class="icon-nav" aria-label="Footer">
-        <a href="#convert"><svg aria-hidden="true"><use href="#i-docx"/></svg><span>CONVERT</span></a>
-        <a href="https://github.com/omertekin2002/word-to-udf" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#i-wrench"/></svg><span>SOURCE</span></a>
+      <nav class="icon-nav" aria-label="Alt bilgi" data-i18n-attr="aria-label:footer.navLabel">
+        <a href="#convert"><svg aria-hidden="true"><use href="#i-docx"/></svg><span data-i18n="footer.convert">DÖNÜŞTÜR</span></a>
+        <a href="https://github.com/omertekin2002/word-to-udf" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true"><use href="#i-wrench"/></svg><span data-i18n="footer.source">KAYNAK</span></a>
       </nav>
       <p class="legal">
         <a href="https://www.linkedin.com/in/ömer-tekin" target="_blank" rel="noopener noreferrer">LinkedIn</a> &middot;
         <a href="https://github.com/omertekin2002" target="_blank" rel="noopener noreferrer">GitHub</a> &middot;
-        <a href="https://github.com/omertekin2002/word-to-udf/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Copyright</a> &copy; Ömer Tekin. MIT License.
+        <a href="https://github.com/omertekin2002/word-to-udf/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" data-i18n="footer.copyright">Telif hakkı</a> &copy; Ömer Tekin. <span data-i18n="footer.license">MIT Lisansı.</span>
       </p>
-      <p class="small-print">This site is best viewed with browser versions 3.0 and higher.</p>
+      <p class="small-print" data-i18n="footer.smallPrint">Bu site en iyi 3.0 ve üzeri tarayıcı sürümleriyle görüntülenir.</p>
     </footer>
 
   </div>
@@ -167,6 +172,7 @@
   <script src="js/utils.js"></script>
   <script src="js/docx-parser.js"></script>
   <script src="js/udf-generator.js"></script>
+  <script src="js/i18n.js"></script>
   <script src="js/app.js"></script>
 </body>
 

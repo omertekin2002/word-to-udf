@@ -95,7 +95,7 @@ class WordToUdfApp {
         // Validate file type
         const extension = getFileExtension(file.name);
         if (extension !== 'docx') {
-            this.showError('Please select a valid Word document (.docx file)');
+            this.showError('error.invalidType');
             return;
         }
 
@@ -123,6 +123,10 @@ class WordToUdfApp {
     async handleConvert() {
         if (!this.selectedFile) return;
 
+        // The parser reports any failure with an English message; show the translated
+        // message for the step that failed and keep the raw error for the console
+        let failureKey = 'error.parse';
+
         try {
             // Show progress
             this.convertBtn.classList.add('hidden');
@@ -130,21 +134,22 @@ class WordToUdfApp {
             this.hideError();
 
             // Update progress: Parsing
-            this.updateProgress(20, 'Parsing Word document...');
+            this.updateProgress(20, 'progress.parsing');
             await sleep(300);
 
             // Parse DOCX
             const document = await this.parser.parse(this.selectedFile);
 
             // Update progress: Converting
-            this.updateProgress(60, 'Converting to UDF format...');
+            failureKey = 'error.generic';
+            this.updateProgress(60, 'progress.converting');
             await sleep(300);
 
             // Generate UDF
             this.convertedBlob = await this.generator.generate(document);
 
             // Update progress: Complete
-            this.updateProgress(100, 'Conversion complete!');
+            this.updateProgress(100, 'progress.complete');
             await sleep(500);
 
             // Show download section
@@ -156,13 +161,13 @@ class WordToUdfApp {
             console.error('Conversion error:', error);
             this.progressContainer.classList.add('hidden');
             this.convertBtn.classList.remove('hidden');
-            this.showError(error.message || 'An error occurred during conversion. Please try again.');
+            this.showError(failureKey);
         }
     }
 
-    updateProgress(percent, text) {
+    updateProgress(percent, messageKey) {
         this.progressFill.style.width = `${percent}%`;
-        this.progressText.textContent = text;
+        setTranslatedText(this.progressText, messageKey);
     }
 
     handleDownload() {
@@ -186,8 +191,8 @@ class WordToUdfApp {
         this.hideError();
     }
 
-    showError(message) {
-        this.errorText.textContent = message;
+    showError(messageKey) {
+        setTranslatedText(this.errorText, messageKey);
         this.errorMessage.classList.remove('hidden');
     }
 

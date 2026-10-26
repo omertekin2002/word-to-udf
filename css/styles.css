@@ -154,7 +154,8 @@ p {
   font: 700 16px/1.2 var(--font-ui);
 }
 
-#copyButton {
+#copyButton,
+.lang-btn {
   padding: 3px 8px;
   background: var(--ink);
   color: var(--white);
@@ -163,15 +164,31 @@ p {
   cursor: pointer;
 }
 
-#copyButton:hover {
+#copyButton:hover,
+.lang-btn:hover {
   background: var(--white);
   color: var(--ink);
 }
 
-#copyButton.copied {
+#copyButton.copied,
+.lang-btn[aria-pressed="true"] {
   background: var(--yellow);
   color: var(--ink);
   border-color: var(--yellow);
+}
+
+/* TR | EN language toggle, built on the banner button above */
+.lang-toggle {
+  display: inline-flex;
+}
+
+.lang-btn + .lang-btn {
+  margin-left: -1px;
+}
+
+/* The page's dotted black focus ring would be invisible on the black banner */
+.lang-btn:focus-visible {
+  outline-color: var(--white);
 }
 
 /* ---------- Two-column body ---------- */
