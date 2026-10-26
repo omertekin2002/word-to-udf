@@ -64,6 +64,7 @@ class UdfGenerator {
         const paraElements = [];
         let paraOffset = this.currentOffset;
         let afterPageBreak = false;
+        let paraProps = paragraph;
 
         // Process runs
         for (const run of paragraph.runs) {
@@ -90,7 +91,7 @@ class UdfGenerator {
                 // Handle page break - first flush any pending footnotes
                 this.content += paraContent.join('');
                 if (paraElements.length > 0) {
-                    this.elements.push(this.buildParagraphElement(paragraph, paraElements));
+                    this.elements.push(this.buildParagraphElement(paraProps, paraElements));
                 }
 
                 // Insert footnotes for this page before the page break
@@ -101,10 +102,13 @@ class UdfGenerator {
 
                 this.elements.push('<page-break />');
 
-                // Runs after the break continue in a new paragraph on the next page
+                // Runs after the break continue in a new paragraph on the next page.
+                // It is the same Word paragraph, so it must not start another list
+                // item or repeat the first-line indent.
                 paraContent.length = 0;
                 paraElements.length = 0;
                 afterPageBreak = true;
+                paraProps = { ...paragraph, numbering: null, firstLineIndent: 0 };
             } else if (run.type === 'footnoteRef') {
                 // Handle footnote reference - insert superscript number only
                 // Use counter for display number (w:id can be non-contiguous)
@@ -134,7 +138,7 @@ class UdfGenerator {
         }
 
         this.content += paraContent.join('');
-        this.elements.push(this.buildParagraphElement(paragraph, paraElements));
+        this.elements.push(this.buildParagraphElement(paraProps, paraElements));
     }
 
     /**

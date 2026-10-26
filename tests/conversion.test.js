@@ -73,6 +73,20 @@ test('text on both sides of a page break in one run is kept', async () => {
     assert.deepEqual(contentElements(doc).map(el => textOf(el, content)), ['X', 'Y', 'Z']);
 });
 
+test('a list paragraph split by a page break stays one list item', async () => {
+    const { doc } = await convertBody(p(
+        '<w:r><w:t>X</w:t><w:br w:type="page"/><w:t>Y</w:t></w:r>',
+        '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:ind w:left="720" w:firstLine="360"/></w:pPr>'));
+
+    const [before, after] = doc.querySelectorAll('elements paragraph');
+    assert.equal(before.getAttribute('Numbered'), 'true');
+    assert.equal(before.getAttribute('FirstLineIndent'), '18.0');
+    assert.equal(after.getAttribute('Numbered'), null);
+    assert.equal(after.getAttribute('ListId'), null);
+    assert.equal(after.getAttribute('FirstLineIndent'), null);
+    assert.equal(after.getAttribute('LeftIndent'), '36.0');
+});
+
 test('a paragraph holding only a page break emits just the page break', async () => {
     const { doc } = await convertBody(
         p('<w:r><w:t>One</w:t></w:r>') + p('<w:r><w:br w:type="page"/></w:r>') + p('<w:r><w:t>Two</w:t></w:r>'));
