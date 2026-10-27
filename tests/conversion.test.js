@@ -184,3 +184,26 @@ test('regression: a footnote reference becomes a superscript number with the tex
     assert.deepEqual(tail, ['1. ', 'Source text']);
     assert.ok(content.endsWith('Source text'));
 });
+
+// "]]>" would end the CDATA section early; the content must still be well-formed and decode exactly
+for (const text of ['a ]]> b', 'x]]]>y', ']]>]]>', 'ends with ]]']) {
+    const escaped = text.replace(/>/g, '&gt;');
+
+    test(`text containing ${JSON.stringify(text)} keeps content.xml well-formed`, async () => {
+        const { doc, content } = await convertBody(p(`<w:r><w:t xml:space="preserve">${escaped}</w:t></w:r>`));
+        assert.equal(content, text);
+        assert.deepEqual(contentElements(doc).map(el => textOf(el, content)), [text]);
+    });
+}
+
+test('"]]>" in a table cell and a footnote keeps content.xml well-formed', async () => {
+    const { doc, content } = await convertBody(
+        table([[p('<w:r><w:t>cell ]]&gt; one</w:t></w:r>'), p('<w:r><w:t>two</w:t></w:r>')]]) +
+        p('<w:r><w:t>Claim</w:t></w:r><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r>'),
+        { footnotes: { 1: p('<w:r><w:footnoteRef/></w:r><w:r><w:t>note ]]&gt; text</w:t></w:r>') } });
+
+    const cell = doc.querySelector('elements cell');
+    assert.deepEqual(contentElements(doc, cell).map(el => textOf(el, content)), ['cell ]]> one']);
+    assert.equal(textOf(contentElements(doc).at(-1), content), 'note ]]> text');
+    assert.ok(content.endsWith('note ]]> text'));
+});

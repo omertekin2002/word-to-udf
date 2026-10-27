@@ -47,6 +47,16 @@ function escapeXml(text) {
 }
 
 /**
+ * Wrap text in a CDATA section. Every "]]>" is split across two sections so it
+ * can't end the section early; the parsed text is unchanged.
+ * @param {string} text - Text to wrap
+ * @returns {string} CDATA markup
+ */
+function cdata(text) {
+  return '<![CDATA[' + (text || '').replace(/]]>/g, ']]]]><![CDATA[>') + ']]>';
+}
+
+/**
  * Convert ArrayBuffer to Base64 string
  * @param {ArrayBuffer} buffer - The array buffer
  * @returns {string} Base64 encoded string
@@ -68,6 +78,16 @@ function arrayBufferToBase64(buffer) {
  */
 function getFileExtension(filename) {
   return filename.split('.').pop().toLowerCase();
+}
+
+/**
+ * Output filename for a converted file: a trailing .docx (any case) becomes .udf
+ * @param {string} filename - The input filename
+ * @returns {string} The .udf filename
+ */
+function toUdfFilename(filename) {
+  const base = filename.replace(/\.docx$/i, '');
+  return (base || 'document') + '.udf';
 }
 
 /**
