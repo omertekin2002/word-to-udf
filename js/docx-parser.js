@@ -33,6 +33,12 @@ class DocxParser {
      */
     async parse(file) {
         try {
+            // Reset state: the app reuses one parser for every file
+            this.relationships = {};
+            this.images = {};
+            this.footnotes = {};
+            this.numbering = {};
+
             // Load the DOCX as a ZIP
             this.zip = await JSZip.loadAsync(file);
 

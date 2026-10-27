@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { convertBody, textOf } = require('./helpers');
+const { convertBody, textOf, loadConverter, buildDocx } = require('./helpers');
 
 const p = (runs, pPr = '') => `<w:p>${pPr}${runs}</w:p>`;
 
@@ -325,4 +325,17 @@ test('list attributes from numbering.xml apply inside table cells', async () => 
     const para = doc.querySelector('elements cell paragraph');
     assert.equal(para.getAttribute('Bulleted'), 'true');
     assert.equal(para.getAttribute('Numbered'), null);
+});
+
+test('a reused parser does not carry list definitions into the next document', async () => {
+    const { DocxParser } = loadConverter();
+    const parser = new DocxParser();
+    const body = listItem('Item', 1);
+
+    const first = await parser.parse(await buildDocx(body, { numbering: abstractNum(0, lvl(0, 'bullet', '')) + num(1, 0) }));
+    assert.equal(first.elements[0].numbering.format, 'bullet');
+
+    const second = await parser.parse(await buildDocx(body));
+    assert.equal(second.elements[0].numbering.format, undefined);
+    assert.equal(second.elements[0].numbering.numId, '1');
 });
