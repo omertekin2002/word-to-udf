@@ -229,6 +229,13 @@ test('a corrupt .docx gets a translated error and the raw error still goes to th
     assert.equal(document.getElementById('errorText').textContent, strings.tr['error.parse']);
 });
 
+test('an upper-case .DOCX name downloads as .udf', async () => {
+    const { window } = await loadPage({ app: true });
+    window.app.processFile(fileOf('DILEKCE.DOCX', 'not converted here'));
+
+    assert.equal(window.app.outputFilename, 'DILEKCE.udf');
+});
+
 for (const lang of ['tr', 'en']) {
     test(`a .docx converts end to end with the page in ${lang}`, async () => {
         const { window, document, strings } = await loadPage({ url: `${PAGE_URL}?lang=${lang}`, app: true });
