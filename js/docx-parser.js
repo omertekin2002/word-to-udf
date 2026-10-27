@@ -23,6 +23,7 @@ class DocxParser {
         this.relationships = {};
         this.images = {};
         this.footnotes = {};
+        this.numbering = {};
     }
 
     /**
@@ -43,6 +44,9 @@ class DocxParser {
 
             // Parse footnotes
             await this.parseFootnotes();
+
+            // Parse list definitions
+            await this.parseNumbering();
 
             // Parse the main document content
             const documentXml = await this.zip.file('word/document.xml').async('string');
@@ -140,6 +144,60 @@ class DocxParser {
         } catch (error) {
             console.warn('Could not parse footnotes:', error);
         }
+    }
+
+    /**
+     * Parse list definitions from word/numbering.xml into
+     * this.numbering[numId][ilvl] = { format, lvlText }
+     */
+    async parseNumbering() {
+        const numberingFile = this.zip.file('word/numbering.xml');
+        if (!numberingFile) return;
+
+        try {
+            const numberingDoc = parseXml(await numberingFile.async('string'));
+            const root = numberingDoc.documentElement;
+
+            const abstractLevels = {};
+            for (const abstractNum of childElements(root, 'abstractNum')) {
+                const levels = {};
+                for (const lvl of childElements(abstractNum, 'lvl')) {
+                    levels[lvl.getAttribute('w:ilvl') || '0'] = this.parseLevel(lvl);
+                }
+                abstractLevels[abstractNum.getAttribute('w:abstractNumId')] = levels;
+            }
+
+            for (const num of childElements(root, 'num')) {
+                const abstractNumId = childElement(num, 'abstractNumId');
+                const levels = { ...(abstractNumId && abstractLevels[abstractNumId.getAttribute('w:val')]) };
+
+                // A level override replaces the abstract level's format and text
+                for (const override of childElements(num, 'lvlOverride')) {
+                    const lvl = childElement(override, 'lvl');
+                    if (!lvl) continue;
+                    const ilvl = override.getAttribute('w:ilvl') || '0';
+                    levels[ilvl] = { ...levels[ilvl], ...this.parseLevel(lvl) };
+                }
+
+                this.numbering[num.getAttribute('w:numId')] = levels;
+            }
+        } catch (error) {
+            console.warn('Could not parse numbering:', error);
+        }
+    }
+
+    /**
+     * Read the number format and level text of a numbering level
+     * @param {Element} lvl - The w:lvl element
+     * @returns {{format?: string, lvlText?: string}} Only the values the level sets
+     */
+    parseLevel(lvl) {
+        const level = {};
+        const numFmt = childElement(lvl, 'numFmt');
+        if (numFmt && numFmt.hasAttribute('w:val')) level.format = numFmt.getAttribute('w:val');
+        const lvlText = childElement(lvl, 'lvlText');
+        if (lvlText && lvlText.hasAttribute('w:val')) level.lvlText = lvlText.getAttribute('w:val');
+        return level;
     }
 
     /**
@@ -316,11 +374,19 @@ class DocxParser {
             if (numPr) {
                 const ilvl = childElement(numPr, 'ilvl');
                 const numId = childElement(numPr, 'numId');
-                if (ilvl && numId) {
+                // numId 0 switches numbering off for the paragraph
+                if (ilvl && numId && numId.getAttribute('w:val') !== '0') {
                     paragraph.numbering = {
                         level: parseInt(ilvl.getAttribute('w:val') || '0'),
                         numId: numId.getAttribute('w:val')
                     };
+                    // The list definition, if numbering.xml has one for this level
+                    const definition = (this.numbering[paragraph.numbering.numId] || {})[paragraph.numbering.level];
+                    if (definition) {
+                        // A level without w:numFmt is decimal
+                        paragraph.numbering.format = definition.format || 'decimal';
+                        paragraph.numbering.lvlText = definition.lvlText || '';
+                    }
                 }
             }
         }

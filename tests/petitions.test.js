@@ -208,19 +208,36 @@ test('ekli tablo dilekçesi: table shape, merged total row and in-cell line brea
     assert.equal(italic.closest('paragraph').getAttribute('Alignment'), '3');
 });
 
-// Known gaps: recorded as todo so they show in the output as the fidelity to-do list
-// without failing the run. Each one should pass once its roadmap item (vision #5) lands.
-
-test('lists are bulleted or numbered as numbering.xml defines them', { todo: 'roadmap #6: read numbering.xml' }, async () => {
+test('lists are bulleted or numbered as numbering.xml defines them', async () => {
     for (const petition of petitions) {
         const { doc, content } = await converted(petition);
         for (const item of petition.listItems) {
             const para = listParagraph(doc, content, item);
             const attribute = item.kind === 'bullet' ? 'Bulleted' : 'Numbered';
             assert.equal(para.getAttribute(attribute), 'true', `${petition.name}: ${item.text} should be ${attribute}`);
+            const other = item.kind === 'bullet' ? 'Numbered' : 'Bulleted';
+            assert.equal(para.getAttribute(other), null, `${petition.name}: ${item.text} should not be ${other}`);
         }
     }
 });
+
+test('icra/itiraz dilekçesi: list levels keep their number style', async () => {
+    const { doc, content } = await converted(itiraz);
+    const styles = { 0: 'NUMBER_TYPE_NUMBER_DOT', 1: 'NUMBER_TYPE_CHAR_SMALL_PARENTHESIS' };
+    for (const item of itiraz.listItems) {
+        assert.equal(listParagraph(doc, content, item).getAttribute('NumberType'), styles[item.level], item.text);
+    }
+});
+
+test('ekli tablo dilekçesi: a "%1-" list keeps the dash number style', async () => {
+    const { doc, content } = await converted(tablo);
+    for (const item of tablo.listItems) {
+        assert.equal(listParagraph(doc, content, item).getAttribute('NumberType'), 'NUMBER_TYPE_NUMBER_TRE', item.text);
+    }
+});
+
+// Known gaps: recorded as todo so they show in the output as the fidelity to-do list
+// without failing the run. Each one should pass once its roadmap item (vision #5) lands.
 
 test('headings take bold and size from their styles.xml style', { todo: 'roadmap #7: resolve styles.xml' }, async () => {
     const { doc, content } = await converted(itiraz);
