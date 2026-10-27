@@ -177,12 +177,10 @@ class DocxParser {
                 const abstractNumId = childElement(num, 'abstractNumId');
                 const levels = { ...(abstractNumId && abstractLevels[abstractNumId.getAttribute('w:val')]) };
 
-                // A level override replaces the abstract level's format and text
+                // A level override replaces the whole abstract level, defaults included
                 for (const override of childElements(num, 'lvlOverride')) {
                     const lvl = childElement(override, 'lvl');
-                    if (!lvl) continue;
-                    const ilvl = override.getAttribute('w:ilvl') || '0';
-                    levels[ilvl] = { ...levels[ilvl], ...this.parseLevel(lvl) };
+                    if (lvl) levels[override.getAttribute('w:ilvl') || '0'] = this.parseLevel(lvl);
                 }
 
                 this.numbering[num.getAttribute('w:numId')] = levels;

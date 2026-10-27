@@ -296,6 +296,26 @@ test('a w:lvlOverride on the num replaces the level format', async () => {
     assert.equal(paras.Deeper.getAttribute('NumberType'), 'NUMBER_TYPE_NUMBER_DOT');
 });
 
+test('a w:lvlOverride level without w:numFmt is decimal, not the abstract level format', async () => {
+    const { doc, content } = await convertBody(listItem('Overridden', 1), {
+        numbering: abstractNum(0, lvl(0, 'bullet', '')) +
+            num(1, 0, '<w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:lvlText w:val="%1)"/></w:lvl></w:lvlOverride>')
+    });
+
+    const para = listParagraphs(doc, content).Overridden;
+    assert.equal(para.getAttribute('Bulleted'), null);
+    assert.equal(para.getAttribute('NumberType'), 'NUMBER_TYPE_NUMBER_PARENTHESIS');
+});
+
+test('a w:lvlOverride with only a startOverride keeps the abstract level', async () => {
+    const { doc, content } = await convertBody(listItem('Restarted', 1), {
+        numbering: abstractNum(0, lvl(0, 'lowerLetter', '%1)')) +
+            num(1, 0, '<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride>')
+    });
+
+    assert.equal(listParagraphs(doc, content).Restarted.getAttribute('NumberType'), 'NUMBER_TYPE_CHAR_SMALL_PARENTHESIS');
+});
+
 test('list paragraphs still convert without numbering.xml or a matching definition', async () => {
     const body = listItem('Odd', 1) + listItem('Even', 2);
 
