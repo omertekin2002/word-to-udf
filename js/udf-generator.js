@@ -400,7 +400,7 @@ class UdfGenerator {
     generateXml() {
         const template = `<?xml version="1.0" encoding="UTF-8" ?>
 <template format_id="1.8">
-<content><![CDATA[${this.content}]]></content>
+<content>${cdata(this.content)}</content>
 <properties><pageFormat mediaSizeName="1" leftMargin="42.51968479156494" rightMargin="28.34645652770996" topMargin="14.17322826385498" bottomMargin="14.17322826385498" paperOrientation="1" headerFOffset="20.0" footerFOffset="20.0" /></properties>
 <elements resolver="hvl-default">
 ${this.elements.join('\n')}
