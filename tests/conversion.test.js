@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { convertBody, textOf } = require('./helpers');
+const { convertBody, textOf, loadConverter, buildDocx } = require('./helpers');
 
 const p = (runs, pPr = '') => `<w:p>${pPr}${runs}</w:p>`;
 
@@ -206,4 +206,156 @@ test('"]]>" in a table cell and a footnote keeps content.xml well-formed', async
     assert.deepEqual(contentElements(doc, cell).map(el => textOf(el, content)), ['cell ]]> one']);
     assert.equal(textOf(contentElements(doc).at(-1), content), 'note ]]> text');
     assert.ok(content.endsWith('note ]]> text'));
+});
+
+// Lists: bullet vs. number and the number style come from word/numbering.xml
+const listItem = (text, numId, ilvl = 0) =>
+    p(`<w:r><w:t>${text}</w:t></w:r>`, `<w:pPr><w:numPr><w:ilvl w:val="${ilvl}"/><w:numId w:val="${numId}"/></w:numPr></w:pPr>`);
+const lvl = (ilvl, numFmt, lvlText) =>
+    `<w:lvl w:ilvl="${ilvl}"><w:start w:val="1"/><w:numFmt w:val="${numFmt}"/><w:lvlText w:val="${lvlText}"/></w:lvl>`;
+const abstractNum = (id, levels) => `<w:abstractNum w:abstractNumId="${id}">${levels}</w:abstractNum>`;
+const num = (numId, abstractNumId, overrides = '') =>
+    `<w:num w:numId="${numId}"><w:abstractNumId w:val="${abstractNumId}"/>${overrides}</w:num>`;
+
+function listParagraphs(doc, content) {
+    return Object.fromEntries([...doc.querySelectorAll('elements paragraph')]
+        .map(para => [contentElements(doc, para).map(el => textOf(el, content)).join(''), para]));
+}
+
+test('an even numId can be numbered and an odd one bulleted', async () => {
+    const { doc, content } = await convertBody(listItem('Number', 2) + listItem('Bullet', 1), {
+        numbering: abstractNum(0, lvl(0, 'bullet', '')) + abstractNum(1, lvl(0, 'decimal', '%1.')) +
+            num(1, 0) + num(2, 1)
+    });
+
+    const paras = listParagraphs(doc, content);
+    assert.equal(paras.Number.getAttribute('Numbered'), 'true');
+    assert.equal(paras.Number.getAttribute('Bulleted'), null);
+    assert.equal(paras.Number.getAttribute('ListId'), '2');
+    assert.equal(paras.Bullet.getAttribute('Bulleted'), 'true');
+    assert.equal(paras.Bullet.getAttribute('BulletType'), 'BULLET_TYPE_ELLIPSE');
+    assert.equal(paras.Bullet.getAttribute('Numbered'), null);
+    assert.equal(paras.Bullet.getAttribute('ListId'), '1');
+});
+
+test('NumberType follows numFmt and the suffix in lvlText', async () => {
+    const levels = [
+        ['decimal', '%1.'], ['decimal', '%1)'], ['lowerLetter', '%2)'], ['lowerRoman', '%3.'],
+        ['upperLetter', '%1.'], ['upperLetter', '%1)'], ['upperRoman', '%1.'], ['upperRoman', '%1)'],
+        ['lowerLetter', '%1.'], ['lowerRoman', '%1)'], ['decimal', '%1-'], ['decimal', '(%1)'],
+        ['decimal', '%1'], ['lowerLetter', '%1:'], ['ordinal', '%1.'], ['decimalZero', '%1)']
+    ];
+    const expected = [
+        'NUMBER_TYPE_NUMBER_DOT', 'NUMBER_TYPE_NUMBER_PARENTHESIS', 'NUMBER_TYPE_CHAR_SMALL_PARENTHESIS',
+        'NUMBER_TYPE_ROMAN_SMALL_DOT', 'NUMBER_TYPE_CHAR_BIG_DOT', 'NUMBER_TYPE_CHAR_BIG_PARENTHESIS',
+        'NUMBER_TYPE_ROMAN_BIG_DOT', 'NUMBER_TYPE_ROMAN_BIG_PARENTHESIS', 'NUMBER_TYPE_CHAR_SMALL_DOT',
+        'NUMBER_TYPE_ROMAN_SMALL_PARENTHESIS', 'NUMBER_TYPE_NUMBER_TRE', 'NUMBER_TYPE_NUMBER_PARENTHESIS',
+        'NUMBER_TYPE_NUMBER_DOT', 'NUMBER_TYPE_CHAR_SMALL_DOT', 'NUMBER_TYPE_NUMBER_DOT', 'NUMBER_TYPE_NUMBER_DOT'
+    ];
+    // One list per case; the level is the one whose placeholder the lvlText uses
+    const ilvlOf = lvlText => Number(lvlText.match(/%(\d)/)[1]) - 1;
+    const { doc, content } = await convertBody(
+        levels.map(([, lvlText], i) => listItem(`Item${i}`, i + 1, ilvlOf(lvlText))).join(''),
+        {
+            numbering: levels.map(([numFmt, lvlText], i) => abstractNum(i, lvl(ilvlOf(lvlText), numFmt, lvlText))).join('') +
+                levels.map((_, i) => num(i + 1, i)).join('')
+        });
+
+    const paras = listParagraphs(doc, content);
+    levels.forEach(([numFmt, lvlText], i) => {
+        const para = paras[`Item${i}`];
+        assert.equal(para.getAttribute('Numbered'), 'true', `${numFmt} ${lvlText}`);
+        assert.equal(para.getAttribute('NumberType'), expected[i], `${numFmt} ${lvlText}`);
+        assert.equal(para.getAttribute('ListLevel'), String(ilvlOf(lvlText)), `${numFmt} ${lvlText}`);
+    });
+});
+
+test('numId 0 and numFmt none are not list items', async () => {
+    const { doc, content } = await convertBody(listItem('Off', 0) + listItem('None', 1), {
+        numbering: abstractNum(0, lvl(0, 'none', '')) + num(1, 0)
+    });
+
+    const paras = listParagraphs(doc, content);
+    for (const text of ['Off', 'None']) {
+        for (const attribute of ['Numbered', 'Bulleted', 'NumberType', 'BulletType', 'ListLevel', 'ListId']) {
+            assert.equal(paras[text].getAttribute(attribute), null, `${text}: ${attribute}`);
+        }
+    }
+});
+
+test('a w:lvlOverride on the num replaces the level format', async () => {
+    const { doc, content } = await convertBody(listItem('Overridden', 1) + listItem('Plain', 2) + listItem('Deeper', 1, 1), {
+        numbering: abstractNum(0, lvl(0, 'decimal', '%1.') + lvl(1, 'decimal', '%2.')) +
+            num(1, 0, `<w:lvlOverride w:ilvl="0">${lvl(0, 'upperRoman', '%1)')}</w:lvlOverride>`) +
+            num(2, 0)
+    });
+
+    const paras = listParagraphs(doc, content);
+    assert.equal(paras.Overridden.getAttribute('NumberType'), 'NUMBER_TYPE_ROMAN_BIG_PARENTHESIS');
+    assert.equal(paras.Plain.getAttribute('NumberType'), 'NUMBER_TYPE_NUMBER_DOT');
+    assert.equal(paras.Deeper.getAttribute('NumberType'), 'NUMBER_TYPE_NUMBER_DOT');
+});
+
+test('a w:lvlOverride level without w:numFmt is decimal, not the abstract level format', async () => {
+    const { doc, content } = await convertBody(listItem('Overridden', 1), {
+        numbering: abstractNum(0, lvl(0, 'bullet', '')) +
+            num(1, 0, '<w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:lvlText w:val="%1)"/></w:lvl></w:lvlOverride>')
+    });
+
+    const para = listParagraphs(doc, content).Overridden;
+    assert.equal(para.getAttribute('Bulleted'), null);
+    assert.equal(para.getAttribute('NumberType'), 'NUMBER_TYPE_NUMBER_PARENTHESIS');
+});
+
+test('a w:lvlOverride with only a startOverride keeps the abstract level', async () => {
+    const { doc, content } = await convertBody(listItem('Restarted', 1), {
+        numbering: abstractNum(0, lvl(0, 'lowerLetter', '%1)')) +
+            num(1, 0, '<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride>')
+    });
+
+    assert.equal(listParagraphs(doc, content).Restarted.getAttribute('NumberType'), 'NUMBER_TYPE_CHAR_SMALL_PARENTHESIS');
+});
+
+test('list paragraphs still convert without numbering.xml or a matching definition', async () => {
+    const body = listItem('Odd', 1) + listItem('Even', 2);
+
+    for (const options of [{}, { numbering: abstractNum(0, lvl(0, 'bullet', '')) + num(7, 0) }]) {
+        const { doc, content } = await convertBody(body, options);
+        const paras = listParagraphs(doc, content);
+        // The numId guess from before numbering.xml was read
+        assert.equal(paras.Odd.getAttribute('Numbered'), 'true');
+        assert.equal(paras.Odd.getAttribute('NumberType'), 'NUMBER_TYPE_NUMBER_TRE');
+        assert.equal(paras.Odd.getAttribute('ListId'), '1');
+        assert.equal(paras.Even.getAttribute('Bulleted'), 'true');
+        assert.equal(paras.Even.getAttribute('ListId'), '2');
+    }
+});
+
+test('a malformed numbering.xml does not stop the conversion', async () => {
+    const { doc, content } = await convertBody(listItem('Item', 1), { numbering: '<w:num w:numId="1">' });
+    assert.equal(content, 'Item');
+    assert.equal(listParagraphs(doc, content).Item.getAttribute('Numbered'), 'true');
+});
+
+test('list attributes from numbering.xml apply inside table cells', async () => {
+    const { doc } = await convertBody(table([[listItem('Cell bullet', 3), p('<w:r><w:t>Other</w:t></w:r>')]]), {
+        numbering: abstractNum(0, lvl(0, 'bullet', '')) + num(3, 0)
+    });
+
+    const para = doc.querySelector('elements cell paragraph');
+    assert.equal(para.getAttribute('Bulleted'), 'true');
+    assert.equal(para.getAttribute('Numbered'), null);
+});
+
+test('a reused parser does not carry list definitions into the next document', async () => {
+    const { DocxParser } = loadConverter();
+    const parser = new DocxParser();
+    const body = listItem('Item', 1);
+
+    const first = await parser.parse(await buildDocx(body, { numbering: abstractNum(0, lvl(0, 'bullet', '')) + num(1, 0) }));
+    assert.equal(first.elements[0].numbering.format, 'bullet');
+
+    const second = await parser.parse(await buildDocx(body));
+    assert.equal(second.elements[0].numbering.format, undefined);
+    assert.equal(second.elements[0].numbering.numId, '1');
 });
