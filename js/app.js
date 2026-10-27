@@ -100,7 +100,7 @@ class WordToUdfApp {
         }
 
         this.selectedFile = file;
-        this.outputFilename = file.name.replace('.docx', '.udf');
+        this.outputFilename = toUdfFilename(file.name);
 
         // Update UI
         this.fileName.textContent = file.name;

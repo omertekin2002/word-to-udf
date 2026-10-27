@@ -221,21 +221,57 @@ class UdfGenerator {
 
         // Handle numbering/bullets
         if (paragraph.numbering) {
-            const level = paragraph.numbering.level;
-            const numId = paragraph.numbering.numId;
-
-            // Determine if it's numbered or bulleted based on numId
-            // (simplified - in real implementation, would check numbering definitions)
-            const isBulleted = parseInt(numId) % 2 === 0;
-
-            if (isBulleted) {
-                attrs += ` Bulleted="true" BulletType="BULLET_TYPE_ELLIPSE" ListLevel="${level}" ListId="${numId}"`;
-            } else {
-                attrs += ` Numbered="true" NumberType="NUMBER_TYPE_NUMBER_TRE" ListLevel="${level}" ListId="${numId}"`;
-            }
+            attrs += this.buildListAttrs(paragraph.numbering);
         }
 
         return `<paragraph ${attrs}>${childElements.join('')}</paragraph>`;
+    }
+
+    /**
+     * Build the list attributes of a list paragraph
+     * @param {Object} numbering - Paragraph numbering (level, numId and, if numbering.xml defines it, format and lvlText)
+     * @returns {string} Attributes string, with a leading space, or '' if the level isn't a list
+     */
+    buildListAttrs(numbering) {
+        const { level, numId, format } = numbering;
+        const list = ` ListLevel="${level}" ListId="${escapeXml(numId)}"`;
+
+        if (format === undefined) {
+            // No list definition in numbering.xml: guess from the numId as before
+            return parseInt(numId) % 2 === 0
+                ? ` Bulleted="true" BulletType="BULLET_TYPE_ELLIPSE"${list}`
+                : ` Numbered="true" NumberType="NUMBER_TYPE_NUMBER_TRE"${list}`;
+        }
+
+        if (format === 'none') return '';
+        if (format === 'bullet') return ` Bulleted="true" BulletType="BULLET_TYPE_ELLIPSE"${list}`;
+        return ` Numbered="true" NumberType="${this.numberType(numbering)}"${list}`;
+    }
+
+    /**
+     * UDF NumberType for a numbered list level
+     * @param {Object} numbering - Paragraph numbering with format and lvlText
+     * @returns {string} NUMBER_TYPE_* value
+     */
+    numberType({ level, format, lvlText }) {
+        const families = {
+            'decimal': 'NUMBER',
+            'lowerLetter': 'CHAR_SMALL',
+            'upperLetter': 'CHAR_BIG',
+            'lowerRoman': 'ROMAN_SMALL',
+            'upperRoman': 'ROMAN_BIG'
+        };
+        const family = families[format];
+        if (!family) return 'NUMBER_TYPE_NUMBER_DOT';
+
+        // The character after this level's placeholder, e.g. ")" in "%2)"
+        const placeholder = `%${level + 1}`;
+        const at = lvlText.lastIndexOf(placeholder);
+        const suffix = at >= 0 ? lvlText.charAt(at + placeholder.length) : '';
+
+        if (suffix === ')') return `NUMBER_TYPE_${family}_PARENTHESIS`;
+        if (suffix === '-' && family === 'NUMBER') return 'NUMBER_TYPE_NUMBER_TRE';
+        return `NUMBER_TYPE_${family}_DOT`;
     }
 
     /**
@@ -400,7 +436,7 @@ class UdfGenerator {
     generateXml() {
         const template = `<?xml version="1.0" encoding="UTF-8" ?>
 <template format_id="1.8">
-<content><![CDATA[${this.content}]]></content>
+<content>${cdata(this.content)}</content>
 <properties><pageFormat mediaSizeName="1" leftMargin="42.51968479156494" rightMargin="28.34645652770996" topMargin="14.17322826385498" bottomMargin="14.17322826385498" paperOrientation="1" headerFOffset="20.0" footerFOffset="20.0" /></properties>
 <elements resolver="hvl-default">
 ${this.elements.join('\n')}
