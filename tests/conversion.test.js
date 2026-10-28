@@ -532,3 +532,144 @@ test('a reused parser does not carry styles into the next document', async () =>
     const second = await parser.parse(await buildDocx(body));
     assert.equal(second.elements[0].runs[0].bold, false);
 });
+
+// Page setup: the body's final w:sectPr -> <pageFormat>
+
+const TODAY_PAGE_FORMAT = '<pageFormat mediaSizeName="1" leftMargin="42.51968479156494" rightMargin="28.34645652770996" ' +
+    'topMargin="14.17322826385498" bottomMargin="14.17322826385498" paperOrientation="1" headerFOffset="20.0" footerFOffset="20.0" />';
+const PAGE_ATTRIBUTES = ['leftMargin', 'rightMargin', 'topMargin', 'bottomMargin', 'paperOrientation', 'headerFOffset', 'footerFOffset'];
+const ONE_INCH = '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>';
+
+async function pageFormat(sectPr, options = {}) {
+    const { doc, xml } = await convertBody(p('<w:r><w:t>Text</w:t></w:r>'), { ...options, sectPr });
+    const page = doc.querySelector('properties > pageFormat');
+    return { page, xml, attr: name => Number(page.getAttribute(name)) };
+}
+
+const assertClose = (actual, expected, message) =>
+    assert.ok(Math.abs(actual - expected) < 1e-9, `${message}: ${actual}, expected ${expected}`);
+
+test('a document without w:sectPr keeps the previous page format exactly', async () => {
+    for (const sectPr of [undefined, '']) {
+        const { xml } = await pageFormat(sectPr);
+        assert.ok(xml.includes(`<properties>${TODAY_PAGE_FORMAT}</properties>`), xml.split('\n')[3]);
+    }
+});
+
+test('w:pgMar margins and header/footer offsets are converted from twips to points', async () => {
+    const { page, attr } = await pageFormat(`<w:pgSz w:w="11906" w:h="16838"/>${ONE_INCH}`);
+    for (const side of ['top', 'right', 'bottom', 'left']) assert.equal(attr(`${side}Margin`), 72, side);
+    assert.equal(attr('headerFOffset'), 36);
+    assert.equal(attr('footerFOffset'), 36);
+    assert.equal(page.getAttribute('paperOrientation'), '1');
+    assert.equal(page.getAttribute('mediaSizeName'), '1');
+
+    const uneven = await pageFormat('<w:pgMar w:top="1417" w:right="1134" w:bottom="851" w:left="1701" w:header="709" w:footer="567"/>');
+    assertClose(uneven.attr('topMargin'), 70.85, 'top');
+    assertClose(uneven.attr('rightMargin'), 56.7, 'right');
+    assertClose(uneven.attr('bottomMargin'), 42.55, 'bottom');
+    assertClose(uneven.attr('leftMargin'), 85.05, 'left');
+    assertClose(uneven.attr('headerFOffset'), 35.45, 'header');
+    assertClose(uneven.attr('footerFOffset'), 28.35, 'footer');
+});
+
+test('the gutter widens the left margin, or the top or right one when Word puts it there', async () => {
+    const pgMar = '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="567"/>';
+
+    const left = await pageFormat(pgMar);
+    assertClose(left.attr('leftMargin'), 72 + 28.35, 'left');
+    assert.equal(left.attr('rightMargin'), 72);
+    assert.equal(left.attr('topMargin'), 72);
+
+    const top = await pageFormat(pgMar, { settings: '<w:gutterAtTop/>' });
+    assertClose(top.attr('topMargin'), 72 + 28.35, 'top');
+    assert.equal(top.attr('leftMargin'), 72);
+
+    const right = await pageFormat(`${pgMar}<w:rtlGutter/>`);
+    assertClose(right.attr('rightMargin'), 72 + 28.35, 'right');
+    assert.equal(right.attr('leftMargin'), 72);
+
+    const off = await pageFormat(pgMar, { settings: '<w:gutterAtTop w:val="false"/>' });
+    assertClose(off.attr('leftMargin'), 72 + 28.35, 'left with gutterAtTop off');
+});
+
+test('a negative top or bottom margin uses its absolute value', async () => {
+    const { attr } = await pageFormat('<w:pgMar w:top="-1440" w:right="1440" w:bottom="-720" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>');
+    assert.equal(attr('topMargin'), 72);
+    assert.equal(attr('bottomMargin'), 36);
+});
+
+test('landscape comes from w:orient or from a page wider than it is tall', async () => {
+    const orient = await pageFormat(`<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>${ONE_INCH}`);
+    assert.equal(orient.page.getAttribute('paperOrientation'), '0');
+
+    const orientOnly = await pageFormat('<w:pgSz w:orient="landscape"/>');
+    assert.equal(orientOnly.page.getAttribute('paperOrientation'), '0');
+
+    const wide = await pageFormat(`<w:pgSz w:w="16838" w:h="11906"/>${ONE_INCH}`);
+    assert.equal(wide.page.getAttribute('paperOrientation'), '0');
+
+    const tall = await pageFormat(`<w:pgSz w:w="11906" w:h="16838" w:orient="portrait"/>${ONE_INCH}`);
+    assert.equal(tall.page.getAttribute('paperOrientation'), '1');
+});
+
+test('only the body\'s final w:sectPr is read, not a paragraph\'s section break', async () => {
+    const sectionBreak = p('<w:r><w:t>First section</w:t></w:r>',
+        '<w:pPr><w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>' +
+        '<w:pgMar w:top="2880" w:right="2880" w:bottom="2880" w:left="2880" w:header="0" w:footer="0"/></w:sectPr></w:pPr>');
+    const { doc } = await convertBody(sectionBreak + p('<w:r><w:t>Last section</w:t></w:r>'),
+        { sectPr: `<w:pgSz w:w="11906" w:h="16838"/>${ONE_INCH}` });
+    const page = doc.querySelector('properties > pageFormat');
+    assert.equal(page.getAttribute('paperOrientation'), '1');
+    assert.equal(Number(page.getAttribute('topMargin')), 72);
+});
+
+test('universal measures such as "2.5cm" are converted to points', async () => {
+    const { attr } = await pageFormat('<w:pgMar w:top="2.5cm" w:right="1in" w:bottom="25mm" w:left="72pt" w:header="0.5in" w:footer="3pc"/>');
+    assertClose(attr('topMargin'), 2.5 * 72 / 2.54, 'top');
+    assert.equal(attr('rightMargin'), 72);
+    assertClose(attr('bottomMargin'), 25 * 72 / 25.4, 'bottom');
+    assert.equal(attr('leftMargin'), 72);
+    assert.equal(attr('headerFOffset'), 36);
+    assert.equal(attr('footerFOffset'), 36);
+});
+
+test('a missing or malformed page setup value falls back to the default for that attribute only', async () => {
+    const fallback = name => new RegExp(`${name}="([^"]*)"`).exec(TODAY_PAGE_FORMAT)[1];
+
+    const { page, xml } = await pageFormat(
+        '<w:pgSz w:w="wide" w:h=""/>' +
+        '<w:pgMar w:top="abc" w:right="1440" w:bottom="" w:left="-1440" w:header="12px" w:gutter="NaN"/>');
+    assert.equal(page.getAttribute('topMargin'), fallback('topMargin'));
+    assert.equal(page.getAttribute('bottomMargin'), fallback('bottomMargin'));
+    assert.equal(page.getAttribute('leftMargin'), fallback('leftMargin'));
+    assert.equal(page.getAttribute('headerFOffset'), fallback('headerFOffset'));
+    assert.equal(page.getAttribute('footerFOffset'), fallback('footerFOffset'));
+    assert.equal(page.getAttribute('paperOrientation'), '1');
+    assert.equal(Number(page.getAttribute('rightMargin')), 72);
+
+    for (const name of PAGE_ATTRIBUTES) {
+        const value = page.getAttribute(name);
+        assert.ok(value && Number.isFinite(Number(value)), `${name}="${value}"`);
+    }
+    assert.ok(!xml.includes('NaN'));
+    assert.ok(!/="\s*"/.test(xml.split('\n')[3]), 'no empty attribute in <pageFormat>');
+});
+
+test('a gutter is not added to a margin that fell back to its default', async () => {
+    const { page } = await pageFormat('<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:gutter="567"/>');
+    assert.equal(page.getAttribute('leftMargin'), '42.51968479156494');
+});
+
+test('a reused parser does not carry page setup into the next document', async () => {
+    const { DocxParser } = loadConverter();
+    const parser = new DocxParser();
+    const body = p('<w:r><w:t>Text</w:t></w:r>');
+
+    const first = await parser.parse(await buildDocx(body, { sectPr: `<w:pgSz w:w="16838" w:h="11906"/>${ONE_INCH}` }));
+    assert.equal(first.pageSetup.landscape, true);
+    assert.equal(first.pageSetup.topMargin, 72);
+
+    const second = await parser.parse(await buildDocx(body));
+    assert.deepEqual({ ...second.pageSetup }, {});
+});
