@@ -245,16 +245,7 @@ test('headings take bold and size from their styles.xml style', async () => {
     }
 });
 
-// Known gaps: recorded as todo so they show in the output as the fidelity to-do list
-// without failing the run. Each one should pass once its roadmap item (vision #5) lands.
-
-test('a vertically merged cell spans its rows', { todo: 'roadmap #8: emit rowspan for vMerge' }, async () => {
-    const { doc, content } = await converted(tablo);
-    const merged = elementWithText(doc, content, 'Fatura alacağı').closest('cell');
-    assert.equal(merged.getAttribute('rowspan'), '2');
-});
-
-test('page margins come from w:sectPr', { todo: 'roadmap #9: read page setup from w:sectPr' }, async () => {
+test('page margins come from w:sectPr', async () => {
     for (const petition of petitions) {
         const { doc } = await converted(petition);
         const page = doc.querySelector('properties pageFormat');
@@ -264,4 +255,13 @@ test('page margins come from w:sectPr', { todo: 'roadmap #9: read page setup fro
             assert.ok(Math.abs(actual - expected) < 0.01, `${petition.name}: ${side} margin ${actual}pt, expected ${expected}pt`);
         }
     }
+});
+
+// Known gaps: recorded as todo so they show in the output as the fidelity to-do list
+// without failing the run. Each one should pass once its roadmap item (vision #5) lands.
+
+test('a vertically merged cell spans its rows', { todo: 'roadmap #8: emit rowspan for vMerge' }, async () => {
+    const { doc, content } = await converted(tablo);
+    const merged = elementWithText(doc, content, 'Fatura alacağı').closest('cell');
+    assert.equal(merged.getAttribute('rowspan'), '2');
 });

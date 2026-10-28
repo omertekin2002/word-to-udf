@@ -9,6 +9,7 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 - 📋 **Formatting**: Preserves bold, italic, fonts, and alignment
 - 📊 **Tables**: Handles table structure with cells and borders
 - 🖼️ **Images**: Embeds images as base64
+- 📐 **Page Setup**: Keeps the page margins, orientation and header/footer offsets
 - 🇹🇷 **Turkish UI**: The page is in Turkish by default, with a TR | EN toggle for English (or open it with `?lang=en`)
 
 ## Usage
@@ -55,6 +56,14 @@ UDF (UYAP Document Format) is a ZIP archive containing:
 - `content.xml` - XML with document structure
 
 The format uses an offset-based content model where all text is stored in a CDATA block, and elements reference text positions using `startOffset` and `length` attributes.
+
+### Page Setup
+The `<pageFormat>` element takes its values from the document's final section properties (`w:sectPr`):
+- Margins and header/footer offsets come from `w:pgMar`, converted from twips to points. A gutter is added to the left margin (to the top with `w:gutterAtTop`, to the right with `w:rtlGutter`).
+- The page is landscape when `w:pgSz` says `w:orient="landscape"` or is wider than it is tall.
+- The paper size is always A4, the only size the UDF format documents.
+- A value the document doesn't set, or sets to something unreadable, keeps the converter's previous default (left 15 mm, right 10 mm, top and bottom 5 mm, portrait).
+- Only the last section's setup is used; per-section page setup isn't supported.
 
 ### Conversion Pipeline
 1. **Parse DOCX**: Extract and parse `word/document.xml`

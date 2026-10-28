@@ -30,6 +30,9 @@ const DEFAULT_RUN_FORMATTING = {
 // character style levels (ECMA-376 Part 1, 17.7.3)
 const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike'];
 
+// Points per unit of an OOXML universal measure (ST_UniversalMeasure, e.g. "2.5cm")
+const POINTS_PER_UNIT = { mm: 72 / 25.4, cm: 72 / 2.54, in: 72, pt: 1, pc: 12, pi: 12 };
+
 class DocxParser {
     constructor() {
         this.zip = null;
@@ -83,7 +86,8 @@ class DocxParser {
             return {
                 elements: elements,
                 images: this.images,
-                footnotes: this.footnotes
+                footnotes: this.footnotes,
+                pageSetup: await this.parsePageSetup()
             };
         } catch (error) {
             console.error('Error parsing DOCX:', error);
@@ -207,6 +211,86 @@ class DocxParser {
         } catch (error) {
             console.warn('Could not parse numbering:', error);
         }
+    }
+
+    /**
+     * Page setup from the body's final w:sectPr, which describes the document's last
+     * section: margins and header/footer offsets in points, and the orientation. Only
+     * values the document sets, as valid numbers, are returned; the generator falls
+     * back to its defaults for the rest.
+     * @returns {Promise<{leftMargin?: number, rightMargin?: number, topMargin?: number,
+     *   bottomMargin?: number, headerOffset?: number, footerOffset?: number, landscape?: boolean}>}
+     */
+    async parsePageSetup() {
+        const pageSetup = {};
+        const body = this.document.getElementsByTagNameNS(WORD_NS, 'body')[0];
+        const sectPr = body && childElements(body, 'sectPr').pop();
+        if (!sectPr) return pageSetup;
+
+        const pgMar = childElement(sectPr, 'pgMar');
+        if (pgMar) {
+            const measure = attribute => this.measureToPoints(pgMar.getAttribute(attribute));
+            const set = (key, value) => {
+                if (value !== null) pageSetup[key] = value;
+            };
+            // A negative top or bottom margin is fixed (text may overlap the header or
+            // footer); its size is the absolute value. The other values can't be negative.
+            const absolute = value => value === null ? null : Math.abs(value);
+            const nonNegative = value => value !== null && value >= 0 ? value : null;
+            set('topMargin', absolute(measure('w:top')));
+            set('bottomMargin', absolute(measure('w:bottom')));
+            set('leftMargin', nonNegative(measure('w:left')));
+            set('rightMargin', nonNegative(measure('w:right')));
+            set('headerOffset', nonNegative(measure('w:header')));
+            set('footerOffset', nonNegative(measure('w:footer')));
+
+            // The gutter widens the binding-side margin: the top one with w:gutterAtTop
+            // in settings.xml, the right one with w:rtlGutter, the left one otherwise
+            const gutter = nonNegative(measure('w:gutter'));
+            if (gutter) {
+                const rtlGutter = childElement(sectPr, 'rtlGutter');
+                const side = await this.isGutterAtTop() ? 'topMargin'
+                    : rtlGutter && this.isOn(rtlGutter) ? 'rightMargin' : 'leftMargin';
+                if (side in pageSetup) pageSetup[side] += gutter;
+            }
+        }
+
+        const pgSz = childElement(sectPr, 'pgSz');
+        if (pgSz) {
+            const width = this.measureToPoints(pgSz.getAttribute('w:w'));
+            const height = this.measureToPoints(pgSz.getAttribute('w:h'));
+            pageSetup.landscape = pgSz.getAttribute('w:orient') === 'landscape' ||
+                (width !== null && height !== null && width > height);
+        }
+
+        return pageSetup;
+    }
+
+    /**
+     * Whether word/settings.xml puts the gutter at the top of the page (w:gutterAtTop)
+     * @returns {Promise<boolean>}
+     */
+    async isGutterAtTop() {
+        const settingsFile = this.zip.file('word/settings.xml');
+        if (!settingsFile) return false;
+
+        const root = parseXml(await settingsFile.async('string')).documentElement;
+        const gutterAtTop = root.namespaceURI === WORD_NS && root.localName === 'settings'
+            ? childElement(root, 'gutterAtTop') : null;
+        return gutterAtTop ? this.isOn(gutterAtTop) : false;
+    }
+
+    /**
+     * Convert an OOXML length to points: a number of twips (twentieths of a point),
+     * or a universal measure with a unit such as "2.5cm"
+     * @param {string|null} value - The attribute value
+     * @returns {number|null} Points, or null for a missing or malformed value
+     */
+    measureToPoints(value) {
+        const match = /^\s*(-?(?:\d+\.?\d*|\.\d+))(mm|cm|in|pt|pc|pi)?\s*$/.exec(value || '');
+        if (!match) return null;
+        const number = Number(match[1]);
+        return match[2] ? number * POINTS_PER_UNIT[match[2]] : number / 20;
     }
 
     /**

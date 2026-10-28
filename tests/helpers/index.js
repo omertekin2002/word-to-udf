@@ -54,6 +54,7 @@ const MEDIA_CONTENT_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/
  * @param {string} [options.styles] - Contents of <w:styles> in word/styles.xml
  * @param {string} [options.numbering] - Contents of <w:numbering> in word/numbering.xml
  * @param {string} [options.sectPr] - Contents of the body's final <w:sectPr>
+ * @param {string} [options.settings] - Contents of <w:settings> in word/settings.xml
  * @returns {Promise<Buffer>}
  */
 async function buildDocx(bodyXml, options = {}) {
@@ -74,6 +75,7 @@ async function buildDocx(bodyXml, options = {}) {
 
     if (options.styles !== undefined) wordPart('styles.xml', 'styles', options.styles);
     if (options.numbering !== undefined) wordPart('numbering.xml', 'numbering', options.numbering);
+    if (options.settings !== undefined) wordPart('settings.xml', 'settings', options.settings);
 
     if (options.footnotes) {
         const notes = Object.entries(options.footnotes)
