@@ -465,10 +465,23 @@ test('bold, italic and strike toggle between the paragraph and character styles'
     assert.deepEqual(charAttrs(doc, content, 'Derived'), { ...PLAIN, bold: 'true', italic: 'true', strikethrough: 'true' });
     assert.deepEqual(charAttrs(doc, content, 'Strong in body'), { ...PLAIN, bold: 'true' });
 
-    // On in the document defaults stays on, whatever the styles say
-    const withDefaults = await convertBody(styled('Heading', run('Defaults bold', '<w:rStyle w:val="Strong"/>')),
-        { styles: '<w:docDefaults><w:rPrDefault><w:rPr><w:b/></w:rPr></w:rPrDefault></w:docDefaults>' + styles });
-    assert.equal(charAttrs(withDefaults.doc, withDefaults.content, 'Defaults bold').bold, 'true');
+    // On in the document defaults: a style level that leaves it unset counts as on, and it
+    // shows on when an even number of style levels turn it off
+    const withDefaults = await convertBody(
+        styled('Heading', run('Both styles on', '<w:rStyle w:val="Strong"/>')) +
+        styled('Regular', run('Paragraph style off')) +
+        styled('Regular', run('Character style on', '<w:rStyle w:val="Strong"/>')) +
+        p(run('Character style off', '<w:rStyle w:val="NotBold"/>')) +
+        p(run('No styles')), {
+            styles: '<w:docDefaults><w:rPrDefault><w:rPr><w:b/></w:rPr></w:rPrDefault></w:docDefaults>' + styles +
+                paragraphStyle('Regular', { rPr: '<w:b w:val="0"/>' })
+        });
+    const bold = text => charAttrs(withDefaults.doc, withDefaults.content, text).bold;
+    assert.equal(bold('Both styles on'), 'true');
+    assert.equal(bold('Paragraph style off'), null);
+    assert.equal(bold('Character style on'), null);
+    assert.equal(bold('Character style off'), null);
+    assert.equal(bold('No styles'), 'true');
 });
 
 test('paragraph alignment and indents come from the paragraph style unless set directly', async () => {

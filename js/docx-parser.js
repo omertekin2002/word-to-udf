@@ -638,7 +638,8 @@ class DocxParser {
      * defaults, the paragraph style chain, the character style chain (w:rStyle), then
      * the run's own w:rPr. Later layers override earlier ones, except that bold, italic
      * and strike set by the two style levels toggle: on in both styles is off, and off
-     * in a style leaves the value unchanged. Direct formatting always sets them outright.
+     * in a style leaves the value unchanged (unless the document defaults turn it on).
+     * Direct formatting always sets them outright.
      * @param {Element} run - The run element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @returns {Object} Text item template (without text)
@@ -660,8 +661,13 @@ class DocxParser {
 
         for (const key of TOGGLE_PROPERTIES) {
             if (key in direct) continue;
-            // On in the document defaults stays on (ECMA-376 Part 1, 17.7.3)
-            formatting[key] = defaults[key] === true || (paragraphRun[key] === true) !== (characterRun[key] === true);
+            if (defaults[key] === true) {
+                // On in the document defaults: a style level that leaves it unset counts as on, and
+                // Word shows it on when an even number of levels turn it off (MS-OI29500, 17.7.3)
+                formatting[key] = [paragraphRun[key], characterRun[key]].filter(value => value === false).length % 2 === 0;
+            } else {
+                formatting[key] = (paragraphRun[key] === true) !== (characterRun[key] === true);
+            }
         }
         if (!formatting.color) delete formatting.color;
 
