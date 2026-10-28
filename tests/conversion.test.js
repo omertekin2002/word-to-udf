@@ -359,3 +359,133 @@ test('a reused parser does not carry list definitions into the next document', a
     assert.equal(second.elements[0].numbering.format, undefined);
     assert.equal(second.elements[0].numbering.numId, '1');
 });
+
+const run = (text, rPr = '') => `<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ''}<w:t>${text}</w:t></w:r>`;
+const styled = (styleId, runs, pPr = '') => p(runs, `<w:pPr><w:pStyle w:val="${styleId}"/>${pPr}</w:pPr>`);
+const paragraphStyle = (id, { basedOn, pPr = '', rPr = '', isDefault = false } = {}) =>
+    `<w:style w:type="paragraph"${isDefault ? ' w:default="1"' : ''} w:styleId="${id}">` +
+    (basedOn ? `<w:basedOn w:val="${basedOn}"/>` : '') +
+    (pPr ? `<w:pPr>${pPr}</w:pPr>` : '') + (rPr ? `<w:rPr>${rPr}</w:rPr>` : '') + '</w:style>';
+const characterStyle = (id, rPr) => `<w:style w:type="character" w:styleId="${id}"><w:rPr>${rPr}</w:rPr></w:style>`;
+
+/** The content element holding exactly this text */
+function contentWithText(doc, content, text) {
+    const found = contentElements(doc).filter(el => textOf(el, content) === text);
+    assert.equal(found.length, 1, `${JSON.stringify(text)} is held by ${found.length} elements`);
+    return found[0];
+}
+
+/** The character attributes the generator wrote for a piece of text */
+function charAttrs(doc, content, text) {
+    const el = contentWithText(doc, content, text);
+    return Object.fromEntries(['family', 'size', 'bold', 'italic', 'underline', 'strikethrough', 'foreground']
+        .map(name => [name, el.getAttribute(name)]));
+}
+
+const PLAIN = { family: 'Times New Roman', size: '12', bold: null, italic: null, underline: null, strikethrough: null, foreground: null };
+
+test('w:docDefaults font and size apply to unformatted runs', async () => {
+    const { doc, content } = await convertBody(p(run('Plain')) + p(run('Direct', '<w:rFonts w:ascii="Courier New"/>')), {
+        styles: '<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/>' +
+            '</w:rPr></w:rPrDefault></w:docDefaults>'
+    });
+
+    assert.deepEqual(charAttrs(doc, content, 'Plain'), { ...PLAIN, family: 'Arial', size: '11' });
+    assert.deepEqual(charAttrs(doc, content, 'Direct'), { ...PLAIN, family: 'Courier New', size: '11' });
+});
+
+test('a w:basedOn chain is followed and a later style can turn a property off', async () => {
+    const { doc, content } = await convertBody(
+        styled('Child', run('Child text')) + styled('Grandchild', run('Grandchild text')), {
+            styles: paragraphStyle('Base', { rPr: '<w:b/><w:sz w:val="28"/>' }) +
+                paragraphStyle('Child', { basedOn: 'Base', rPr: '<w:i/>' }) +
+                paragraphStyle('Grandchild', { basedOn: 'Child', rPr: '<w:b w:val="0"/><w:u w:val="single"/>' })
+        });
+
+    assert.deepEqual(charAttrs(doc, content, 'Child text'), { ...PLAIN, size: '14', bold: 'true', italic: 'true' });
+    assert.deepEqual(charAttrs(doc, content, 'Grandchild text'), { ...PLAIN, size: '14', italic: 'true', underline: 'true' });
+});
+
+test('a cyclic, self-referencing or dangling w:basedOn does not throw or hang', async () => {
+    const { doc, content } = await convertBody(
+        styled('A', run('Cycle')) + styled('Self', run('Self')) + styled('Dangling', run('Dangling')), {
+            styles: paragraphStyle('A', { basedOn: 'B', rPr: '<w:b/>' }) +
+                paragraphStyle('B', { basedOn: 'A', rPr: '<w:i/><w:b w:val="0"/>' }) +
+                paragraphStyle('Self', { basedOn: 'Self', rPr: '<w:strike/>' }) +
+                paragraphStyle('Dangling', { basedOn: 'Missing', rPr: '<w:sz w:val="32"/>' })
+        });
+
+    // The chain stops where it loops: A takes B underneath, then its own bold on top
+    assert.deepEqual(charAttrs(doc, content, 'Cycle'), { ...PLAIN, bold: 'true', italic: 'true' });
+    assert.deepEqual(charAttrs(doc, content, 'Self'), { ...PLAIN, strikethrough: 'true' });
+    assert.deepEqual(charAttrs(doc, content, 'Dangling'), { ...PLAIN, size: '16' });
+});
+
+test('a character style applies over the paragraph style, and direct w:rPr wins over both', async () => {
+    const { doc, content, parsed } = await convertBody(styled('Heading',
+        run('Heading') +
+        run('Quiet', '<w:rStyle w:val="Quiet"/>') +
+        run('Quiet but bold', '<w:rStyle w:val="Quiet"/><w:b/>') +
+        run('Not bold', '<w:b w:val="0"/><w:color w:val="auto"/>') +
+        run('Unknown style', '<w:rStyle w:val="Nope"/>')), {
+        styles: paragraphStyle('Heading', { rPr: '<w:b/><w:sz w:val="28"/><w:color w:val="FF0000"/>' }) +
+            characterStyle('Quiet', '<w:b w:val="false"/><w:sz w:val="20"/><w:i/>')
+    });
+
+    const red = String(0xFFFF0000 | 0);
+    assert.deepEqual(charAttrs(doc, content, 'Heading'), { ...PLAIN, size: '14', bold: 'true', foreground: red });
+    assert.deepEqual(charAttrs(doc, content, 'Quiet'), { ...PLAIN, size: '10', italic: 'true', foreground: red });
+    assert.deepEqual(charAttrs(doc, content, 'Quiet but bold'), { ...PLAIN, size: '10', bold: 'true', italic: 'true', foreground: red });
+    assert.deepEqual(charAttrs(doc, content, 'Not bold'), { ...PLAIN, size: '14' });
+    assert.equal('color' in parsed.elements[0].runs[3], false);
+    assert.deepEqual(charAttrs(doc, content, 'Unknown style'), { ...PLAIN, size: '14', bold: 'true', foreground: red });
+});
+
+test('paragraph alignment and indents come from the paragraph style unless set directly', async () => {
+    const { doc, content } = await convertBody(
+        styled('Indented', run('From style')) +
+        styled('Indented', run('Direct'), '<w:jc w:val="right"/><w:ind w:left="1440"/>') +
+        styled('Indented', run('Hanging'), '<w:ind w:hanging="360"/>') +
+        p(run('Default style')) +
+        styled('Missing', run('Unknown style')), {
+            styles: paragraphStyle('Normal', { isDefault: true, pPr: '<w:jc w:val="both"/>' }) +
+                paragraphStyle('Indented', { basedOn: 'Normal', pPr: '<w:jc w:val="center"/><w:ind w:left="720" w:firstLine="360"/>' })
+        });
+
+    const para = text => {
+        const el = contentWithText(doc, content, text).closest('paragraph');
+        return ['Alignment', 'LeftIndent', 'RightIndent', 'FirstLineIndent'].map(name => el.getAttribute(name));
+    };
+    assert.deepEqual(para('From style'), ['1', '36.0', '0.0', '18.0']);
+    assert.deepEqual(para('Direct'), ['2', '72.0', '0.0', '18.0']);
+    assert.deepEqual(para('Hanging'), ['1', '36.0', '0.0', null]);
+    assert.deepEqual(para('Default style'), ['3', '0.0', '0.0', null]);
+    assert.deepEqual(para('Unknown style'), ['3', '0.0', '0.0', null]);
+});
+
+test('without styles.xml, or with a malformed one, runs keep the built-in defaults', async (t) => {
+    const body = styled('Heading', run('Text')) + p(run('Bold', '<w:b/>'), '<w:pPr><w:jc w:val="center"/></w:pPr>');
+    const warn = t.mock.method(console, 'warn', () => {});
+
+    for (const options of [{}, { styles: '' }, { styles: '<w:style w:type="paragraph" w:styleId="Heading"><w:rPr><w:b/>' }]) {
+        const { doc, content } = await convertBody(body, options);
+        assert.deepEqual(charAttrs(doc, content, 'Text'), PLAIN);
+        assert.deepEqual(charAttrs(doc, content, 'Bold'), { ...PLAIN, bold: 'true' });
+        assert.equal(contentWithText(doc, content, 'Text').closest('paragraph').getAttribute('Alignment'), '0');
+        assert.equal(contentWithText(doc, content, 'Bold').closest('paragraph').getAttribute('Alignment'), '1');
+    }
+    // Only the malformed part warns
+    assert.equal(warn.mock.calls.filter(call => String(call.arguments[0]).includes('styles')).length, 1);
+});
+
+test('a reused parser does not carry styles into the next document', async () => {
+    const { DocxParser } = loadConverter();
+    const parser = new DocxParser();
+    const body = styled('Heading', run('Text'));
+
+    const first = await parser.parse(await buildDocx(body, { styles: paragraphStyle('Heading', { rPr: '<w:b/>' }) }));
+    assert.equal(first.elements[0].runs[0].bold, true);
+
+    const second = await parser.parse(await buildDocx(body));
+    assert.equal(second.elements[0].runs[0].bold, false);
+});

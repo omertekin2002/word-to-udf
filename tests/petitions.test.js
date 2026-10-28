@@ -236,10 +236,7 @@ test('ekli tablo dilekçesi: a "%1-" list keeps the dash number style', async ()
     }
 });
 
-// Known gaps: recorded as todo so they show in the output as the fidelity to-do list
-// without failing the run. Each one should pass once its roadmap item (vision #5) lands.
-
-test('headings take bold and size from their styles.xml style', { todo: 'roadmap #7: resolve styles.xml' }, async () => {
+test('headings take bold and size from their styles.xml style', async () => {
     const { doc, content } = await converted(itiraz);
     for (const heading of itiraz.headings) {
         const el = elementWithText(doc, content, heading);
@@ -247,6 +244,9 @@ test('headings take bold and size from their styles.xml style', { todo: 'roadmap
         assert.equal(el.getAttribute('size'), '14', heading);
     }
 });
+
+// Known gaps: recorded as todo so they show in the output as the fidelity to-do list
+// without failing the run. Each one should pass once its roadmap item (vision #5) lands.
 
 test('a vertically merged cell spans its rows', { todo: 'roadmap #8: emit rowspan for vMerge' }, async () => {
     const { doc, content } = await converted(tablo);
