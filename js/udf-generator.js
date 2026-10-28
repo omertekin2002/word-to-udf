@@ -3,9 +3,22 @@
  * Generates UYAP UDF format from parsed document structure
  */
 
+// <pageFormat> values for anything the document's page setup doesn't give, as written
+// before page setup was read from the document
+const DEFAULT_PAGE_FORMAT = {
+    leftMargin: '42.51968479156494',
+    rightMargin: '28.34645652770996',
+    topMargin: '14.17322826385498',
+    bottomMargin: '14.17322826385498',
+    paperOrientation: '1',
+    headerFOffset: '20.0',
+    footerFOffset: '20.0'
+};
+
 class UdfGenerator {
     constructor() {
         this.content = '';
+        this.pageSetup = {};
         this.elements = [];
         this.currentOffset = 0;
         this.collectedFootnotes = []; // Store footnotes to append at end
@@ -24,6 +37,7 @@ class UdfGenerator {
         this.currentOffset = 0;
         this.collectedFootnotes = [];
         this.footnoteCounter = 0;
+        this.pageSetup = document.pageSetup || {};
 
         // Process all document elements
         for (const element of document.elements) {
@@ -430,6 +444,33 @@ class UdfGenerator {
     }
 
     /**
+     * The <pageFormat> element from the parsed page setup. mediaSizeName stays 1 (A4),
+     * the only paper size the UDF format documents.
+     * @returns {string} The element
+     */
+    generatePageFormat() {
+        const setup = this.pageSetup;
+        const points = value => Number.isFinite(value) && value >= 0
+            ? (Number.isInteger(value) ? value.toFixed(1) : String(value))
+            : null;
+        const attributes = {
+            leftMargin: points(setup.leftMargin),
+            rightMargin: points(setup.rightMargin),
+            topMargin: points(setup.topMargin),
+            bottomMargin: points(setup.bottomMargin),
+            // 0 is landscape, 1 portrait
+            paperOrientation: typeof setup.landscape === 'boolean' ? (setup.landscape ? '0' : '1') : null,
+            headerFOffset: points(setup.headerOffset),
+            footerFOffset: points(setup.footerOffset)
+        };
+
+        const values = Object.entries(DEFAULT_PAGE_FORMAT)
+            .map(([name, fallback]) => `${name}="${attributes[name] ?? fallback}"`)
+            .join(' ');
+        return `<pageFormat mediaSizeName="1" ${values} />`;
+    }
+
+    /**
      * Generate final UDF XML
      * @returns {string} Complete XML content
      */
@@ -437,7 +478,7 @@ class UdfGenerator {
         const template = `<?xml version="1.0" encoding="UTF-8" ?>
 <template format_id="1.8">
 <content>${cdata(this.content)}</content>
-<properties><pageFormat mediaSizeName="1" leftMargin="42.51968479156494" rightMargin="28.34645652770996" topMargin="14.17322826385498" bottomMargin="14.17322826385498" paperOrientation="1" headerFOffset="20.0" footerFOffset="20.0" /></properties>
+<properties>${this.generatePageFormat()}</properties>
 <elements resolver="hvl-default">
 ${this.elements.join('\n')}
 </elements>

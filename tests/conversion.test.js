@@ -359,3 +359,325 @@ test('a reused parser does not carry list definitions into the next document', a
     assert.equal(second.elements[0].numbering.format, undefined);
     assert.equal(second.elements[0].numbering.numId, '1');
 });
+
+const run = (text, rPr = '') => `<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ''}<w:t>${text}</w:t></w:r>`;
+const styled = (styleId, runs, pPr = '') => p(runs, `<w:pPr><w:pStyle w:val="${styleId}"/>${pPr}</w:pPr>`);
+const paragraphStyle = (id, { basedOn, pPr = '', rPr = '', isDefault = false } = {}) =>
+    `<w:style w:type="paragraph"${isDefault ? ' w:default="1"' : ''} w:styleId="${id}">` +
+    (basedOn ? `<w:basedOn w:val="${basedOn}"/>` : '') +
+    (pPr ? `<w:pPr>${pPr}</w:pPr>` : '') + (rPr ? `<w:rPr>${rPr}</w:rPr>` : '') + '</w:style>';
+const characterStyle = (id, rPr) => `<w:style w:type="character" w:styleId="${id}"><w:rPr>${rPr}</w:rPr></w:style>`;
+
+/** The content element holding exactly this text */
+function contentWithText(doc, content, text) {
+    const found = contentElements(doc).filter(el => textOf(el, content) === text);
+    assert.equal(found.length, 1, `${JSON.stringify(text)} is held by ${found.length} elements`);
+    return found[0];
+}
+
+/** The character attributes the generator wrote for a piece of text */
+function charAttrs(doc, content, text) {
+    const el = contentWithText(doc, content, text);
+    return Object.fromEntries(['family', 'size', 'bold', 'italic', 'underline', 'strikethrough', 'foreground']
+        .map(name => [name, el.getAttribute(name)]));
+}
+
+const PLAIN = { family: 'Times New Roman', size: '12', bold: null, italic: null, underline: null, strikethrough: null, foreground: null };
+
+test('w:docDefaults font and size apply to unformatted runs', async () => {
+    const { doc, content } = await convertBody(p(run('Plain')) + p(run('Direct', '<w:rFonts w:ascii="Courier New"/>')), {
+        styles: '<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/>' +
+            '</w:rPr></w:rPrDefault></w:docDefaults>'
+    });
+
+    assert.deepEqual(charAttrs(doc, content, 'Plain'), { ...PLAIN, family: 'Arial', size: '11' });
+    assert.deepEqual(charAttrs(doc, content, 'Direct'), { ...PLAIN, family: 'Courier New', size: '11' });
+});
+
+test('a w:basedOn chain is followed and a later style can turn a property off', async () => {
+    const { doc, content } = await convertBody(
+        styled('Child', run('Child text')) + styled('Grandchild', run('Grandchild text')), {
+            styles: paragraphStyle('Base', { rPr: '<w:b/><w:sz w:val="28"/>' }) +
+                paragraphStyle('Child', { basedOn: 'Base', rPr: '<w:i/>' }) +
+                paragraphStyle('Grandchild', { basedOn: 'Child', rPr: '<w:b w:val="0"/><w:u w:val="single"/>' })
+        });
+
+    assert.deepEqual(charAttrs(doc, content, 'Child text'), { ...PLAIN, size: '14', bold: 'true', italic: 'true' });
+    assert.deepEqual(charAttrs(doc, content, 'Grandchild text'), { ...PLAIN, size: '14', italic: 'true', underline: 'true' });
+});
+
+test('a style without w:type is a paragraph style', async () => {
+    const { doc, content } = await convertBody(styled('Untyped', run('Untyped text')), {
+        styles: '<w:style w:styleId="Untyped"><w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:style>'
+    });
+
+    assert.deepEqual(charAttrs(doc, content, 'Untyped text'), { ...PLAIN, size: '14', bold: 'true' });
+});
+
+test('a cyclic, self-referencing or dangling w:basedOn does not throw or hang', async () => {
+    const { doc, content } = await convertBody(
+        styled('A', run('Cycle')) + styled('Self', run('Self')) + styled('Dangling', run('Dangling')), {
+            styles: paragraphStyle('A', { basedOn: 'B', rPr: '<w:b/>' }) +
+                paragraphStyle('B', { basedOn: 'A', rPr: '<w:i/><w:b w:val="0"/>' }) +
+                paragraphStyle('Self', { basedOn: 'Self', rPr: '<w:strike/>' }) +
+                paragraphStyle('Dangling', { basedOn: 'Missing', rPr: '<w:sz w:val="32"/>' })
+        });
+
+    // The chain stops where it loops: A takes B underneath, then its own bold on top
+    assert.deepEqual(charAttrs(doc, content, 'Cycle'), { ...PLAIN, bold: 'true', italic: 'true' });
+    assert.deepEqual(charAttrs(doc, content, 'Self'), { ...PLAIN, strikethrough: 'true' });
+    assert.deepEqual(charAttrs(doc, content, 'Dangling'), { ...PLAIN, size: '16' });
+});
+
+test('a character style applies over the paragraph style, and direct w:rPr wins over both', async () => {
+    const { doc, content, parsed } = await convertBody(styled('Heading',
+        run('Heading') +
+        run('Small', '<w:rStyle w:val="Small"/>') +
+        run('Small but italic', '<w:rStyle w:val="Small"/><w:i/>') +
+        run('Not bold', '<w:b w:val="0"/><w:color w:val="auto"/>') +
+        run('Unknown style', '<w:rStyle w:val="Nope"/>')), {
+        styles: paragraphStyle('Heading', { rPr: '<w:b/><w:sz w:val="28"/><w:color w:val="FF0000"/>' }) +
+            characterStyle('Small', '<w:sz w:val="20"/><w:u w:val="single"/><w:color w:val="0000FF"/>')
+    });
+
+    const red = String(0xFFFF0000 | 0);
+    const blue = String(0xFF0000FF | 0);
+    assert.deepEqual(charAttrs(doc, content, 'Heading'), { ...PLAIN, size: '14', bold: 'true', foreground: red });
+    assert.deepEqual(charAttrs(doc, content, 'Small'), { ...PLAIN, size: '10', bold: 'true', underline: 'true', foreground: blue });
+    assert.deepEqual(charAttrs(doc, content, 'Small but italic'),
+        { ...PLAIN, size: '10', bold: 'true', italic: 'true', underline: 'true', foreground: blue });
+    assert.deepEqual(charAttrs(doc, content, 'Not bold'), { ...PLAIN, size: '14' });
+    assert.equal('color' in parsed.elements[0].runs[3], false);
+    assert.deepEqual(charAttrs(doc, content, 'Unknown style'), { ...PLAIN, size: '14', bold: 'true', foreground: red });
+});
+
+test('bold, italic and strike toggle between the paragraph and character styles', async () => {
+    const styles = paragraphStyle('Heading', { rPr: '<w:b/><w:i/>' }) +
+        characterStyle('Strong', '<w:b/>') +
+        characterStyle('NotBold', '<w:b w:val="0"/>') +
+        characterStyle('StrongBase', '<w:b/><w:strike/>') +
+        '<w:style w:type="character" w:styleId="Derived"><w:basedOn w:val="StrongBase"/><w:rPr><w:b w:val="0"/></w:rPr></w:style>';
+    const { doc, content } = await convertBody(
+        styled('Heading',
+            run('Strong in heading', '<w:rStyle w:val="Strong"/>') +
+            run('Off in style', '<w:rStyle w:val="NotBold"/>') +
+            run('Direct bold', '<w:rStyle w:val="Strong"/><w:b/>') +
+            run('Derived', '<w:rStyle w:val="Derived"/>')) +
+        p(run('Strong in body', '<w:rStyle w:val="Strong"/>')), { styles });
+
+    // On in both styles is off; off in a style leaves it unchanged; direct formatting is absolute
+    assert.deepEqual(charAttrs(doc, content, 'Strong in heading'), { ...PLAIN, italic: 'true' });
+    assert.deepEqual(charAttrs(doc, content, 'Off in style'), { ...PLAIN, bold: 'true', italic: 'true' });
+    assert.deepEqual(charAttrs(doc, content, 'Direct bold'), { ...PLAIN, bold: 'true', italic: 'true' });
+    // Within one style level the basedOn chain overrides: Derived turns its base's bold off
+    assert.deepEqual(charAttrs(doc, content, 'Derived'), { ...PLAIN, bold: 'true', italic: 'true', strikethrough: 'true' });
+    assert.deepEqual(charAttrs(doc, content, 'Strong in body'), { ...PLAIN, bold: 'true' });
+
+    // On in the document defaults: a style level that leaves it unset counts as on, and it
+    // shows on when an even number of style levels turn it off
+    const withDefaults = await convertBody(
+        styled('Heading', run('Both styles on', '<w:rStyle w:val="Strong"/>')) +
+        styled('Regular', run('Paragraph style off')) +
+        styled('Regular', run('Character style on', '<w:rStyle w:val="Strong"/>')) +
+        p(run('Character style off', '<w:rStyle w:val="NotBold"/>')) +
+        p(run('No styles')), {
+            styles: '<w:docDefaults><w:rPrDefault><w:rPr><w:b/></w:rPr></w:rPrDefault></w:docDefaults>' + styles +
+                paragraphStyle('Regular', { rPr: '<w:b w:val="0"/>' })
+        });
+    const bold = text => charAttrs(withDefaults.doc, withDefaults.content, text).bold;
+    assert.equal(bold('Both styles on'), 'true');
+    assert.equal(bold('Paragraph style off'), null);
+    assert.equal(bold('Character style on'), null);
+    assert.equal(bold('Character style off'), null);
+    assert.equal(bold('No styles'), 'true');
+});
+
+test('paragraph alignment and indents come from the paragraph style unless set directly', async () => {
+    const { doc, content } = await convertBody(
+        styled('Indented', run('From style')) +
+        styled('Indented', run('Direct'), '<w:jc w:val="right"/><w:ind w:left="1440"/>') +
+        styled('Indented', run('Hanging'), '<w:ind w:hanging="360"/>') +
+        p(run('Default style')) +
+        styled('Missing', run('Unknown style')), {
+            styles: paragraphStyle('Normal', { isDefault: true, pPr: '<w:jc w:val="both"/>' }) +
+                paragraphStyle('Indented', { basedOn: 'Normal', pPr: '<w:jc w:val="center"/><w:ind w:left="720" w:firstLine="360"/>' })
+        });
+
+    const para = text => {
+        const el = contentWithText(doc, content, text).closest('paragraph');
+        return ['Alignment', 'LeftIndent', 'RightIndent', 'FirstLineIndent'].map(name => el.getAttribute(name));
+    };
+    assert.deepEqual(para('From style'), ['1', '36.0', '0.0', '18.0']);
+    assert.deepEqual(para('Direct'), ['2', '72.0', '0.0', '18.0']);
+    assert.deepEqual(para('Hanging'), ['1', '36.0', '0.0', null]);
+    assert.deepEqual(para('Default style'), ['3', '0.0', '0.0', null]);
+    assert.deepEqual(para('Unknown style'), ['3', '0.0', '0.0', null]);
+});
+
+test('without styles.xml, or with a malformed one, runs keep the built-in defaults', async (t) => {
+    const body = styled('Heading', run('Text')) + p(run('Bold', '<w:b/>'), '<w:pPr><w:jc w:val="center"/></w:pPr>');
+    const warn = t.mock.method(console, 'warn', () => {});
+
+    for (const options of [{}, { styles: '' }, { styles: '<w:style w:type="paragraph" w:styleId="Heading"><w:rPr><w:b/>' }]) {
+        const { doc, content } = await convertBody(body, options);
+        assert.deepEqual(charAttrs(doc, content, 'Text'), PLAIN);
+        assert.deepEqual(charAttrs(doc, content, 'Bold'), { ...PLAIN, bold: 'true' });
+        assert.equal(contentWithText(doc, content, 'Text').closest('paragraph').getAttribute('Alignment'), '0');
+        assert.equal(contentWithText(doc, content, 'Bold').closest('paragraph').getAttribute('Alignment'), '1');
+    }
+    // Only the malformed part warns
+    assert.equal(warn.mock.calls.filter(call => String(call.arguments[0]).includes('styles')).length, 1);
+});
+
+test('a reused parser does not carry styles into the next document', async () => {
+    const { DocxParser } = loadConverter();
+    const parser = new DocxParser();
+    const body = styled('Heading', run('Text'));
+
+    const first = await parser.parse(await buildDocx(body, { styles: paragraphStyle('Heading', { rPr: '<w:b/>' }) }));
+    assert.equal(first.elements[0].runs[0].bold, true);
+
+    const second = await parser.parse(await buildDocx(body));
+    assert.equal(second.elements[0].runs[0].bold, false);
+});
+
+// Page setup: the body's final w:sectPr -> <pageFormat>
+
+const TODAY_PAGE_FORMAT = '<pageFormat mediaSizeName="1" leftMargin="42.51968479156494" rightMargin="28.34645652770996" ' +
+    'topMargin="14.17322826385498" bottomMargin="14.17322826385498" paperOrientation="1" headerFOffset="20.0" footerFOffset="20.0" />';
+const PAGE_ATTRIBUTES = ['leftMargin', 'rightMargin', 'topMargin', 'bottomMargin', 'paperOrientation', 'headerFOffset', 'footerFOffset'];
+const ONE_INCH = '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>';
+
+async function pageFormat(sectPr, options = {}) {
+    const { doc, xml } = await convertBody(p('<w:r><w:t>Text</w:t></w:r>'), { ...options, sectPr });
+    const page = doc.querySelector('properties > pageFormat');
+    return { page, xml, attr: name => Number(page.getAttribute(name)) };
+}
+
+const assertClose = (actual, expected, message) =>
+    assert.ok(Math.abs(actual - expected) < 1e-9, `${message}: ${actual}, expected ${expected}`);
+
+test('a document without w:sectPr keeps the previous page format exactly', async () => {
+    for (const sectPr of [undefined, '']) {
+        const { xml } = await pageFormat(sectPr);
+        assert.ok(xml.includes(`<properties>${TODAY_PAGE_FORMAT}</properties>`), xml.split('\n')[3]);
+    }
+});
+
+test('w:pgMar margins and header/footer offsets are converted from twips to points', async () => {
+    const { page, attr } = await pageFormat(`<w:pgSz w:w="11906" w:h="16838"/>${ONE_INCH}`);
+    for (const side of ['top', 'right', 'bottom', 'left']) assert.equal(attr(`${side}Margin`), 72, side);
+    assert.equal(attr('headerFOffset'), 36);
+    assert.equal(attr('footerFOffset'), 36);
+    assert.equal(page.getAttribute('paperOrientation'), '1');
+    assert.equal(page.getAttribute('mediaSizeName'), '1');
+
+    const uneven = await pageFormat('<w:pgMar w:top="1417" w:right="1134" w:bottom="851" w:left="1701" w:header="709" w:footer="567"/>');
+    assertClose(uneven.attr('topMargin'), 70.85, 'top');
+    assertClose(uneven.attr('rightMargin'), 56.7, 'right');
+    assertClose(uneven.attr('bottomMargin'), 42.55, 'bottom');
+    assertClose(uneven.attr('leftMargin'), 85.05, 'left');
+    assertClose(uneven.attr('headerFOffset'), 35.45, 'header');
+    assertClose(uneven.attr('footerFOffset'), 28.35, 'footer');
+});
+
+test('the gutter widens the left margin, or the top or right one when Word puts it there', async () => {
+    const pgMar = '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="567"/>';
+
+    const left = await pageFormat(pgMar);
+    assertClose(left.attr('leftMargin'), 72 + 28.35, 'left');
+    assert.equal(left.attr('rightMargin'), 72);
+    assert.equal(left.attr('topMargin'), 72);
+
+    const top = await pageFormat(pgMar, { settings: '<w:gutterAtTop/>' });
+    assertClose(top.attr('topMargin'), 72 + 28.35, 'top');
+    assert.equal(top.attr('leftMargin'), 72);
+
+    const right = await pageFormat(`${pgMar}<w:rtlGutter/>`);
+    assertClose(right.attr('rightMargin'), 72 + 28.35, 'right');
+    assert.equal(right.attr('leftMargin'), 72);
+
+    const off = await pageFormat(pgMar, { settings: '<w:gutterAtTop w:val="false"/>' });
+    assertClose(off.attr('leftMargin'), 72 + 28.35, 'left with gutterAtTop off');
+});
+
+test('a negative top or bottom margin uses its absolute value', async () => {
+    const { attr } = await pageFormat('<w:pgMar w:top="-1440" w:right="1440" w:bottom="-720" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>');
+    assert.equal(attr('topMargin'), 72);
+    assert.equal(attr('bottomMargin'), 36);
+});
+
+test('landscape comes from w:orient or from a page wider than it is tall', async () => {
+    const orient = await pageFormat(`<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>${ONE_INCH}`);
+    assert.equal(orient.page.getAttribute('paperOrientation'), '0');
+
+    const orientOnly = await pageFormat('<w:pgSz w:orient="landscape"/>');
+    assert.equal(orientOnly.page.getAttribute('paperOrientation'), '0');
+
+    const wide = await pageFormat(`<w:pgSz w:w="16838" w:h="11906"/>${ONE_INCH}`);
+    assert.equal(wide.page.getAttribute('paperOrientation'), '0');
+
+    const tall = await pageFormat(`<w:pgSz w:w="11906" w:h="16838" w:orient="portrait"/>${ONE_INCH}`);
+    assert.equal(tall.page.getAttribute('paperOrientation'), '1');
+});
+
+test('only the body\'s final w:sectPr is read, not a paragraph\'s section break', async () => {
+    const sectionBreak = p('<w:r><w:t>First section</w:t></w:r>',
+        '<w:pPr><w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>' +
+        '<w:pgMar w:top="2880" w:right="2880" w:bottom="2880" w:left="2880" w:header="0" w:footer="0"/></w:sectPr></w:pPr>');
+    const { doc } = await convertBody(sectionBreak + p('<w:r><w:t>Last section</w:t></w:r>'),
+        { sectPr: `<w:pgSz w:w="11906" w:h="16838"/>${ONE_INCH}` });
+    const page = doc.querySelector('properties > pageFormat');
+    assert.equal(page.getAttribute('paperOrientation'), '1');
+    assert.equal(Number(page.getAttribute('topMargin')), 72);
+});
+
+test('universal measures such as "2.5cm" are converted to points', async () => {
+    const { attr } = await pageFormat('<w:pgMar w:top="2.5cm" w:right="1in" w:bottom="25mm" w:left="72pt" w:header="0.5in" w:footer="3pc"/>');
+    assertClose(attr('topMargin'), 2.5 * 72 / 2.54, 'top');
+    assert.equal(attr('rightMargin'), 72);
+    assertClose(attr('bottomMargin'), 25 * 72 / 25.4, 'bottom');
+    assert.equal(attr('leftMargin'), 72);
+    assert.equal(attr('headerFOffset'), 36);
+    assert.equal(attr('footerFOffset'), 36);
+});
+
+test('a missing or malformed page setup value falls back to the default for that attribute only', async () => {
+    const fallback = name => new RegExp(`${name}="([^"]*)"`).exec(TODAY_PAGE_FORMAT)[1];
+
+    const { page, xml } = await pageFormat(
+        '<w:pgSz w:w="wide" w:h=""/>' +
+        '<w:pgMar w:top="abc" w:right="1440" w:bottom="" w:left="-1440" w:header="12px" w:gutter="NaN"/>');
+    assert.equal(page.getAttribute('topMargin'), fallback('topMargin'));
+    assert.equal(page.getAttribute('bottomMargin'), fallback('bottomMargin'));
+    assert.equal(page.getAttribute('leftMargin'), fallback('leftMargin'));
+    assert.equal(page.getAttribute('headerFOffset'), fallback('headerFOffset'));
+    assert.equal(page.getAttribute('footerFOffset'), fallback('footerFOffset'));
+    assert.equal(page.getAttribute('paperOrientation'), '1');
+    assert.equal(Number(page.getAttribute('rightMargin')), 72);
+
+    for (const name of PAGE_ATTRIBUTES) {
+        const value = page.getAttribute(name);
+        assert.ok(value && Number.isFinite(Number(value)), `${name}="${value}"`);
+    }
+    assert.ok(!xml.includes('NaN'));
+    assert.ok(!/="\s*"/.test(xml.split('\n')[3]), 'no empty attribute in <pageFormat>');
+});
+
+test('a gutter is not added to a margin that fell back to its default', async () => {
+    const { page } = await pageFormat('<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:gutter="567"/>');
+    assert.equal(page.getAttribute('leftMargin'), '42.51968479156494');
+});
+
+test('a reused parser does not carry page setup into the next document', async () => {
+    const { DocxParser } = loadConverter();
+    const parser = new DocxParser();
+    const body = p('<w:r><w:t>Text</w:t></w:r>');
+
+    const first = await parser.parse(await buildDocx(body, { sectPr: `<w:pgSz w:w="16838" w:h="11906"/>${ONE_INCH}` }));
+    assert.equal(first.pageSetup.landscape, true);
+    assert.equal(first.pageSetup.topMargin, 72);
+
+    const second = await parser.parse(await buildDocx(body));
+    assert.deepEqual({ ...second.pageSetup }, {});
+});
