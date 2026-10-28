@@ -346,7 +346,7 @@ class DocxParser {
             }
 
             for (const style of childElements(root, 'style')) {
-                const type = style.getAttribute('w:type');
+                const type = style.getAttribute('w:type') || 'paragraph'; // An omitted w:type means paragraph (17.7.4.17)
                 const definitions = this.styles.definitions[type];
                 const id = style.getAttribute('w:styleId');
                 if (!(type === 'paragraph' || type === 'character') || !id || definitions.has(id)) continue;

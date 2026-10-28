@@ -406,6 +406,14 @@ test('a w:basedOn chain is followed and a later style can turn a property off', 
     assert.deepEqual(charAttrs(doc, content, 'Grandchild text'), { ...PLAIN, size: '14', italic: 'true', underline: 'true' });
 });
 
+test('a style without w:type is a paragraph style', async () => {
+    const { doc, content } = await convertBody(styled('Untyped', run('Untyped text')), {
+        styles: '<w:style w:styleId="Untyped"><w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:style>'
+    });
+
+    assert.deepEqual(charAttrs(doc, content, 'Untyped text'), { ...PLAIN, size: '14', bold: 'true' });
+});
+
 test('a cyclic, self-referencing or dangling w:basedOn does not throw or hang', async () => {
     const { doc, content } = await convertBody(
         styled('A', run('Cycle')) + styled('Self', run('Self')) + styled('Dangling', run('Dangling')), {
