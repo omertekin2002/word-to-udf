@@ -16,6 +16,20 @@ const SUPPORTED_CHOICE_NAMESPACES = [
     'http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing'
 ];
 
+// Run formatting when neither styles.xml nor the run itself sets a property
+const DEFAULT_RUN_FORMATTING = {
+    bold: false,
+    italic: false,
+    underline: false,
+    strike: false,
+    fontFamily: 'Times New Roman',
+    fontSize: 12
+};
+
+// On/off properties that toggle, rather than override, between the paragraph and
+// character style levels (ECMA-376 Part 1, 17.7.3)
+const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike'];
+
 class DocxParser {
     constructor() {
         this.zip = null;
@@ -24,6 +38,7 @@ class DocxParser {
         this.images = {};
         this.footnotes = {};
         this.numbering = {};
+        this.styles = this.emptyStyles();
     }
 
     /**
@@ -38,6 +53,7 @@ class DocxParser {
             this.images = {};
             this.footnotes = {};
             this.numbering = {};
+            this.styles = this.emptyStyles();
 
             // Load the DOCX as a ZIP
             this.zip = await JSZip.loadAsync(file);
@@ -53,6 +69,9 @@ class DocxParser {
 
             // Parse list definitions
             await this.parseNumbering();
+
+            // Parse style definitions
+            await this.parseStyles();
 
             // Parse the main document content
             const documentXml = await this.zip.file('word/document.xml').async('string');
@@ -202,6 +221,176 @@ class DocxParser {
         const lvlText = childElement(lvl, 'lvlText');
         if (lvlText && lvlText.hasAttribute('w:val')) level.lvlText = lvlText.getAttribute('w:val');
         return level;
+    }
+
+    /**
+     * Style tables for a document without styles.xml: nothing set anywhere
+     */
+    emptyStyles() {
+        return {
+            defaults: { run: {}, paragraph: {} },
+            definitions: { paragraph: new Map(), character: new Map() },
+            defaultParagraph: null,
+            resolved: { paragraph: new Map(), character: new Map() }
+        };
+    }
+
+    /**
+     * Parse word/styles.xml: the document defaults (w:docDefaults) and the paragraph
+     * and character styles, each with the properties it sets itself. w:basedOn chains
+     * are resolved on first use (see resolveStyle).
+     */
+    async parseStyles() {
+        const stylesFile = this.zip.file('word/styles.xml');
+        if (!stylesFile) return;
+
+        try {
+            const root = parseXml(await stylesFile.async('string')).documentElement;
+            // A malformed part parses to a parsererror document instead of throwing
+            if (root.namespaceURI !== WORD_NS || root.localName !== 'styles') {
+                throw new Error('word/styles.xml is not a well-formed w:styles part');
+            }
+
+            const docDefaults = childElement(root, 'docDefaults');
+            if (docDefaults) {
+                const rPrDefault = childElement(docDefaults, 'rPrDefault');
+                const pPrDefault = childElement(docDefaults, 'pPrDefault');
+                this.styles.defaults = {
+                    run: this.readRunProperties(rPrDefault && childElement(rPrDefault, 'rPr')),
+                    paragraph: this.readParagraphProperties(pPrDefault && childElement(pPrDefault, 'pPr'))
+                };
+            }
+
+            for (const style of childElements(root, 'style')) {
+                const type = style.getAttribute('w:type');
+                const definitions = this.styles.definitions[type];
+                const id = style.getAttribute('w:styleId');
+                if (!(type === 'paragraph' || type === 'character') || !id || definitions.has(id)) continue;
+
+                const basedOn = childElement(style, 'basedOn');
+                definitions.set(id, {
+                    basedOn: basedOn ? basedOn.getAttribute('w:val') : null,
+                    run: this.readRunProperties(childElement(style, 'rPr')),
+                    paragraph: type === 'paragraph' ? this.readParagraphProperties(childElement(style, 'pPr')) : {}
+                });
+
+                if (type === 'paragraph' && this.styles.defaultParagraph === null && this.isOn(style, 'w:default', false)) {
+                    this.styles.defaultParagraph = id;
+                }
+            }
+        } catch (error) {
+            this.styles = this.emptyStyles();
+            console.warn('Could not parse styles:', error);
+        }
+    }
+
+    /**
+     * The properties a style gives, with its w:basedOn chain applied underneath it:
+     * the nearest style in the chain that sets a property wins. A missing id, or a
+     * chain that loops or names a missing style, stops the chain there.
+     * @param {string} type - 'paragraph' or 'character'
+     * @param {string|null} styleId - The style id (null: no style)
+     * @returns {{run: Object, paragraph: Object}} Only the properties set somewhere
+     */
+    resolveStyle(type, styleId) {
+        const resolved = this.styles.resolved[type];
+        if (!resolved.has(styleId)) {
+            const definitions = this.styles.definitions[type];
+            const chain = [];
+            for (let id = styleId; definitions.has(id) && !chain.includes(definitions.get(id)); id = definitions.get(id).basedOn) {
+                chain.unshift(definitions.get(id));
+            }
+
+            resolved.set(styleId, {
+                run: Object.assign({}, ...chain.map(style => style.run)),
+                paragraph: Object.assign({}, ...chain.map(style => style.paragraph))
+            });
+        }
+        return resolved.get(styleId);
+    }
+
+    /**
+     * The resolved paragraph style of a paragraph: its w:pStyle, else the default paragraph style
+     * @param {Element|null} pPr - The paragraph's w:pPr
+     * @returns {{run: Object, paragraph: Object}} See resolveStyle
+     */
+    paragraphStyle(pPr) {
+        const pStyle = pPr && childElement(pPr, 'pStyle');
+        const id = pStyle && pStyle.getAttribute('w:val');
+        return this.resolveStyle('paragraph',
+            this.styles.definitions.paragraph.has(id) ? id : this.styles.defaultParagraph);
+    }
+
+    /**
+     * Read the character properties a w:rPr sets, from a run, a style or the document defaults
+     * @param {Element|null} rPr - The w:rPr element
+     * @returns {Object} Only the properties it sets; an explicit "off" is kept as false,
+     *   and color "auto" as null, so it overrides an earlier layer
+     */
+    readRunProperties(rPr) {
+        const props = {};
+        if (!rPr) return props;
+
+        for (const [name, key] of [['b', 'bold'], ['i', 'italic'], ['strike', 'strike']]) {
+            const el = childElement(rPr, name);
+            if (el) props[key] = this.isOn(el);
+        }
+
+        const u = childElement(rPr, 'u');
+        if (u && u.hasAttribute('w:val')) props.underline = u.getAttribute('w:val') !== 'none';
+
+        const rFonts = childElement(rPr, 'rFonts');
+        if (rFonts && rFonts.getAttribute('w:ascii')) props.fontFamily = rFonts.getAttribute('w:ascii');
+
+        // Font size is in half-points
+        const sz = childElement(rPr, 'sz');
+        const halfPoints = sz ? parseInt(sz.getAttribute('w:val')) : NaN;
+        if (halfPoints > 0) props.fontSize = halfPoints / 2;
+
+        const color = childElement(rPr, 'color');
+        const colorVal = color && color.getAttribute('w:val');
+        if (colorVal) props.color = colorVal === 'auto' ? null : '#' + colorVal;
+
+        return props;
+    }
+
+    /**
+     * Read the alignment and indents a w:pPr sets, from a paragraph, a style or the document defaults
+     * @param {Element|null} pPr - The w:pPr element
+     * @returns {Object} Only the properties it sets
+     */
+    readParagraphProperties(pPr) {
+        const props = {};
+        if (!pPr) return props;
+
+        const jc = childElement(pPr, 'jc');
+        if (jc) props.alignment = this.mapAlignment(jc.getAttribute('w:val'));
+
+        const ind = childElement(pPr, 'ind');
+        if (ind) {
+            if (ind.hasAttribute('w:left')) props.leftIndent = this.twipsToPoints(ind.getAttribute('w:left'));
+            if (ind.hasAttribute('w:right')) props.rightIndent = this.twipsToPoints(ind.getAttribute('w:right'));
+            if (ind.hasAttribute('w:firstLine')) {
+                props.firstLineIndent = this.twipsToPoints(ind.getAttribute('w:firstLine'));
+            } else if (ind.hasAttribute('w:hanging')) {
+                // A hanging indent can't be represented, but it still replaces a first-line indent
+                props.firstLineIndent = 0;
+            }
+        }
+
+        return props;
+    }
+
+    /**
+     * Whether an on/off property is on: absent w:val means on, "false", "0" and "off" mean off
+     * @param {Element} el - The property element
+     * @param {string} [attribute] - The attribute holding the value
+     * @param {boolean} [ifAbsent] - The value when the attribute is absent
+     * @returns {boolean}
+     */
+    isOn(el, attribute = 'w:val', ifAbsent = true) {
+        if (!el.hasAttribute(attribute)) return ifAbsent;
+        return !['false', '0', 'off'].includes(el.getAttribute(attribute));
     }
 
     /**
@@ -355,24 +544,12 @@ class DocxParser {
             numbering: null
         };
 
-        // Get paragraph properties
+        // Alignment and indents: document defaults, the paragraph style chain, then the paragraph's own w:pPr
         const pPr = childElement(para, 'pPr');
+        const style = this.paragraphStyle(pPr);
+        Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, this.readParagraphProperties(pPr));
+
         if (pPr) {
-            // Alignment
-            const jc = childElement(pPr, 'jc');
-            if (jc) {
-                const val = jc.getAttribute('w:val');
-                paragraph.alignment = this.mapAlignment(val);
-            }
-
-            // Indentation
-            const ind = childElement(pPr, 'ind');
-            if (ind) {
-                paragraph.leftIndent = this.twipsToPoints(ind.getAttribute('w:left') || '0');
-                paragraph.rightIndent = this.twipsToPoints(ind.getAttribute('w:right') || '0');
-                paragraph.firstLineIndent = this.twipsToPoints(ind.getAttribute('w:firstLine') || '0');
-            }
-
             // Numbering
             const numPr = childElement(pPr, 'numPr');
             if (numPr) {
@@ -397,7 +574,7 @@ class DocxParser {
 
         // Get runs (text with formatting)
         for (const run of runs) {
-            paragraph.runs.push(...this.parseRun(run));
+            paragraph.runs.push(...this.parseRun(run, style.run));
         }
 
         return paragraph;
@@ -406,9 +583,10 @@ class DocxParser {
     /**
      * Parse a run element (text with formatting)
      * @param {Element} run - The run element
+     * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image, footnoteRef)
      */
-    parseRun(run) {
+    parseRun(run, paragraphRun = {}) {
         const items = [];
         let formatting = null;
 
@@ -422,7 +600,7 @@ class DocxParser {
                 if (last && last.type === 'text') {
                     last.text += text;
                 } else {
-                    if (!formatting) formatting = this.parseRunFormatting(run);
+                    if (!formatting) formatting = this.parseRunFormatting(run, paragraphRun);
                     items.push({ ...formatting, text: text });
                 }
             } else if (localName === 'tab') {
@@ -456,78 +634,42 @@ class DocxParser {
     }
 
     /**
-     * Parse a run's character formatting
+     * Resolve a run's character formatting in Word's order: built-in defaults, document
+     * defaults, the paragraph style chain, the character style chain (w:rStyle), then
+     * the run's own w:rPr. Later layers override earlier ones, except that bold, italic
+     * and strike set by the two style levels toggle: on in both styles is off, and off
+     * in a style leaves the value unchanged (unless the document defaults turn it on).
+     * Direct formatting always sets them outright.
      * @param {Element} run - The run element
+     * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @returns {Object} Text item template (without text)
      */
-    parseRunFormatting(run) {
-        // Get run properties
+    parseRunFormatting(run, paragraphRun = {}) {
+        const rPr = childElement(run, 'rPr');
+        const rStyle = rPr && childElement(rPr, 'rStyle');
+        const defaults = this.styles.defaults.run;
+        const characterRun = rStyle ? this.resolveStyle('character', rStyle.getAttribute('w:val')).run : {};
+        const direct = this.readRunProperties(rPr);
         const formatting = {
             type: 'text',
-            bold: false,
-            italic: false,
-            underline: false,
-            strike: false,
-            fontFamily: 'Times New Roman',
-            fontSize: 12
+            ...DEFAULT_RUN_FORMATTING,
+            ...defaults,
+            ...paragraphRun,
+            ...characterRun,
+            ...direct
         };
 
-        const rPr = childElement(run, 'rPr');
-        if (rPr) {
-            // Bold
-            const b = rPr.getElementsByTagNameNS(WORD_NS, 'b')[0];
-            if (b && b.getAttribute('w:val') !== 'false' && b.getAttribute('w:val') !== '0') {
-                formatting.bold = true;
-            } else if (b && !b.hasAttribute('w:val')) {
-                formatting.bold = true;
-            }
-
-            // Italic
-            const i = rPr.getElementsByTagNameNS(WORD_NS, 'i')[0];
-            if (i && i.getAttribute('w:val') !== 'false' && i.getAttribute('w:val') !== '0') {
-                formatting.italic = true;
-            } else if (i && !i.hasAttribute('w:val')) {
-                formatting.italic = true;
-            }
-
-            // Underline
-            const u = rPr.getElementsByTagNameNS(WORD_NS, 'u')[0];
-            if (u) {
-                const val = u.getAttribute('w:val');
-                if (val && val !== 'none') {
-                    formatting.underline = true;
-                }
-            }
-
-            // Strikethrough
-            const strike = rPr.getElementsByTagNameNS(WORD_NS, 'strike')[0];
-            if (strike && strike.getAttribute('w:val') !== 'false') {
-                formatting.strike = true;
-            }
-
-            // Font family
-            const rFonts = rPr.getElementsByTagNameNS(WORD_NS, 'rFonts')[0];
-            if (rFonts) {
-                const ascii = rFonts.getAttribute('w:ascii');
-                if (ascii) formatting.fontFamily = ascii;
-            }
-
-            // Font size (in half-points, convert to points)
-            const sz = rPr.getElementsByTagNameNS(WORD_NS, 'sz')[0];
-            if (sz) {
-                const val = sz.getAttribute('w:val');
-                if (val) formatting.fontSize = parseInt(val) / 2;
-            }
-
-            // Color
-            const color = rPr.getElementsByTagNameNS(WORD_NS, 'color')[0];
-            if (color) {
-                const val = color.getAttribute('w:val');
-                if (val && val !== 'auto') {
-                    formatting.color = '#' + val;
-                }
+        for (const key of TOGGLE_PROPERTIES) {
+            if (key in direct) continue;
+            if (defaults[key] === true) {
+                // On in the document defaults: a style level that leaves it unset counts as on, and
+                // Word shows it on when an even number of levels turn it off (MS-OI29500, 17.7.3)
+                formatting[key] = [paragraphRun[key], characterRun[key]].filter(value => value === false).length % 2 === 0;
+            } else {
+                formatting[key] = (paragraphRun[key] === true) !== (characterRun[key] === true);
             }
         }
+        if (!formatting.color) delete formatting.color;
 
         return formatting;
     }
