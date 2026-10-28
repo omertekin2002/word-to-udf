@@ -26,6 +26,10 @@ const DEFAULT_RUN_FORMATTING = {
     fontSize: 12
 };
 
+// On/off properties that toggle, rather than override, between the paragraph and
+// character style levels (ECMA-376 Part 1, 17.7.3)
+const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike'];
+
 class DocxParser {
     constructor() {
         this.zip = null;
@@ -281,9 +285,9 @@ class DocxParser {
     }
 
     /**
-     * The properties a style gives, with its w:basedOn chain applied underneath it.
-     * Paragraph styles also carry the document defaults underneath. A missing id, or
-     * a chain that loops or names a missing style, stops the chain there.
+     * The properties a style gives, with its w:basedOn chain applied underneath it:
+     * the nearest style in the chain that sets a property wins. A missing id, or a
+     * chain that loops or names a missing style, stops the chain there.
      * @param {string} type - 'paragraph' or 'character'
      * @param {string|null} styleId - The style id (null: no style)
      * @returns {{run: Object, paragraph: Object}} Only the properties set somewhere
@@ -296,7 +300,6 @@ class DocxParser {
             for (let id = styleId; definitions.has(id) && !chain.includes(definitions.get(id)); id = definitions.get(id).basedOn) {
                 chain.unshift(definitions.get(id));
             }
-            if (type === 'paragraph') chain.unshift(this.styles.defaults);
 
             resolved.set(styleId, {
                 run: Object.assign({}, ...chain.map(style => style.run)),
@@ -541,10 +544,10 @@ class DocxParser {
             numbering: null
         };
 
-        // Alignment and indents: the paragraph style chain, then the paragraph's own w:pPr
+        // Alignment and indents: document defaults, the paragraph style chain, then the paragraph's own w:pPr
         const pPr = childElement(para, 'pPr');
         const style = this.paragraphStyle(pPr);
-        Object.assign(paragraph, style.paragraph, this.readParagraphProperties(pPr));
+        Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, this.readParagraphProperties(pPr));
 
         if (pPr) {
             // Numbering
@@ -631,9 +634,11 @@ class DocxParser {
     }
 
     /**
-     * Resolve a run's character formatting in Word's order: defaults, then the
-     * paragraph style chain, then the character style chain (w:rStyle), then the
-     * run's own w:rPr. Later layers override earlier ones.
+     * Resolve a run's character formatting in Word's order: built-in defaults, document
+     * defaults, the paragraph style chain, the character style chain (w:rStyle), then
+     * the run's own w:rPr. Later layers override earlier ones, except that bold, italic
+     * and strike set by the two style levels toggle: on in both styles is off, and off
+     * in a style leaves the value unchanged. Direct formatting always sets them outright.
      * @param {Element} run - The run element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @returns {Object} Text item template (without text)
@@ -641,13 +646,23 @@ class DocxParser {
     parseRunFormatting(run, paragraphRun = {}) {
         const rPr = childElement(run, 'rPr');
         const rStyle = rPr && childElement(rPr, 'rStyle');
+        const defaults = this.styles.defaults.run;
+        const characterRun = rStyle ? this.resolveStyle('character', rStyle.getAttribute('w:val')).run : {};
+        const direct = this.readRunProperties(rPr);
         const formatting = {
             type: 'text',
             ...DEFAULT_RUN_FORMATTING,
+            ...defaults,
             ...paragraphRun,
-            ...(rStyle ? this.resolveStyle('character', rStyle.getAttribute('w:val')).run : {}),
-            ...this.readRunProperties(rPr)
+            ...characterRun,
+            ...direct
         };
+
+        for (const key of TOGGLE_PROPERTIES) {
+            if (key in direct) continue;
+            // On in the document defaults stays on (ECMA-376 Part 1, 17.7.3)
+            formatting[key] = defaults[key] === true || (paragraphRun[key] === true) !== (characterRun[key] === true);
+        }
         if (!formatting.color) delete formatting.color;
 
         return formatting;

@@ -424,21 +424,51 @@ test('a cyclic, self-referencing or dangling w:basedOn does not throw or hang', 
 test('a character style applies over the paragraph style, and direct w:rPr wins over both', async () => {
     const { doc, content, parsed } = await convertBody(styled('Heading',
         run('Heading') +
-        run('Quiet', '<w:rStyle w:val="Quiet"/>') +
-        run('Quiet but bold', '<w:rStyle w:val="Quiet"/><w:b/>') +
+        run('Small', '<w:rStyle w:val="Small"/>') +
+        run('Small but italic', '<w:rStyle w:val="Small"/><w:i/>') +
         run('Not bold', '<w:b w:val="0"/><w:color w:val="auto"/>') +
         run('Unknown style', '<w:rStyle w:val="Nope"/>')), {
         styles: paragraphStyle('Heading', { rPr: '<w:b/><w:sz w:val="28"/><w:color w:val="FF0000"/>' }) +
-            characterStyle('Quiet', '<w:b w:val="false"/><w:sz w:val="20"/><w:i/>')
+            characterStyle('Small', '<w:sz w:val="20"/><w:u w:val="single"/><w:color w:val="0000FF"/>')
     });
 
     const red = String(0xFFFF0000 | 0);
+    const blue = String(0xFF0000FF | 0);
     assert.deepEqual(charAttrs(doc, content, 'Heading'), { ...PLAIN, size: '14', bold: 'true', foreground: red });
-    assert.deepEqual(charAttrs(doc, content, 'Quiet'), { ...PLAIN, size: '10', italic: 'true', foreground: red });
-    assert.deepEqual(charAttrs(doc, content, 'Quiet but bold'), { ...PLAIN, size: '10', bold: 'true', italic: 'true', foreground: red });
+    assert.deepEqual(charAttrs(doc, content, 'Small'), { ...PLAIN, size: '10', bold: 'true', underline: 'true', foreground: blue });
+    assert.deepEqual(charAttrs(doc, content, 'Small but italic'),
+        { ...PLAIN, size: '10', bold: 'true', italic: 'true', underline: 'true', foreground: blue });
     assert.deepEqual(charAttrs(doc, content, 'Not bold'), { ...PLAIN, size: '14' });
     assert.equal('color' in parsed.elements[0].runs[3], false);
     assert.deepEqual(charAttrs(doc, content, 'Unknown style'), { ...PLAIN, size: '14', bold: 'true', foreground: red });
+});
+
+test('bold, italic and strike toggle between the paragraph and character styles', async () => {
+    const styles = paragraphStyle('Heading', { rPr: '<w:b/><w:i/>' }) +
+        characterStyle('Strong', '<w:b/>') +
+        characterStyle('NotBold', '<w:b w:val="0"/>') +
+        characterStyle('StrongBase', '<w:b/><w:strike/>') +
+        '<w:style w:type="character" w:styleId="Derived"><w:basedOn w:val="StrongBase"/><w:rPr><w:b w:val="0"/></w:rPr></w:style>';
+    const { doc, content } = await convertBody(
+        styled('Heading',
+            run('Strong in heading', '<w:rStyle w:val="Strong"/>') +
+            run('Off in style', '<w:rStyle w:val="NotBold"/>') +
+            run('Direct bold', '<w:rStyle w:val="Strong"/><w:b/>') +
+            run('Derived', '<w:rStyle w:val="Derived"/>')) +
+        p(run('Strong in body', '<w:rStyle w:val="Strong"/>')), { styles });
+
+    // On in both styles is off; off in a style leaves it unchanged; direct formatting is absolute
+    assert.deepEqual(charAttrs(doc, content, 'Strong in heading'), { ...PLAIN, italic: 'true' });
+    assert.deepEqual(charAttrs(doc, content, 'Off in style'), { ...PLAIN, bold: 'true', italic: 'true' });
+    assert.deepEqual(charAttrs(doc, content, 'Direct bold'), { ...PLAIN, bold: 'true', italic: 'true' });
+    // Within one style level the basedOn chain overrides: Derived turns its base's bold off
+    assert.deepEqual(charAttrs(doc, content, 'Derived'), { ...PLAIN, bold: 'true', italic: 'true', strikethrough: 'true' });
+    assert.deepEqual(charAttrs(doc, content, 'Strong in body'), { ...PLAIN, bold: 'true' });
+
+    // On in the document defaults stays on, whatever the styles say
+    const withDefaults = await convertBody(styled('Heading', run('Defaults bold', '<w:rStyle w:val="Strong"/>')),
+        { styles: '<w:docDefaults><w:rPrDefault><w:rPr><w:b/></w:rPr></w:rPrDefault></w:docDefaults>' + styles });
+    assert.equal(charAttrs(withDefaults.doc, withDefaults.content, 'Defaults bold').bold, 'true');
 });
 
 test('paragraph alignment and indents come from the paragraph style unless set directly', async () => {
