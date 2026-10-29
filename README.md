@@ -65,6 +65,10 @@ The `<pageFormat>` element takes its values from the document's final section pr
 - A value the document doesn't set, or sets to something unreadable, keeps the converter's previous default (left 15 mm, right 10 mm, top and bottom 5 mm, portrait).
 - Only the last section's setup is used; per-section page setup isn't supported.
 
+### Tables
+- Cell shading (`w:shd`) is written as `fillColor`, and vertical alignment (`w:vAlign`) as `align="vcenter"` or `align="bottom"`; top, the default, is left out.
+- The format has no `rowspan`, so a vertical merge (`w:vMerge`) keeps one cell per row: the first holds the text, the rows below get an empty cell in the same grid column, shaded like the first. In bordered tables the cells are joined by `borderSpec` dropping the edges between them (`11` first, `10` middle, `14` last); cells outside a merge get no `borderSpec`.
+
 ### Conversion Pipeline
 1. **Parse DOCX**: Extract and parse `word/document.xml`
 2. **Extract Elements**: Paragraphs, tables, images

@@ -15,6 +15,17 @@ const DEFAULT_PAGE_FORMAT = {
     footerFOffset: '20.0'
 };
 
+// <cell align> for Word's w:vAlign. Top is the default, so it is left out.
+const VERTICAL_ALIGN = new Map([
+    ['center', 'vcenter'],
+    ['bottom', 'bottom']
+]);
+
+// <cell borderSpec> edge bits
+const BORDER_TOP = 1;
+const BORDER_BOTTOM = 4;
+const BORDER_ALL = 15; // top, right, bottom and left
+
 class UdfGenerator {
     constructor() {
         this.content = '';
@@ -332,27 +343,40 @@ class UdfGenerator {
             columnSpans = Array(columnCount).fill(equalWidth).join(',');
         }
 
+        const merges = this.verticalMerges(table);
         const rowElements = [];
 
         for (let i = 0; i < table.rows.length; i++) {
             const row = table.rows[i];
             const cellElements = [];
 
-            for (const cell of row.cells) {
-                if (cell.vMergeContinue) continue; // Skip merged cells
+            for (let j = 0; j < row.cells.length; j++) {
+                const cell = row.cells[j];
+                const merge = merges[i][j];
 
-                const cellContent = this.processTableCell(cell);
+                // A continued vertical merge keeps its grid column with an empty cell,
+                // since the format has no rowspan. It adds nothing to the content.
+                const cellContent = merge.joinsAbove
+                    ? this.emptyCellContent()
+                    : this.processTableCell(cell);
 
                 let cellAttrs = '';
                 if (cell.colspan > 1) {
                     cellAttrs += ` colspan="${cell.colspan}"`;
                 }
-                if (cell.bgColor) {
-                    const rgb = this.hexToRgbInt(cell.bgColor);
-                    cellAttrs += ` bgColor="${rgb}"`;
+                // A merged area is shaded the way its first cell is
+                const fill = merge.first.bgColor;
+                if (fill) {
+                    cellAttrs += ` fillColor="${this.hexToRgbInt(fill)}"`;
                 }
-                if (cell.vAlign) {
-                    cellAttrs += ` vAlign="${cell.vAlign}"`;
+                const align = VERTICAL_ALIGN.get(cell.vAlign);
+                if (align) {
+                    cellAttrs += ` align="${align}"`;
+                }
+                // Join the cells of a merge by dropping the edges between them
+                if (table.border !== 'borderNone' && (merge.joinsAbove || merge.joinsBelow)) {
+                    const spec = BORDER_ALL & ~(merge.joinsAbove ? BORDER_TOP : 0) & ~(merge.joinsBelow ? BORDER_BOTTOM : 0);
+                    cellAttrs += ` borderSpec="${spec}"`;
                 }
 
                 cellElements.push(`<cell${cellAttrs}>${cellContent}</cell>`);
@@ -363,6 +387,58 @@ class UdfGenerator {
 
         const tableElement = `<table tableName="Table" columnCount="${columnCount}" columnSpans="${columnSpans}" border="${table.border}">${rowElements.join('')}</table>`;
         this.elements.push(tableElement);
+    }
+
+    /**
+     * Work out which cells belong to a vertical merge. A w:vMerge continuation cell
+     * joins the cell above it that starts in the same grid column (counting gridSpan),
+     * if that cell is part of a merge too.
+     * @param {Object} table - Parsed table
+     * @returns {Array<Array<{joinsAbove: boolean, joinsBelow: boolean, first: Object}>>}
+     *   Per row and cell: whether it continues the cell above, whether the cell below
+     *   continues it, and the merge's first cell (the cell itself outside a merge)
+     */
+    verticalMerges(table) {
+        const merges = [];
+        let above = new Map(); // grid column -> index of the cell starting there in the row above
+
+        for (let i = 0; i < table.rows.length; i++) {
+            const cells = table.rows[i].cells;
+            const row = [];
+            const starts = new Map();
+            let column = 0;
+
+            for (let j = 0; j < cells.length; j++) {
+                const cell = cells[j];
+                const merge = { joinsAbove: false, joinsBelow: false, first: cell };
+
+                const k = above.get(column);
+                const upper = k === undefined ? null : table.rows[i - 1].cells[k];
+                if (cell.vMergeContinue && upper && (upper.vMergeStart || upper.vMergeContinue)) {
+                    const upperMerge = merges[i - 1][k];
+                    upperMerge.joinsBelow = true;
+                    merge.joinsAbove = true;
+                    merge.first = upperMerge.first;
+                }
+
+                row.push(merge);
+                starts.set(column, j);
+                column += Math.max(1, cell.colspan || 1);
+            }
+
+            merges.push(row);
+            above = starts;
+        }
+
+        return merges;
+    }
+
+    /**
+     * Content of a cell that holds no text: one paragraph covering no characters
+     * @returns {string} Cell content elements
+     */
+    emptyCellContent() {
+        return `<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0"><content startOffset="${this.currentOffset}" length="0" family="Times New Roman" size="12" /></paragraph>`;
     }
 
     /**
