@@ -610,6 +610,133 @@ test('paragraph alignment and indents come from the paragraph style unless set d
     assert.deepEqual(para('Unknown style'), ['3', '0.0', '0.0', null]);
 });
 
+// Paragraph spacing: w:spacing -> SpaceAbove, SpaceBelow and LineSpacing
+
+const SPACING_ATTRIBUTES = ['SpaceAbove', 'SpaceBelow', 'LineSpacing'];
+
+/** The spacing attributes of the paragraph holding this text */
+function spacingOf(doc, content, text) {
+    const el = contentWithText(doc, content, text).closest('paragraph');
+    return Object.fromEntries(SPACING_ATTRIBUTES.map(name => [name, el.getAttribute(name)]));
+}
+
+const NO_SPACING = { SpaceAbove: null, SpaceBelow: null, LineSpacing: null };
+
+test('w:before and w:after become SpaceAbove and SpaceBelow in points', async () => {
+    const { doc, content } = await convertBody(
+        p(run('Spaced'), '<w:pPr><w:spacing w:before="240" w:after="120"/></w:pPr>') +
+        p(run('Half points'), '<w:pPr><w:spacing w:before="30" w:after="0"/></w:pPr>') +
+        p(run('Measure'), '<w:pPr><w:spacing w:after="6pt"/></w:pPr>'));
+
+    assert.deepEqual(spacingOf(doc, content, 'Spaced'), { ...NO_SPACING, SpaceAbove: '12.0', SpaceBelow: '6.0' });
+    assert.deepEqual(spacingOf(doc, content, 'Half points'), { ...NO_SPACING, SpaceAbove: '1.5' });
+    assert.deepEqual(spacingOf(doc, content, 'Measure'), { ...NO_SPACING, SpaceBelow: '6.0' });
+});
+
+test('auto line spacing becomes the fraction over single spacing', async () => {
+    const { doc, content } = await convertBody(
+        p(run('One and a half'), '<w:pPr><w:spacing w:line="360" w:lineRule="auto"/></w:pPr>') +
+        p(run('No rule'), '<w:pPr><w:spacing w:line="360"/></w:pPr>') +
+        p(run('Multiple'), '<w:pPr><w:spacing w:line="276" w:lineRule="auto"/></w:pPr>') +
+        p(run('Double'), '<w:pPr><w:spacing w:line="480" w:lineRule="auto"/></w:pPr>') +
+        p(run('Single'), '<w:pPr><w:spacing w:line="240" w:lineRule="auto"/></w:pPr>') +
+        p(run('Tighter'), '<w:pPr><w:spacing w:line="200" w:lineRule="auto"/></w:pPr>'));
+
+    assert.equal(spacingOf(doc, content, 'One and a half').LineSpacing, '0.5');
+    assert.equal(spacingOf(doc, content, 'No rule').LineSpacing, '0.5');
+    assert.equal(spacingOf(doc, content, 'Multiple').LineSpacing, '0.15');
+    assert.equal(spacingOf(doc, content, 'Double').LineSpacing, '1.0');
+    assert.deepEqual(spacingOf(doc, content, 'Single'), NO_SPACING);
+    assert.deepEqual(spacingOf(doc, content, 'Tighter'), NO_SPACING);
+});
+
+test('exact and at-least line spacing write no LineSpacing, even over a style\'s auto spacing', async () => {
+    const { doc, content } = await convertBody(
+        styled('OneHalf', run('Exact'), '<w:spacing w:line="360" w:lineRule="exact"/>') +
+        styled('OneHalf', run('At least'), '<w:spacing w:line="480" w:lineRule="atLeast"/>') +
+        styled('OneHalf', run('From style')), {
+            styles: paragraphStyle('OneHalf', { pPr: '<w:spacing w:line="360" w:lineRule="auto"/>' })
+        });
+
+    assert.deepEqual(spacingOf(doc, content, 'Exact'), NO_SPACING);
+    assert.deepEqual(spacingOf(doc, content, 'At least'), NO_SPACING);
+    assert.equal(spacingOf(doc, content, 'From style').LineSpacing, '0.5');
+});
+
+test('the line height and its rule are inherited separately', async () => {
+    const { doc, content } = await convertBody(
+        styled('OneHalf', run('Direct exact rule'), '<w:spacing w:lineRule="exact"/>') +
+        styled('Exact', run('Direct line under an exact rule'), '<w:spacing w:line="480"/>') +
+        styled('Exact', run('Direct auto rule'), '<w:spacing w:lineRule="auto"/>'), {
+            styles: paragraphStyle('OneHalf', { pPr: '<w:spacing w:line="360" w:lineRule="auto"/>' }) +
+                paragraphStyle('Exact', { pPr: '<w:spacing w:line="360" w:lineRule="exact"/>' })
+        });
+
+    assert.deepEqual(spacingOf(doc, content, 'Direct exact rule'), NO_SPACING);
+    assert.deepEqual(spacingOf(doc, content, 'Direct line under an exact rule'), NO_SPACING);
+    assert.equal(spacingOf(doc, content, 'Direct auto rule').LineSpacing, '0.5');
+});
+
+test('spacing merges per attribute through docDefaults, the w:basedOn chain and direct w:pPr', async () => {
+    const { doc, content } = await convertBody(
+        styled('Heading', run('Style before, direct after'), '<w:spacing w:after="120"/>') +
+        styled('Heading', run('Direct after zero'), '<w:spacing w:after="0"/>') +
+        styled('Heading', run('Style only')) +
+        p(run('Defaults only')), {
+            styles: '<w:docDefaults><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/>' +
+                '</w:pPr></w:pPrDefault></w:docDefaults>' +
+                paragraphStyle('Base', { pPr: '<w:spacing w:before="240"/>' }) +
+                paragraphStyle('Heading', { basedOn: 'Base', pPr: '<w:spacing w:after="240"/>' })
+        });
+
+    assert.deepEqual(spacingOf(doc, content, 'Style before, direct after'),
+        { SpaceAbove: '12.0', SpaceBelow: '6.0', LineSpacing: '0.08' });
+    assert.deepEqual(spacingOf(doc, content, 'Direct after zero'),
+        { SpaceAbove: '12.0', SpaceBelow: null, LineSpacing: '0.08' });
+    assert.deepEqual(spacingOf(doc, content, 'Style only'),
+        { SpaceAbove: '12.0', SpaceBelow: '12.0', LineSpacing: '0.08' });
+    assert.deepEqual(spacingOf(doc, content, 'Defaults only'),
+        { SpaceAbove: null, SpaceBelow: '8.0', LineSpacing: '0.08' });
+});
+
+test('an unreadable or negative spacing value leaves the inherited value in place', async () => {
+    const { doc, content } = await convertBody(
+        styled('Spaced', run('Bad values'), '<w:spacing w:before="abc" w:after="-120" w:line="x"/>'), {
+            styles: paragraphStyle('Spaced', { pPr: '<w:spacing w:before="240" w:after="120" w:line="360"/>' })
+        });
+
+    assert.deepEqual(spacingOf(doc, content, 'Bad values'), { SpaceAbove: '12.0', SpaceBelow: '6.0', LineSpacing: '0.5' });
+});
+
+test('paragraphs inside table cells get spacing too', async () => {
+    const { doc, content } = await convertBody(table([[
+        p(run('Cell spaced'), '<w:pPr><w:spacing w:before="240" w:after="120" w:line="360"/></w:pPr>'),
+        p(run('Cell plain'))
+    ]]));
+
+    assert.deepEqual(spacingOf(doc, content, 'Cell spaced'), { SpaceAbove: '12.0', SpaceBelow: '6.0', LineSpacing: '0.5' });
+    assert.deepEqual(spacingOf(doc, content, 'Cell plain'), NO_SPACING);
+});
+
+test('the part of a paragraph after a page break does not repeat the space above', async () => {
+    const { doc, content } = await convertBody(p(
+        '<w:r><w:t>X</w:t><w:br w:type="page"/><w:t>Y</w:t></w:r>',
+        '<w:pPr><w:spacing w:before="240" w:after="120" w:line="360"/></w:pPr>'));
+
+    assert.deepEqual(spacingOf(doc, content, 'X'), { SpaceAbove: '12.0', SpaceBelow: '6.0', LineSpacing: '0.5' });
+    assert.deepEqual(spacingOf(doc, content, 'Y'), { SpaceAbove: null, SpaceBelow: '6.0', LineSpacing: '0.5' });
+});
+
+test('a document without w:spacing writes no spacing attributes', async () => {
+    const { xml } = await convertBody(
+        p(run('Plain')) + p(run('Indented'), '<w:pPr><w:jc w:val="both"/><w:ind w:left="720"/></w:pPr>') +
+        table([[p(run('Cell')), '<w:p/>']]), {
+            styles: paragraphStyle('Normal', { isDefault: true, pPr: '<w:jc w:val="center"/>' })
+        });
+
+    for (const name of SPACING_ATTRIBUTES) assert.ok(!xml.includes(name), `unexpected ${name}`);
+});
+
 test('without styles.xml, or with a malformed one, runs keep the built-in defaults', async (t) => {
     const body = styled('Heading', run('Text')) + p(run('Bold', '<w:b/>'), '<w:pPr><w:jc w:val="center"/></w:pPr>');
     const warn = t.mock.method(console, 'warn', () => {});

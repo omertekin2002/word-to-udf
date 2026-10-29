@@ -10,6 +10,7 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 - 📊 **Tables**: Handles table structure with cells and borders
 - 🖼️ **Images**: Embeds images as base64
 - 📐 **Page Setup**: Keeps the page margins, orientation and header/footer offsets
+- ↕️ **Spacing**: Keeps the space before and after paragraphs and their line spacing
 - 🇹🇷 **Turkish UI**: The page is in Turkish by default, with a TR | EN toggle for English (or open it with `?lang=en`)
 
 ## Usage
@@ -65,6 +66,14 @@ The `<pageFormat>` element takes its values from the document's final section pr
 - A value the document doesn't set, or sets to something unreadable, keeps the converter's previous default (left 15 mm, right 10 mm, top and bottom 5 mm, portrait).
 - Only the last section's setup is used; per-section page setup isn't supported.
 
+### Paragraph spacing
+Paragraph spacing (`w:spacing`) is read from the document defaults, the paragraph style and its `w:basedOn` chain, and the paragraph itself, each attribute on its own: a style can set the space before while the paragraph sets only the space after.
+- `w:before` and `w:after` become `SpaceAbove` and `SpaceBelow`, in points.
+- `w:line` with `w:lineRule="auto"` (or no rule) becomes `LineSpacing`, the extra fraction over single spacing, to two decimals: `276` (1.15 lines) is `0.15`, `360` (1.5 lines) is `0.5`, `480` (double) is `1.0`.
+- Attributes that would be zero, or single (or tighter) line spacing, are left out.
+- Exact and at-least line heights (`w:lineRule="exact"` / `"atLeast"`) have no UDF equivalent, so those paragraphs get single spacing.
+- Automatic spacing (`w:beforeAutospacing`, `w:afterAutospacing`), `w:contextualSpacing` and spacing in lines (`w:beforeLines`, `w:afterLines`) are ignored.
+
 ### Tables
 - Cell shading (`w:shd`) is written as `fillColor`, and vertical alignment (`w:vAlign`) as `align="vcenter"` or `align="bottom"`; top, the default, is left out.
 - The format has no `rowspan`, so a vertical merge (`w:vMerge`) keeps one cell per row: the first holds the text, the rows below get an empty cell in the same grid column, shaded like the first. In bordered tables the cells are joined by `borderSpec` dropping the edges between them (`11` first, `10` middle, `14` last); cells outside a merge get no `borderSpec`.
@@ -82,6 +91,7 @@ The `<pageFormat>` element takes its values from the document's final section pr
 - Embedded OLE objects are not supported
 - Track changes / comments are not preserved (inserted text is kept, deleted text is dropped)
 - Headers/footers not yet implemented
+- Exact and at-least line heights, automatic paragraph spacing and contextual spacing are not converted (see Paragraph spacing)
 
 ## License
 

@@ -132,12 +132,12 @@ class UdfGenerator {
 
                 // Runs after the break continue in a new paragraph on the next page.
                 // It is the same Word paragraph, so it must not start another list
-                // item or repeat the first-line indent.
+                // item or repeat the first-line indent or the space above.
                 paraContent.length = 0;
                 paraElements.length = 0;
                 afterPageBreak = true;
                 if (emittedFragment) {
-                    paraProps = { ...paragraph, numbering: null, firstLineIndent: 0 };
+                    paraProps = { ...paragraph, numbering: null, firstLineIndent: 0, spaceBefore: 0 };
                 }
             } else if (run.type === 'footnoteRef') {
                 // Handle footnote reference - insert superscript number only
@@ -242,6 +242,19 @@ class UdfGenerator {
 
         if (paragraph.firstLineIndent) {
             attrs += ` FirstLineIndent="${paragraph.firstLineIndent}.0"`;
+        }
+
+        // Spacing: space above and below in points, line spacing as the fraction over single spacing
+        const decimal = value => (Number.isInteger(value) ? value.toFixed(1) : String(value));
+        if (paragraph.spaceBefore > 0) {
+            attrs += ` SpaceAbove="${decimal(paragraph.spaceBefore)}"`;
+        }
+        if (paragraph.spaceAfter > 0) {
+            attrs += ` SpaceBelow="${decimal(paragraph.spaceAfter)}"`;
+        }
+        const extraLineSpacing = Math.round(((paragraph.lineSpacing || 1) - 1) * 100) / 100;
+        if (extraLineSpacing > 0) {
+            attrs += ` LineSpacing="${decimal(extraLineSpacing)}"`;
         }
 
         // Handle numbering/bullets
