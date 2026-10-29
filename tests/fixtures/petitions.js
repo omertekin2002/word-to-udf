@@ -340,8 +340,8 @@ function tabloDilekcesi() {
         body,
         ...recorded(rec),
         margins,
-        // Cells per row as UDF writes them: the continued vertical merge has no cell of its own
-        tableShape: [4, 4, 3, 4, 4, 2],
+        // Cells per row as UDF writes them: the continued vertical merge keeps an empty cell
+        tableShape: [4, 4, 4, 4, 4, 2],
         listItems: [
             { text: 'Fatura örnekleri', kind: 'number', level: 0 },
             { text: 'Faiz hesap çizelgesi', kind: 'number', level: 0 },

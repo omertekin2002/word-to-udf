@@ -170,6 +170,102 @@ test('regression: a simple 2x2 table', async () => {
     assert.deepEqual(cells, [['A1', 'B1'], ['A2', 'B2']]);
 });
 
+// A table on a grid of 2000-twip columns; each cell is [text, tcPr], with text null for an empty paragraph
+const gridTable = (columns, rows, tblPr = '') => `<w:tbl>${tblPr ? `<w:tblPr>${tblPr}</w:tblPr>` : ''}` +
+    `<w:tblGrid>${'<w:gridCol w:w="2000"/>'.repeat(columns)}</w:tblGrid>` +
+    rows.map(cells => `<w:tr>${cells.map(([text, tcPr = '']) =>
+        `<w:tc>${tcPr ? `<w:tcPr>${tcPr}</w:tcPr>` : ''}${text === null ? '<w:p/>' : p(`<w:r><w:t>${text}</w:t></w:r>`)}</w:tc>`
+    ).join('')}</w:tr>`).join('') +
+    '</w:tbl>';
+const RESTART = '<w:vMerge w:val="restart"/>';
+const CONTINUE = '<w:vMerge/>';
+const NO_BORDERS = `<w:tblBorders>${['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+    .map(side => `<w:${side} w:val="none" w:sz="0" w:space="0" w:color="auto"/>`).join('')}</w:tblBorders>`;
+
+const cellRows = doc => [...doc.querySelectorAll('elements table row')].map(row => [...row.querySelectorAll('cell')]);
+const cellText = (doc, cell, content) => contentElements(doc, cell).map(el => textOf(el, content)).join('');
+const cellAttribute = name => cells => cells.map(cell => cell.getAttribute(name));
+
+test('cell shading is written as fillColor, not bgColor', async () => {
+    const { doc } = await convertBody(gridTable(2, [[
+        ['Red', '<w:shd w:val="clear" w:color="auto" w:fill="FF0000"/>'],
+        ['Auto', '<w:shd w:val="clear" w:color="auto" w:fill="auto"/>']
+    ]]));
+
+    const [[red, auto]] = cellRows(doc);
+    assert.equal(red.getAttribute('fillColor'), String(0xFFFF0000 | 0));
+    assert.equal(auto.getAttribute('fillColor'), null);
+    for (const cell of [red, auto]) assert.equal(cell.getAttribute('bgColor'), null);
+});
+
+test('vertical alignment is written as align with the documented values', async () => {
+    const { doc } = await convertBody(gridTable(4, [[
+        ['Center', '<w:vAlign w:val="center"/>'],
+        ['Bottom', '<w:vAlign w:val="bottom"/>'],
+        ['Top', '<w:vAlign w:val="top"/>'],
+        ['Unknown', '<w:vAlign w:val="constructor"/>']
+    ]]));
+
+    const [cells] = cellRows(doc);
+    assert.deepEqual(cellAttribute('align')(cells), ['vcenter', 'bottom', null, null]);
+    assert.deepEqual(cellAttribute('vAlign')(cells), [null, null, null, null]);
+});
+
+test('a three-row vertical merge keeps its column and joins its cells with borderSpec', async () => {
+    const shaded = '<w:shd w:val="clear" w:color="auto" w:fill="D9D9D9"/>';
+    const { doc, content } = await convertBody(gridTable(2, [
+        [['Merged', RESTART + shaded], ['B1']],
+        [[null, CONTINUE + shaded], ['B2']],
+        [[null, CONTINUE], ['B3']],
+        [['A4'], ['B4']]
+    ]));
+
+    // Continued cells add nothing to the content
+    assert.equal(content, 'MergedB1B2B3A4B4');
+    const rows = cellRows(doc);
+    assert.deepEqual(rows.map(cells => cells.map(cell => cellText(doc, cell, content))),
+        [['Merged', 'B1'], ['', 'B2'], ['', 'B3'], ['A4', 'B4']]);
+    assert.deepEqual(rows.map(cellAttribute('borderSpec')),
+        [['11', null], ['10', null], ['14', null], [null, null]]);
+    // The merged area is shaded like its first cell
+    const D9D9D9 = String(0xFFD9D9D9 | 0);
+    assert.deepEqual(rows.map(cells => cells[0].getAttribute('fillColor')), [D9D9D9, D9D9D9, D9D9D9, null]);
+    for (const cell of [rows[1][0], rows[2][0]]) {
+        assert.ok(cell.querySelector('paragraph'), 'a continued cell still holds a paragraph');
+    }
+});
+
+test('a vertical merge next to a gridSpan cell matches cells by grid column', async () => {
+    const { doc, content } = await convertBody(gridTable(3, [
+        [['Wide', '<w:gridSpan w:val="2"/>'], ['Tall', RESTART]],
+        [['Wide 2', '<w:gridSpan w:val="2"/>'], [null, CONTINUE]],
+        // Column 2 starts no cell in the row above, so this continuation joins nothing
+        [['A3'], ['Orphan', CONTINUE], ['C3']]
+    ]));
+
+    const rows = cellRows(doc);
+    for (const cells of rows) {
+        assert.equal(cells.reduce((sum, cell) => sum + Number(cell.getAttribute('colspan') || '1'), 0), 3);
+    }
+    assert.deepEqual(rows.map(cells => cells.map(cell => cellText(doc, cell, content))),
+        [['Wide', 'Tall'], ['Wide 2', ''], ['A3', 'Orphan', 'C3']]);
+    assert.deepEqual(rows.map(cellAttribute('borderSpec')),
+        [[null, '11'], [null, '14'], [null, null, null]]);
+});
+
+test('merged cells in a borderNone table get no borderSpec', async () => {
+    const { doc, content } = await convertBody(gridTable(2, [
+        [['Merged', RESTART], ['B1']],
+        [[null, CONTINUE], ['B2']]
+    ], NO_BORDERS));
+
+    assert.equal(doc.querySelector('elements table').getAttribute('border'), 'borderNone');
+    assert.equal(content, 'MergedB1B2');
+    const rows = cellRows(doc);
+    assert.equal(rows[1].length, 2);
+    assert.deepEqual(rows.map(cellAttribute('borderSpec')), [[null, null], [null, null]]);
+});
+
 test('regression: a footnote reference becomes a superscript number with the text appended', async () => {
     const { doc, content } = await convertBody(
         p('<w:r><w:t>Claim</w:t></w:r><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r>'),
