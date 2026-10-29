@@ -170,6 +170,102 @@ test('regression: a simple 2x2 table', async () => {
     assert.deepEqual(cells, [['A1', 'B1'], ['A2', 'B2']]);
 });
 
+// A table on a grid of 2000-twip columns; each cell is [text, tcPr], with text null for an empty paragraph
+const gridTable = (columns, rows, tblPr = '') => `<w:tbl>${tblPr ? `<w:tblPr>${tblPr}</w:tblPr>` : ''}` +
+    `<w:tblGrid>${'<w:gridCol w:w="2000"/>'.repeat(columns)}</w:tblGrid>` +
+    rows.map(cells => `<w:tr>${cells.map(([text, tcPr = '']) =>
+        `<w:tc>${tcPr ? `<w:tcPr>${tcPr}</w:tcPr>` : ''}${text === null ? '<w:p/>' : p(`<w:r><w:t>${text}</w:t></w:r>`)}</w:tc>`
+    ).join('')}</w:tr>`).join('') +
+    '</w:tbl>';
+const RESTART = '<w:vMerge w:val="restart"/>';
+const CONTINUE = '<w:vMerge/>';
+const NO_BORDERS = `<w:tblBorders>${['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+    .map(side => `<w:${side} w:val="none" w:sz="0" w:space="0" w:color="auto"/>`).join('')}</w:tblBorders>`;
+
+const cellRows = doc => [...doc.querySelectorAll('elements table row')].map(row => [...row.querySelectorAll('cell')]);
+const cellText = (doc, cell, content) => contentElements(doc, cell).map(el => textOf(el, content)).join('');
+const cellAttribute = name => cells => cells.map(cell => cell.getAttribute(name));
+
+test('cell shading is written as fillColor, not bgColor', async () => {
+    const { doc } = await convertBody(gridTable(2, [[
+        ['Red', '<w:shd w:val="clear" w:color="auto" w:fill="FF0000"/>'],
+        ['Auto', '<w:shd w:val="clear" w:color="auto" w:fill="auto"/>']
+    ]]));
+
+    const [[red, auto]] = cellRows(doc);
+    assert.equal(red.getAttribute('fillColor'), String(0xFFFF0000 | 0));
+    assert.equal(auto.getAttribute('fillColor'), null);
+    for (const cell of [red, auto]) assert.equal(cell.getAttribute('bgColor'), null);
+});
+
+test('vertical alignment is written as align with the documented values', async () => {
+    const { doc } = await convertBody(gridTable(4, [[
+        ['Center', '<w:vAlign w:val="center"/>'],
+        ['Bottom', '<w:vAlign w:val="bottom"/>'],
+        ['Top', '<w:vAlign w:val="top"/>'],
+        ['Unknown', '<w:vAlign w:val="constructor"/>']
+    ]]));
+
+    const [cells] = cellRows(doc);
+    assert.deepEqual(cellAttribute('align')(cells), ['vcenter', 'bottom', null, null]);
+    assert.deepEqual(cellAttribute('vAlign')(cells), [null, null, null, null]);
+});
+
+test('a three-row vertical merge keeps its column and joins its cells with borderSpec', async () => {
+    const shaded = '<w:shd w:val="clear" w:color="auto" w:fill="D9D9D9"/>';
+    const { doc, content } = await convertBody(gridTable(2, [
+        [['Merged', RESTART + shaded], ['B1']],
+        [[null, CONTINUE + shaded], ['B2']],
+        [[null, CONTINUE], ['B3']],
+        [['A4'], ['B4']]
+    ]));
+
+    // Continued cells add nothing to the content
+    assert.equal(content, 'MergedB1B2B3A4B4');
+    const rows = cellRows(doc);
+    assert.deepEqual(rows.map(cells => cells.map(cell => cellText(doc, cell, content))),
+        [['Merged', 'B1'], ['', 'B2'], ['', 'B3'], ['A4', 'B4']]);
+    assert.deepEqual(rows.map(cellAttribute('borderSpec')),
+        [['11', null], ['10', null], ['14', null], [null, null]]);
+    // The merged area is shaded like its first cell
+    const D9D9D9 = String(0xFFD9D9D9 | 0);
+    assert.deepEqual(rows.map(cells => cells[0].getAttribute('fillColor')), [D9D9D9, D9D9D9, D9D9D9, null]);
+    for (const cell of [rows[1][0], rows[2][0]]) {
+        assert.ok(cell.querySelector('paragraph'), 'a continued cell still holds a paragraph');
+    }
+});
+
+test('a vertical merge next to a gridSpan cell matches cells by grid column', async () => {
+    const { doc, content } = await convertBody(gridTable(3, [
+        [['Wide', '<w:gridSpan w:val="2"/>'], ['Tall', RESTART]],
+        [['Wide 2', '<w:gridSpan w:val="2"/>'], [null, CONTINUE]],
+        // Column 2 starts no cell in the row above, so this continuation joins nothing
+        [['A3'], ['Orphan', CONTINUE], ['C3']]
+    ]));
+
+    const rows = cellRows(doc);
+    for (const cells of rows) {
+        assert.equal(cells.reduce((sum, cell) => sum + Number(cell.getAttribute('colspan') || '1'), 0), 3);
+    }
+    assert.deepEqual(rows.map(cells => cells.map(cell => cellText(doc, cell, content))),
+        [['Wide', 'Tall'], ['Wide 2', ''], ['A3', 'Orphan', 'C3']]);
+    assert.deepEqual(rows.map(cellAttribute('borderSpec')),
+        [[null, '11'], [null, '14'], [null, null, null]]);
+});
+
+test('merged cells in a borderNone table get no borderSpec', async () => {
+    const { doc, content } = await convertBody(gridTable(2, [
+        [['Merged', RESTART], ['B1']],
+        [[null, CONTINUE], ['B2']]
+    ], NO_BORDERS));
+
+    assert.equal(doc.querySelector('elements table').getAttribute('border'), 'borderNone');
+    assert.equal(content, 'MergedB1B2');
+    const rows = cellRows(doc);
+    assert.equal(rows[1].length, 2);
+    assert.deepEqual(rows.map(cellAttribute('borderSpec')), [[null, null], [null, null]]);
+});
+
 test('regression: a footnote reference becomes a superscript number with the text appended', async () => {
     const { doc, content } = await convertBody(
         p('<w:r><w:t>Claim</w:t></w:r><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r>'),
@@ -512,6 +608,133 @@ test('paragraph alignment and indents come from the paragraph style unless set d
     assert.deepEqual(para('Hanging'), ['1', '36.0', '0.0', null]);
     assert.deepEqual(para('Default style'), ['3', '0.0', '0.0', null]);
     assert.deepEqual(para('Unknown style'), ['3', '0.0', '0.0', null]);
+});
+
+// Paragraph spacing: w:spacing -> SpaceAbove, SpaceBelow and LineSpacing
+
+const SPACING_ATTRIBUTES = ['SpaceAbove', 'SpaceBelow', 'LineSpacing'];
+
+/** The spacing attributes of the paragraph holding this text */
+function spacingOf(doc, content, text) {
+    const el = contentWithText(doc, content, text).closest('paragraph');
+    return Object.fromEntries(SPACING_ATTRIBUTES.map(name => [name, el.getAttribute(name)]));
+}
+
+const NO_SPACING = { SpaceAbove: null, SpaceBelow: null, LineSpacing: null };
+
+test('w:before and w:after become SpaceAbove and SpaceBelow in points', async () => {
+    const { doc, content } = await convertBody(
+        p(run('Spaced'), '<w:pPr><w:spacing w:before="240" w:after="120"/></w:pPr>') +
+        p(run('Half points'), '<w:pPr><w:spacing w:before="30" w:after="0"/></w:pPr>') +
+        p(run('Measure'), '<w:pPr><w:spacing w:after="6pt"/></w:pPr>'));
+
+    assert.deepEqual(spacingOf(doc, content, 'Spaced'), { ...NO_SPACING, SpaceAbove: '12.0', SpaceBelow: '6.0' });
+    assert.deepEqual(spacingOf(doc, content, 'Half points'), { ...NO_SPACING, SpaceAbove: '1.5' });
+    assert.deepEqual(spacingOf(doc, content, 'Measure'), { ...NO_SPACING, SpaceBelow: '6.0' });
+});
+
+test('auto line spacing becomes the fraction over single spacing', async () => {
+    const { doc, content } = await convertBody(
+        p(run('One and a half'), '<w:pPr><w:spacing w:line="360" w:lineRule="auto"/></w:pPr>') +
+        p(run('No rule'), '<w:pPr><w:spacing w:line="360"/></w:pPr>') +
+        p(run('Multiple'), '<w:pPr><w:spacing w:line="276" w:lineRule="auto"/></w:pPr>') +
+        p(run('Double'), '<w:pPr><w:spacing w:line="480" w:lineRule="auto"/></w:pPr>') +
+        p(run('Single'), '<w:pPr><w:spacing w:line="240" w:lineRule="auto"/></w:pPr>') +
+        p(run('Tighter'), '<w:pPr><w:spacing w:line="200" w:lineRule="auto"/></w:pPr>'));
+
+    assert.equal(spacingOf(doc, content, 'One and a half').LineSpacing, '0.5');
+    assert.equal(spacingOf(doc, content, 'No rule').LineSpacing, '0.5');
+    assert.equal(spacingOf(doc, content, 'Multiple').LineSpacing, '0.15');
+    assert.equal(spacingOf(doc, content, 'Double').LineSpacing, '1.0');
+    assert.deepEqual(spacingOf(doc, content, 'Single'), NO_SPACING);
+    assert.deepEqual(spacingOf(doc, content, 'Tighter'), NO_SPACING);
+});
+
+test('exact and at-least line spacing write no LineSpacing, even over a style\'s auto spacing', async () => {
+    const { doc, content } = await convertBody(
+        styled('OneHalf', run('Exact'), '<w:spacing w:line="360" w:lineRule="exact"/>') +
+        styled('OneHalf', run('At least'), '<w:spacing w:line="480" w:lineRule="atLeast"/>') +
+        styled('OneHalf', run('From style')), {
+            styles: paragraphStyle('OneHalf', { pPr: '<w:spacing w:line="360" w:lineRule="auto"/>' })
+        });
+
+    assert.deepEqual(spacingOf(doc, content, 'Exact'), NO_SPACING);
+    assert.deepEqual(spacingOf(doc, content, 'At least'), NO_SPACING);
+    assert.equal(spacingOf(doc, content, 'From style').LineSpacing, '0.5');
+});
+
+test('the line height and its rule are inherited separately', async () => {
+    const { doc, content } = await convertBody(
+        styled('OneHalf', run('Direct exact rule'), '<w:spacing w:lineRule="exact"/>') +
+        styled('Exact', run('Direct line under an exact rule'), '<w:spacing w:line="480"/>') +
+        styled('Exact', run('Direct auto rule'), '<w:spacing w:lineRule="auto"/>'), {
+            styles: paragraphStyle('OneHalf', { pPr: '<w:spacing w:line="360" w:lineRule="auto"/>' }) +
+                paragraphStyle('Exact', { pPr: '<w:spacing w:line="360" w:lineRule="exact"/>' })
+        });
+
+    assert.deepEqual(spacingOf(doc, content, 'Direct exact rule'), NO_SPACING);
+    assert.deepEqual(spacingOf(doc, content, 'Direct line under an exact rule'), NO_SPACING);
+    assert.equal(spacingOf(doc, content, 'Direct auto rule').LineSpacing, '0.5');
+});
+
+test('spacing merges per attribute through docDefaults, the w:basedOn chain and direct w:pPr', async () => {
+    const { doc, content } = await convertBody(
+        styled('Heading', run('Style before, direct after'), '<w:spacing w:after="120"/>') +
+        styled('Heading', run('Direct after zero'), '<w:spacing w:after="0"/>') +
+        styled('Heading', run('Style only')) +
+        p(run('Defaults only')), {
+            styles: '<w:docDefaults><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/>' +
+                '</w:pPr></w:pPrDefault></w:docDefaults>' +
+                paragraphStyle('Base', { pPr: '<w:spacing w:before="240"/>' }) +
+                paragraphStyle('Heading', { basedOn: 'Base', pPr: '<w:spacing w:after="240"/>' })
+        });
+
+    assert.deepEqual(spacingOf(doc, content, 'Style before, direct after'),
+        { SpaceAbove: '12.0', SpaceBelow: '6.0', LineSpacing: '0.08' });
+    assert.deepEqual(spacingOf(doc, content, 'Direct after zero'),
+        { SpaceAbove: '12.0', SpaceBelow: null, LineSpacing: '0.08' });
+    assert.deepEqual(spacingOf(doc, content, 'Style only'),
+        { SpaceAbove: '12.0', SpaceBelow: '12.0', LineSpacing: '0.08' });
+    assert.deepEqual(spacingOf(doc, content, 'Defaults only'),
+        { SpaceAbove: null, SpaceBelow: '8.0', LineSpacing: '0.08' });
+});
+
+test('an unreadable or negative spacing value leaves the inherited value in place', async () => {
+    const { doc, content } = await convertBody(
+        styled('Spaced', run('Bad values'), '<w:spacing w:before="abc" w:after="-120" w:line="x"/>'), {
+            styles: paragraphStyle('Spaced', { pPr: '<w:spacing w:before="240" w:after="120" w:line="360"/>' })
+        });
+
+    assert.deepEqual(spacingOf(doc, content, 'Bad values'), { SpaceAbove: '12.0', SpaceBelow: '6.0', LineSpacing: '0.5' });
+});
+
+test('paragraphs inside table cells get spacing too', async () => {
+    const { doc, content } = await convertBody(table([[
+        p(run('Cell spaced'), '<w:pPr><w:spacing w:before="240" w:after="120" w:line="360"/></w:pPr>'),
+        p(run('Cell plain'))
+    ]]));
+
+    assert.deepEqual(spacingOf(doc, content, 'Cell spaced'), { SpaceAbove: '12.0', SpaceBelow: '6.0', LineSpacing: '0.5' });
+    assert.deepEqual(spacingOf(doc, content, 'Cell plain'), NO_SPACING);
+});
+
+test('the part of a paragraph after a page break does not repeat the space above', async () => {
+    const { doc, content } = await convertBody(p(
+        '<w:r><w:t>X</w:t><w:br w:type="page"/><w:t>Y</w:t></w:r>',
+        '<w:pPr><w:spacing w:before="240" w:after="120" w:line="360"/></w:pPr>'));
+
+    assert.deepEqual(spacingOf(doc, content, 'X'), { SpaceAbove: '12.0', SpaceBelow: '6.0', LineSpacing: '0.5' });
+    assert.deepEqual(spacingOf(doc, content, 'Y'), { SpaceAbove: null, SpaceBelow: '6.0', LineSpacing: '0.5' });
+});
+
+test('a document without w:spacing writes no spacing attributes', async () => {
+    const { xml } = await convertBody(
+        p(run('Plain')) + p(run('Indented'), '<w:pPr><w:jc w:val="both"/><w:ind w:left="720"/></w:pPr>') +
+        table([[p(run('Cell')), '<w:p/>']]), {
+            styles: paragraphStyle('Normal', { isDefault: true, pPr: '<w:jc w:val="center"/>' })
+        });
+
+    for (const name of SPACING_ATTRIBUTES) assert.ok(!xml.includes(name), `unexpected ${name}`);
 });
 
 test('without styles.xml, or with a malformed one, runs keep the built-in defaults', async (t) => {

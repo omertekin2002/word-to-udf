@@ -439,7 +439,7 @@ class DocxParser {
     }
 
     /**
-     * Read the alignment and indents a w:pPr sets, from a paragraph, a style or the document defaults
+     * Read the alignment, indents and spacing a w:pPr sets, from a paragraph, a style or the document defaults
      * @param {Element|null} pPr - The w:pPr element
      * @returns {Object} Only the properties it sets
      */
@@ -462,7 +462,36 @@ class DocxParser {
             }
         }
 
+        const spacing = childElement(pPr, 'spacing');
+        if (spacing) {
+            // Space before and after, in points to a tenth; an unreadable or negative value is ignored
+            const space = attribute => {
+                const points = this.measureToPoints(spacing.getAttribute(attribute));
+                return points !== null && points >= 0 ? Math.round(points * 10) / 10 : null;
+            };
+            const before = space('w:before');
+            if (before !== null) props.spaceBefore = before;
+            const after = space('w:after');
+            if (after !== null) props.spaceAfter = after;
+
+            // The line height and its rule inherit separately; lineSpacing combines them after the merge
+            const line = Number(spacing.getAttribute('w:line'));
+            if (spacing.hasAttribute('w:line') && Number.isFinite(line) && line > 0) props.line = line;
+            if (spacing.getAttribute('w:lineRule')) props.lineRule = spacing.getAttribute('w:lineRule');
+        }
+
         return props;
+    }
+
+    /**
+     * The line spacing multiplier of resolved paragraph properties. w:line counts 240ths
+     * of a line when the rule is auto (or absent). Exact and at-least line heights have
+     * no UDF equivalent, so they give single spacing.
+     * @param {{line?: number, lineRule?: string}} props
+     * @returns {number} 1 for single spacing
+     */
+    lineSpacing({ line, lineRule = 'auto' }) {
+        return lineRule === 'auto' && line ? line / 240 : 1;
     }
 
     /**
@@ -628,10 +657,11 @@ class DocxParser {
             numbering: null
         };
 
-        // Alignment and indents: document defaults, the paragraph style chain, then the paragraph's own w:pPr
+        // Alignment, indents and spacing: document defaults, the paragraph style chain, then the paragraph's own w:pPr
         const pPr = childElement(para, 'pPr');
         const style = this.paragraphStyle(pPr);
         Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, this.readParagraphProperties(pPr));
+        paragraph.lineSpacing = this.lineSpacing(paragraph);
 
         if (pPr) {
             // Numbering

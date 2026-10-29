@@ -245,6 +245,24 @@ test('headings take bold and size from their styles.xml style', async () => {
     }
 });
 
+test('body paragraphs keep the 1.5 line spacing from docDefaults, headings their style\'s space', async () => {
+    const spacing = paragraph => ['SpaceAbove', 'SpaceBelow', 'LineSpacing'].map(name => paragraph.getAttribute(name));
+
+    const { doc, content } = await converted(itiraz);
+    for (const heading of itiraz.headings) {
+        assert.deepEqual(spacing(paragraphOf(doc, content, heading)), ['12.0', '6.0', '0.5'], heading);
+    }
+    const conclusion = itiraz.texts.find(text => text.startsWith('Açıklanan nedenlerle'));
+    assert.deepEqual(spacing(paragraphOf(doc, content, conclusion)), [null, null, '0.5']);
+
+    for (const petition of [dava, tablo]) {
+        const { doc, content } = await converted(petition);
+        for (const text of petition.texts.filter(text => text.trim().length > 20)) {
+            assert.deepEqual(spacing(paragraphOf(doc, content, text)), [null, null, '0.5'], text);
+        }
+    }
+});
+
 test('page margins come from w:sectPr', async () => {
     for (const petition of petitions) {
         const { doc } = await converted(petition);
@@ -257,11 +275,68 @@ test('page margins come from w:sectPr', async () => {
     }
 });
 
-// Known gaps: recorded as todo so they show in the output as the fidelity to-do list
-// without failing the run. Each one should pass once its roadmap item (vision #5) lands.
+// The cells of a <row> with the grid column each starts in (1-based) and its text
+const gridCells = (row, content) => {
+    let column = 1;
+    return [...row.querySelectorAll('cell')].map(cell => {
+        const span = Number(cell.getAttribute('colspan') || '1');
+        const entry = { column, span, cell, text: contentElements(cell.ownerDocument, cell).map(el => textOf(el, content)).join('') };
+        column += span;
+        return entry;
+    });
+};
 
-test('a vertically merged cell spans its rows', { todo: 'roadmap #8: emit rowspan for vMerge' }, async () => {
+test('ekli tablo dilekçesi: a vertical merge keeps every row on the table grid', async () => {
     const { doc, content } = await converted(tablo);
+    const table = doc.querySelector('elements table');
+    const rows = [...table.querySelectorAll('row')].map(row => gridCells(row, content));
+
+    for (const [i, cells] of rows.entries()) {
+        assert.equal(cells.reduce((sum, cell) => sum + cell.span, 0), Number(table.getAttribute('columnCount')), `row ${i + 1}`);
+    }
+
+    const descriptions = ['Örnek fatura no. 0001\n(00.00.2026 tarihli)', 'Örnek fatura no. 0002',
+        'Ödeme tarihine kadar işleyen yasal faiz', 'İhtarname ve tebligat giderleri'];
+    const amounts = ['10.000,00', '5.250,50', '1.234,56', '750,00'];
+    for (const [i, cells] of rows.slice(1, 5).entries()) {
+        const at = column => cells.find(cell => cell.column === column).text;
+        assert.equal(at(3), descriptions[i], `data row ${i + 1} description`);
+        assert.equal(at(4), amounts[i], `data row ${i + 1} amount`);
+    }
+
+    // The continued cell is empty and adds nothing to the content
+    const continued = rows[2].find(cell => cell.column === 2).cell;
+    assert.equal(continued.textContent, '');
+    for (const el of continued.querySelectorAll('[startOffset]')) {
+        assert.equal(el.getAttribute('length'), '0');
+    }
+});
+
+test('ekli tablo dilekçesi: merged cells are joined with borderSpec, other cells keep the default', async () => {
+    const { doc, content } = await converted(tablo);
+    const rows = [...doc.querySelectorAll('elements table row')].map(row => gridCells(row, content));
+
     const merged = elementWithText(doc, content, 'Fatura alacağı').closest('cell');
-    assert.equal(merged.getAttribute('rowspan'), '2');
+    assert.equal(merged.getAttribute('borderSpec'), '11', 'the first cell drops its bottom edge');
+    const continued = rows[2].find(cell => cell.column === 2).cell;
+    assert.equal(continued.getAttribute('borderSpec'), '14', 'the last cell drops its top edge');
+
+    const others = rows.flat().map(entry => entry.cell).filter(cell => cell !== merged && cell !== continued);
+    assert.ok(others.length > 0);
+    for (const cell of others) {
+        assert.equal(cell.getAttribute('borderSpec'), null);
+    }
+});
+
+test('ekli tablo dilekçesi: shaded cells carry fillColor', async () => {
+    const { doc, content } = await converted(tablo);
+    const D9D9D9 = String(0xFFD9D9D9 | 0);
+    for (const text of ['Sıra', 'Alacak Türü', 'Açıklama', 'Tutar (TL)', 'TOPLAM', '17.235,06']) {
+        assert.equal(elementWithText(doc, content, text).closest('cell').getAttribute('fillColor'), D9D9D9, text);
+    }
+    assert.equal(elementWithText(doc, content, '5.250,50').closest('cell').getAttribute('fillColor'), null);
+    for (const cell of doc.querySelectorAll('elements cell')) {
+        assert.equal(cell.getAttribute('bgColor'), null);
+        assert.equal(cell.getAttribute('vAlign'), null);
+    }
 });
