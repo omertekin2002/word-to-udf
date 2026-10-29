@@ -245,6 +245,24 @@ test('headings take bold and size from their styles.xml style', async () => {
     }
 });
 
+test('body paragraphs keep the 1.5 line spacing from docDefaults, headings their style\'s space', async () => {
+    const spacing = paragraph => ['SpaceAbove', 'SpaceBelow', 'LineSpacing'].map(name => paragraph.getAttribute(name));
+
+    const { doc, content } = await converted(itiraz);
+    for (const heading of itiraz.headings) {
+        assert.deepEqual(spacing(paragraphOf(doc, content, heading)), ['12.0', '6.0', '0.5'], heading);
+    }
+    const conclusion = itiraz.texts.find(text => text.startsWith('Açıklanan nedenlerle'));
+    assert.deepEqual(spacing(paragraphOf(doc, content, conclusion)), [null, null, '0.5']);
+
+    for (const petition of [dava, tablo]) {
+        const { doc, content } = await converted(petition);
+        for (const text of petition.texts.filter(text => text.trim().length > 20)) {
+            assert.deepEqual(spacing(paragraphOf(doc, content, text)), [null, null, '0.5'], text);
+        }
+    }
+});
+
 test('page margins come from w:sectPr', async () => {
     for (const petition of petitions) {
         const { doc } = await converted(petition);
