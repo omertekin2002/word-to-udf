@@ -474,20 +474,24 @@ class DocxParser {
             const after = space('w:after');
             if (after !== null) props.spaceAfter = after;
 
-            // w:line counts 240ths of a line when the rule is auto. Exact and at-least
-            // line heights have no UDF equivalent, so they reset to single spacing.
-            if (spacing.hasAttribute('w:line')) {
-                const rule = spacing.getAttribute('w:lineRule') || 'auto';
-                const line = Number(spacing.getAttribute('w:line'));
-                if (rule !== 'auto') {
-                    props.lineSpacing = 1;
-                } else if (Number.isFinite(line) && line > 0) {
-                    props.lineSpacing = line / 240;
-                }
-            }
+            // The line height and its rule inherit separately; lineSpacing combines them after the merge
+            const line = Number(spacing.getAttribute('w:line'));
+            if (spacing.hasAttribute('w:line') && Number.isFinite(line) && line > 0) props.line = line;
+            if (spacing.getAttribute('w:lineRule')) props.lineRule = spacing.getAttribute('w:lineRule');
         }
 
         return props;
+    }
+
+    /**
+     * The line spacing multiplier of resolved paragraph properties. w:line counts 240ths
+     * of a line when the rule is auto (or absent). Exact and at-least line heights have
+     * no UDF equivalent, so they give single spacing.
+     * @param {{line?: number, lineRule?: string}} props
+     * @returns {number} 1 for single spacing
+     */
+    lineSpacing({ line, lineRule = 'auto' }) {
+        return lineRule === 'auto' && line ? line / 240 : 1;
     }
 
     /**
@@ -657,6 +661,7 @@ class DocxParser {
         const pPr = childElement(para, 'pPr');
         const style = this.paragraphStyle(pPr);
         Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, this.readParagraphProperties(pPr));
+        paragraph.lineSpacing = this.lineSpacing(paragraph);
 
         if (pPr) {
             // Numbering

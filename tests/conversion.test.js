@@ -663,6 +663,20 @@ test('exact and at-least line spacing write no LineSpacing, even over a style\'s
     assert.equal(spacingOf(doc, content, 'From style').LineSpacing, '0.5');
 });
 
+test('the line height and its rule are inherited separately', async () => {
+    const { doc, content } = await convertBody(
+        styled('OneHalf', run('Direct exact rule'), '<w:spacing w:lineRule="exact"/>') +
+        styled('Exact', run('Direct line under an exact rule'), '<w:spacing w:line="480"/>') +
+        styled('Exact', run('Direct auto rule'), '<w:spacing w:lineRule="auto"/>'), {
+            styles: paragraphStyle('OneHalf', { pPr: '<w:spacing w:line="360" w:lineRule="auto"/>' }) +
+                paragraphStyle('Exact', { pPr: '<w:spacing w:line="360" w:lineRule="exact"/>' })
+        });
+
+    assert.deepEqual(spacingOf(doc, content, 'Direct exact rule'), NO_SPACING);
+    assert.deepEqual(spacingOf(doc, content, 'Direct line under an exact rule'), NO_SPACING);
+    assert.equal(spacingOf(doc, content, 'Direct auto rule').LineSpacing, '0.5');
+});
+
 test('spacing merges per attribute through docDefaults, the w:basedOn chain and direct w:pPr', async () => {
     const { doc, content } = await convertBody(
         styled('Heading', run('Style before, direct after'), '<w:spacing w:after="120"/>') +
