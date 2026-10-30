@@ -105,6 +105,50 @@ test('a main document part named in _rels/.rels converts, wherever it is', async
     assert.equal(parser.relationships.rId_image1.target, 'media/image1.png');
 });
 
+test('a main document part outside word/ reads the supporting parts its relationships name', async () => {
+    const picture = '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>' +
+        '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+        '<pic:pic><pic:blipFill><a:blip r:embed="rId_image1"/></pic:blipFill></pic:pic>' +
+        '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+    const body = '<w:p><w:pPr><w:pStyle w:val="Heading"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>' +
+        '<w:r><w:t>Claim</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>' +
+        `<w:p>${picture}</w:p>`;
+    const zip = await JSZip.loadAsync(await buildDocx(body, {
+        styles: '<w:style w:type="paragraph" w:styleId="Heading"><w:rPr><w:b/></w:rPr></w:style>',
+        numbering: '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/>' +
+            '<w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>',
+        footnotes: { 1: '<w:p><w:r><w:t>Source text</w:t></w:r></w:p>' },
+        settings: '<w:gutterAtTop/>',
+        sectPr: '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:gutter="567"/>',
+        media: { 'image1.png': Buffer.from('png') }
+    }));
+
+    // Every word/ part moves to docs/, but the picture to shared/, named with a relative
+    // target that leaves the document's folder; numbering is named with an absolute target
+    for (const from of Object.keys(zip.files).filter(name => name.startsWith('word/') && !zip.files[name].dir)) {
+        const to = from === 'word/media/image1.png' ? 'shared/image1.png' : from.replace(/^word\//, 'docs/');
+        zip.file(to, await zip.file(from).async('nodebuffer'));
+        zip.remove(from);
+    }
+    zip.remove('word');
+    const documentRels = await zip.file('docs/_rels/document.xml.rels').async('string');
+    zip.file('docs/_rels/document.xml.rels', documentRels
+        .replace('Target="numbering.xml"', 'Target="/docs/numbering.xml"')
+        .replace('Target="media/image1.png"', 'Target="../shared/image1.png"'));
+    const rels = await zip.file('_rels/.rels').async('string');
+    zip.file('_rels/.rels', rels.replace('Target="word/document.xml"', 'Target="docs/document.xml"'));
+    const contentTypes = await zip.file('[Content_Types].xml').async('string');
+    zip.file('[Content_Types].xml', contentTypes.replace(/"\/word\//g, '"/docs/'));
+
+    const parsed = await new (loadConverter().DocxParser)().parse(await zip.generateAsync({ type: 'nodebuffer' }));
+    const [claim, figure] = parsed.elements;
+    assert.equal(claim.runs[0].bold, true, 'the paragraph style from docs/styles.xml');
+    assert.equal(claim.numbering && claim.numbering.format, 'decimal', 'the list from docs/numbering.xml');
+    assert.equal(claim.runs[1].content, 'Source text', 'the footnote from docs/footnotes.xml');
+    assert.equal(figure.runs[0].data, Buffer.from('png').toString('base64'), 'the picture from shared/image1.png');
+    assert.equal(parsed.pageSetup.topMargin, 72 + 567 / 20, 'w:gutterAtTop from docs/settings.xml');
+});
+
 for (const encoding of ['utf16le', 'utf16be']) {
     test(`a ${encoding} word/document.xml converts`, async () => {
         const zip = await JSZip.loadAsync(await buildDocx('<w:p><w:r><w:t>Dilekçe metni</w:t></w:r></w:p>'));

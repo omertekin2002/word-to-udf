@@ -49,6 +49,9 @@ const OFFICE_DOCUMENT_RELATIONSHIPS = [
     'http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument'
 ];
 
+// Relationship types from the main document part to the supporting parts read here
+const PART_RELATIONSHIP_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/';
+
 // WordprocessingML namespace of a document saved as Strict Open XML (ECMA-376 Part 1, Strict)
 const STRICT_WORD_NS = 'http://purl.oclc.org/ooxml/wordprocessingml/main';
 
@@ -69,6 +72,23 @@ function parseFailure(code) {
     const error = new Error(PARSE_FAILURES[code]);
     error.code = code;
     return error;
+}
+
+/**
+ * Name of the part a relationship targets, without a leading slash: an absolute target
+ * from the package root, a relative one from the folder of the part the relationship
+ * belongs to (ECMA-376 Part 2, 9.3)
+ * @param {string} sourcePart - The part whose relationship it is ('' for the package)
+ * @param {string} target - The relationship's Target
+ * @returns {string}
+ */
+function resolvePartName(sourcePart, target) {
+    const segments = target.startsWith('/') ? [] : sourcePart.split('/').slice(0, -1);
+    for (const segment of target.split('/')) {
+        if (segment === '..') segments.pop();
+        else if (segment && segment !== '.') segments.push(segment);
+    }
+    return segments.join('/');
 }
 
 /**
@@ -283,7 +303,7 @@ class DocxParser {
             for (const rel of relsDoc.getElementsByTagName('Relationship')) {
                 if (!OFFICE_DOCUMENT_RELATIONSHIPS.includes(rel.getAttribute('Type'))) continue;
                 // Targets in _rels/.rels are relative to the package root
-                const path = (rel.getAttribute('Target') || '').replace(/^\//, '');
+                const path = resolvePartName('', rel.getAttribute('Target') || '');
                 if (this.zip.file(path)) return path;
             }
         }
@@ -291,7 +311,8 @@ class DocxParser {
     }
 
     /**
-     * Parse document relationships
+     * Parse the main document part's relationships, each with the name of the part it
+     * targets (path), or null for an external target such as a hyperlink
      */
     async parseRelationships() {
         // A part's relationships live in _rels/<part name>.rels next to it
@@ -306,37 +327,43 @@ class DocxParser {
             const id = rel.getAttribute('Id');
             const target = rel.getAttribute('Target');
             const type = rel.getAttribute('Type');
-            this.relationships[id] = { target, type };
+            const path = rel.getAttribute('TargetMode') === 'External' || !target
+                ? null : resolvePartName(this.documentPath, target);
+            this.relationships[id] = { target, type, path };
         }
     }
 
     /**
-     * Extract embedded images
+     * Name of the supporting part the main document part relates to with this
+     * relationship type, or where Word puts it when the document has no such relationship
+     * @param {string} type - The relationship type, after PART_RELATIONSHIP_TYPE
+     * @param {string} fallback - The part's usual name
+     * @returns {string}
+     */
+    relatedPart(type, fallback) {
+        const rel = Object.values(this.relationships).find(rel => rel.type === PART_RELATIONSHIP_TYPE + type && rel.path);
+        return rel ? rel.path : fallback;
+    }
+
+    /**
+     * Extract the images the main document part relates to, keyed by part name
      */
     async extractImages() {
-        const mediaFolder = this.zip.folder('word/media');
-        if (!mediaFolder) return;
+        for (const { type, path } of Object.values(this.relationships)) {
+            if (type !== PART_RELATIONSHIP_TYPE + 'image' || !path || this.images[path]) continue;
+            const file = this.zip.file(path);
+            if (!file) continue;
 
-        const mediaFiles = [];
-        this.zip.forEach((relativePath, file) => {
-            if (relativePath.startsWith('word/media/')) {
-                mediaFiles.push({ path: relativePath, file });
-            }
-        });
-
-        for (const { path, file } of mediaFiles) {
             const data = await file.async('arraybuffer');
-            const base64 = arrayBufferToBase64(data);
-            const filename = path.replace('word/media/', '');
-            this.images[filename] = base64;
+            this.images[path] = arrayBufferToBase64(data);
         }
     }
 
     /**
-     * Parse footnotes from word/footnotes.xml
+     * Parse footnotes from the footnotes part (word/footnotes.xml)
      */
     async parseFootnotes() {
-        const footnotesFile = this.zip.file('word/footnotes.xml');
+        const footnotesFile = this.zip.file(this.relatedPart('footnotes', 'word/footnotes.xml'));
         if (!footnotesFile) return;
 
         try {
@@ -372,11 +399,11 @@ class DocxParser {
     }
 
     /**
-     * Parse list definitions from word/numbering.xml into
+     * Parse list definitions from the numbering part (word/numbering.xml) into
      * this.numbering[numId][ilvl] = { format, lvlText }
      */
     async parseNumbering() {
-        const numberingFile = this.zip.file('word/numbering.xml');
+        const numberingFile = this.zip.file(this.relatedPart('numbering', 'word/numbering.xml'));
         if (!numberingFile) return;
 
         try {
@@ -463,11 +490,12 @@ class DocxParser {
     }
 
     /**
-     * Whether word/settings.xml puts the gutter at the top of the page (w:gutterAtTop)
+     * Whether the settings part (word/settings.xml) puts the gutter at the top of the
+     * page (w:gutterAtTop)
      * @returns {Promise<boolean>}
      */
     async isGutterAtTop() {
-        const settingsFile = this.zip.file('word/settings.xml');
+        const settingsFile = this.zip.file(this.relatedPart('settings', 'word/settings.xml'));
         if (!settingsFile) return false;
 
         const root = parseXml(await readXmlPart(settingsFile)).documentElement;
@@ -516,19 +544,19 @@ class DocxParser {
     }
 
     /**
-     * Parse word/styles.xml: the document defaults (w:docDefaults) and the paragraph
-     * and character styles, each with the properties it sets itself. w:basedOn chains
-     * are resolved on first use (see resolveStyle).
+     * Parse the styles part (word/styles.xml): the document defaults (w:docDefaults)
+     * and the paragraph and character styles, each with the properties it sets itself.
+     * w:basedOn chains are resolved on first use (see resolveStyle).
      */
     async parseStyles() {
-        const stylesFile = this.zip.file('word/styles.xml');
+        const stylesFile = this.zip.file(this.relatedPart('styles', 'word/styles.xml'));
         if (!stylesFile) return;
 
         try {
             const root = parseXml(await readXmlPart(stylesFile)).documentElement;
             // A malformed part parses to a parsererror document instead of throwing
             if (root.namespaceURI !== WORD_NS || root.localName !== 'styles') {
-                throw new Error('word/styles.xml is not a well-formed w:styles part');
+                throw new Error('The styles part is not a well-formed w:styles part');
             }
 
             const docDefaults = childElement(root, 'docDefaults');
@@ -1014,12 +1042,9 @@ class DocxParser {
             .filter(blip => !this.isInTextBox(blip, drawing));
         if (blips.length > 0) {
             const embed = blips[0].getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'embed');
-            if (embed && this.relationships[embed]) {
-                const target = this.relationships[embed].target;
-                const filename = target.replace('media/', '');
-                if (this.images[filename]) {
-                    image.data = this.images[filename];
-                }
+            const path = embed && this.relationships[embed] && this.relationships[embed].path;
+            if (path && this.images[path]) {
+                image.data = this.images[path];
             }
         }
 
