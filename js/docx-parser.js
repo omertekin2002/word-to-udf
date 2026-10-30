@@ -39,11 +39,25 @@ const COMPOUND_FILE_SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]
 // Name of the stream an encrypted OOXML package keeps its encryption parameters in (MS-OFFCRYPTO 2.3.4)
 const ENCRYPTION_INFO_STREAM = 'EncryptionInfo';
 
+// Compound file sector number that ends a chain, and the "no entry" directory ID (MS-CFB 2.1)
+const COMPOUND_END_OF_CHAIN = 0xFFFFFFFE;
+const COMPOUND_NO_STREAM = 0xFFFFFFFF;
+
+// Relationship from the package to its main part: transitional, then Strict OOXML
+const OFFICE_DOCUMENT_RELATIONSHIPS = [
+    'http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument',
+    'http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument'
+];
+
+// WordprocessingML namespace of a document saved as Strict Open XML (ECMA-376 Part 1, Strict)
+const STRICT_WORD_NS = 'http://purl.oclc.org/ooxml/wordprocessingml/main';
+
 // Messages for the parse failures the app explains; error.code tells them apart
 const PARSE_FAILURES = {
-    corrupt: 'The Word document is damaged: word/document.xml is missing or not well-formed.',
+    corrupt: 'The Word document is damaged: its main document part is missing or not well-formed.',
     encrypted: 'The Word document is password-protected.',
-    legacyDoc: 'The file is a Word 97-2003 document (.doc), not a .docx.'
+    legacyDoc: 'The file is a Word 97-2003 document (.doc), not a .docx.',
+    strict: 'The Word document is saved as Strict Open XML, which is not supported.'
 };
 
 /**
@@ -78,30 +92,91 @@ async function readBytes(file, length) {
 }
 
 /**
- * Whether a compound file has a stream with this name. Directory entries are 128 bytes,
- * and every sector starts on a 128-byte boundary, so each entry does too: a UTF-16LE
- * name, its byte length with the terminator at offset 64, and the type (2, a stream) at 66.
- * Matching all three keeps the same text inside a .doc's body from counting.
- * @param {Uint8Array} bytes - The whole compound file
- * @param {string} name - Stream name
- * @returns {boolean}
+ * Read an XML part as text. A package part may be UTF-8 or UTF-16 (ECMA-376 Part 2), told
+ * apart by its byte order mark or, without one, by how the leading "<" is encoded
+ * @param {JSZipObject} file - The part
+ * @returns {Promise<string>}
  */
-function hasCompoundStream(bytes, name) {
-    const nameBytes = (name.length + 1) * 2;
-    for (let entry = 512; entry + 128 <= bytes.length; entry += 128) {
-        if (bytes[entry + 64] !== nameBytes || bytes[entry + 65] !== 0 || bytes[entry + 66] !== 2) continue;
-        let matches = true;
-        for (let i = 0; i < name.length && matches; i++) {
-            matches = bytes[entry + i * 2] === name.charCodeAt(i) && bytes[entry + i * 2 + 1] === 0;
-        }
-        if (matches) return true;
+async function readXmlPart(file) {
+    const bytes = await file.async('uint8array');
+    let encoding = 'utf-8';
+    if ((bytes[0] === 0xFF && bytes[1] === 0xFE) || (bytes[0] === 0x3C && bytes[1] === 0x00)) {
+        encoding = 'utf-16le';
+    } else if ((bytes[0] === 0xFE && bytes[1] === 0xFF) || (bytes[0] === 0x00 && bytes[1] === 0x3C)) {
+        encoding = 'utf-16be';
     }
-    return false;
+    return new TextDecoder(encoding).decode(bytes);
+}
+
+/**
+ * Names of the streams directly in a compound file's root storage (MS-CFB). The directory
+ * is read by following its sector chain through the FAT, and only the root's children are
+ * visited, so a stream nested in a storage (an embedded object) or in another stream's
+ * bytes (an embedded file) doesn't count.
+ * @param {Uint8Array} bytes - The whole compound file
+ * @returns {Set<string>} Empty for a malformed file
+ */
+function compoundRootStreams(bytes) {
+    const names = new Set();
+    if (bytes.length < 512) return names;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const uint32 = offset => (offset + 4 <= bytes.length ? view.getUint32(offset, true) : COMPOUND_NO_STREAM);
+    const sectorShift = view.getUint16(0x1E, true);
+    if (sectorShift !== 9 && sectorShift !== 12) return names;
+    const sectorSize = 1 << sectorShift;
+    const sectorCount = Math.ceil(bytes.length / sectorSize);
+    // The header fills sector -1, so sector n starts one sector further in
+    const sectorOffset = sector => (sector + 1) * sectorSize;
+
+    // FAT sector numbers: the first 109 are in the header, the rest in the DIFAT sector chain
+    const fatSectorCount = Math.min(uint32(0x2C), sectorCount);
+    const fatSectors = [];
+    for (let i = 0; i < 109 && fatSectors.length < fatSectorCount; i++) fatSectors.push(uint32(0x4C + i * 4));
+    for (let difat = uint32(0x44), hops = 0; fatSectors.length < fatSectorCount && difat < sectorCount &&
+        hops < sectorCount; difat = uint32(sectorOffset(difat) + sectorSize - 4), hops++) {
+        for (let i = 0; i < sectorSize / 4 - 1 && fatSectors.length < fatSectorCount; i++) {
+            fatSectors.push(uint32(sectorOffset(difat) + i * 4));
+        }
+    }
+    const perFatSector = sectorSize / 4;
+    const nextSector = sector => {
+        const fatSector = fatSectors[Math.floor(sector / perFatSector)];
+        return fatSector === undefined ? COMPOUND_END_OF_CHAIN
+            : uint32(sectorOffset(fatSector) + (sector % perFatSector) * 4);
+    };
+
+    // Directory entries are 128 bytes; entry n is the nth in the directory chain
+    const entries = [];
+    for (let sector = uint32(0x30), hops = 0; sector < sectorCount && hops < sectorCount;
+        sector = nextSector(sector), hops++) {
+        for (let offset = 0; offset < sectorSize; offset += 128) entries.push(sectorOffset(sector) + offset);
+    }
+    const isEntry = id => entries[id] !== undefined && entries[id] + 128 <= bytes.length;
+    if (!isEntry(0) || bytes[entries[0] + 66] !== 5) return names;
+
+    // The root's children form a tree linked by left (68) and right (72) sibling IDs
+    const pending = [uint32(entries[0] + 76)];
+    const seen = new Set();
+    while (pending.length > 0) {
+        const id = pending.pop();
+        if (!isEntry(id) || seen.has(id)) continue;
+        seen.add(id);
+        const entry = entries[id];
+        pending.push(uint32(entry + 68), uint32(entry + 72));
+        // A stream (type 2) with a UTF-16LE name of nameLength bytes, terminator included
+        const nameLength = view.getUint16(entry + 64, true);
+        if (bytes[entry + 66] !== 2 || nameLength < 2 || nameLength > 64) continue;
+        let name = '';
+        for (let i = 0; i < nameLength / 2 - 1; i++) name += String.fromCharCode(view.getUint16(entry + i * 2, true));
+        names.add(name);
+    }
+    return names;
 }
 
 class DocxParser {
     constructor() {
         this.zip = null;
+        this.documentPath = 'word/document.xml';
         this.document = null;
         this.relationships = {};
         this.images = {};
@@ -129,6 +204,7 @@ class DocxParser {
 
             // Load the DOCX as a ZIP
             this.zip = await JSZip.loadAsync(file);
+            this.documentPath = await this.findMainDocument();
 
             // Parse relationships to find media files
             await this.parseRelationships();
@@ -148,12 +224,18 @@ class DocxParser {
             // Parse the main document content. A malformed part parses to a parsererror
             // document instead of throwing (or, in Chromium, keeps a partial w:document with a
             // parsererror inside), and would convert to a blank UDF
-            const documentFile = this.zip.file('word/document.xml');
+            const documentFile = this.zip.file(this.documentPath);
             if (!documentFile) throw parseFailure('corrupt');
-            this.document = parseXml(await documentFile.async('string'));
+            this.document = parseXml(await readXmlPart(documentFile));
             const root = this.document.documentElement;
-            if (!root || root.namespaceURI !== WORD_NS || root.localName !== 'document' ||
-                this.document.getElementsByTagName('parsererror').length > 0) {
+            if (!root || this.document.getElementsByTagName('parsererror').length > 0) {
+                throw parseFailure('corrupt');
+            }
+            // A well-formed Strict Open XML document is not damaged, just in a namespace not read here
+            if (root.namespaceURI === STRICT_WORD_NS && root.localName === 'document') {
+                throw parseFailure('strict');
+            }
+            if (root.namespaceURI !== WORD_NS || root.localName !== 'document') {
                 throw parseFailure('corrupt');
             }
 
@@ -176,8 +258,8 @@ class DocxParser {
     }
 
     /**
-     * Throw if the file is an OLE compound file: 'encrypted' when it holds an
-     * EncryptionInfo stream (a password-protected .docx), 'legacyDoc' otherwise
+     * Throw if the file is an OLE compound file: 'encrypted' when its root storage holds
+     * an EncryptionInfo stream (a password-protected .docx), 'legacyDoc' otherwise
      * @param {Blob|ArrayBuffer|Uint8Array} file - The input given to parse()
      */
     async rejectCompoundFile(file) {
@@ -186,17 +268,37 @@ class DocxParser {
             !COMPOUND_FILE_SIGNATURE.every((byte, i) => header[i] === byte)) {
             return;
         }
-        throw parseFailure(hasCompoundStream(await readBytes(file), ENCRYPTION_INFO_STREAM) ? 'encrypted' : 'legacyDoc');
+        throw parseFailure(compoundRootStreams(await readBytes(file)).has(ENCRYPTION_INFO_STREAM) ? 'encrypted' : 'legacyDoc');
+    }
+
+    /**
+     * Path of the main document part: the target of the package's officeDocument
+     * relationship in _rels/.rels, which Word usually but not always names word/document.xml
+     * @returns {Promise<string>}
+     */
+    async findMainDocument() {
+        const relsFile = this.zip.file('_rels/.rels');
+        if (relsFile) {
+            const relsDoc = parseXml(await readXmlPart(relsFile));
+            for (const rel of relsDoc.getElementsByTagName('Relationship')) {
+                if (!OFFICE_DOCUMENT_RELATIONSHIPS.includes(rel.getAttribute('Type'))) continue;
+                // Targets in _rels/.rels are relative to the package root
+                const path = (rel.getAttribute('Target') || '').replace(/^\//, '');
+                if (this.zip.file(path)) return path;
+            }
+        }
+        return 'word/document.xml';
     }
 
     /**
      * Parse document relationships
      */
     async parseRelationships() {
-        const relsFile = this.zip.file('word/_rels/document.xml.rels');
+        // A part's relationships live in _rels/<part name>.rels next to it
+        const relsFile = this.zip.file(this.documentPath.replace(/[^/]*$/, name => `_rels/${name}.rels`));
         if (!relsFile) return;
 
-        const relsXml = await relsFile.async('string');
+        const relsXml = await readXmlPart(relsFile);
         const relsDoc = parseXml(relsXml);
         const relationships = relsDoc.getElementsByTagName('Relationship');
 
@@ -238,7 +340,7 @@ class DocxParser {
         if (!footnotesFile) return;
 
         try {
-            const footnotesXml = await footnotesFile.async('string');
+            const footnotesXml = await readXmlPart(footnotesFile);
             const footnotesDoc = parseXml(footnotesXml);
             const footnotes = footnotesDoc.getElementsByTagNameNS(WORD_NS, 'footnote');
 
@@ -278,7 +380,7 @@ class DocxParser {
         if (!numberingFile) return;
 
         try {
-            const numberingDoc = parseXml(await numberingFile.async('string'));
+            const numberingDoc = parseXml(await readXmlPart(numberingFile));
             const root = numberingDoc.documentElement;
 
             const abstractLevels = {};
@@ -368,7 +470,7 @@ class DocxParser {
         const settingsFile = this.zip.file('word/settings.xml');
         if (!settingsFile) return false;
 
-        const root = parseXml(await settingsFile.async('string')).documentElement;
+        const root = parseXml(await readXmlPart(settingsFile)).documentElement;
         const gutterAtTop = root.namespaceURI === WORD_NS && root.localName === 'settings'
             ? childElement(root, 'gutterAtTop') : null;
         return gutterAtTop ? this.isOn(gutterAtTop) : false;
@@ -423,7 +525,7 @@ class DocxParser {
         if (!stylesFile) return;
 
         try {
-            const root = parseXml(await stylesFile.async('string')).documentElement;
+            const root = parseXml(await readXmlPart(stylesFile)).documentElement;
             // A malformed part parses to a parsererror document instead of throwing
             if (root.namespaceURI !== WORD_NS || root.localName !== 'styles') {
                 throw new Error('word/styles.xml is not a well-formed w:styles part');

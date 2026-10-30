@@ -19,7 +19,7 @@ const { DOMParser } = new JSDOM('').window;
  * @returns {{DocxParser: Function, UdfGenerator: Function}}
  */
 function loadConverter() {
-    const context = vm.createContext({ DOMParser, JSZip, btoa, console });
+    const context = vm.createContext({ DOMParser, JSZip, TextDecoder, btoa, console });
     for (const file of SCRIPTS) {
         const code = fs.readFileSync(path.join(ROOT, file), 'utf8');
         vm.runInContext(code, context, { filename: file });
@@ -127,6 +127,65 @@ async function buildDocx(bodyXml, options = {}) {
 }
 
 /**
+ * Build a minimal OLE compound file (MS-CFB, version 3): the header, the directory sectors,
+ * then one FAT sector chaining them. The root storage holds `children`, each a stream name
+ * or a storage `{ name, children }`; siblings are linked through their right sibling IDs.
+ * @param {Array<string|{name: string, children: Array}>} children
+ * @param {Object} [options]
+ * @param {Buffer} [options.trailer] - Bytes after the FAT sector, outside any chain
+ * @returns {Buffer}
+ */
+function compoundFile(children, { trailer = Buffer.alloc(0) } = {}) {
+    const NONE = 0xFFFFFFFF;
+    const entries = [];
+    const addEntry = (name, type, items) => {
+        const id = entries.length;
+        const bytes = Buffer.alloc(128);
+        bytes.write(name, 0, 'utf16le');
+        bytes.writeUInt16LE((name.length + 1) * 2, 64);
+        bytes[66] = type;
+        bytes.writeUInt32LE(NONE, 68);
+        bytes.writeUInt32LE(NONE, 72);
+        bytes.writeUInt32LE(NONE, 76);
+        entries.push(bytes);
+        let previous = null;
+        for (const item of items) {
+            const child = typeof item === 'string' ? addEntry(item, 2, []) : addEntry(item.name, 1, item.children);
+            if (previous === null) bytes.writeUInt32LE(child, 76);
+            else entries[previous].writeUInt32LE(child, 72);
+            previous = child;
+        }
+        return id;
+    };
+    addEntry('Root Entry', 5, children);
+
+    const directorySectors = Math.ceil(entries.length / 4);
+    const fatSector = directorySectors;
+    const header = Buffer.alloc(512);
+    Buffer.from([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]).copy(header);
+    header.writeUInt16LE(0x3E, 0x18);
+    header.writeUInt16LE(3, 0x1A);
+    header.writeUInt16LE(0xFFFE, 0x1C);
+    header.writeUInt16LE(9, 0x1E);
+    header.writeUInt16LE(6, 0x20);
+    header.writeUInt32LE(1, 0x2C);
+    header.writeUInt32LE(0, 0x30);
+    header.writeUInt32LE(0x1000, 0x38);
+    header.writeUInt32LE(0xFFFFFFFE, 0x3C);
+    header.writeUInt32LE(0xFFFFFFFE, 0x44);
+    header.fill(0xFF, 0x4C);
+    header.writeUInt32LE(fatSector, 0x4C);
+
+    const fat = Buffer.alloc(512, 0xFF);
+    for (let sector = 0; sector < directorySectors; sector++) {
+        fat.writeUInt32LE(sector + 1 < directorySectors ? sector + 1 : 0xFFFFFFFE, sector * 4);
+    }
+    fat.writeUInt32LE(0xFFFFFFFD, fatSector * 4);
+    const directory = Buffer.concat([...entries, Buffer.alloc(128 * (directorySectors * 4 - entries.length))]);
+    return Buffer.concat([header, directory, fat, trailer]);
+}
+
+/**
  * Run a .docx through DocxParser and UdfGenerator and unpack the resulting .udf.
  * @param {Buffer} docx
  * @returns {Promise<{parsed: Object, xml: string, doc: Document, content: string}>}
@@ -176,4 +235,4 @@ function textOf(el, content) {
     return content.slice(start, start + Number(el.getAttribute('length')));
 }
 
-module.exports = { loadConverter, buildDocx, convert, convertBody, assertOffsetsInBounds, textOf };
+module.exports = { loadConverter, buildDocx, compoundFile, convert, convertBody, assertOffsetsInBounds, textOf };

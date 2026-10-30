@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const JSZip = require('jszip');
 const { JSDOM, VirtualConsole } = require('jsdom');
-const { buildDocx } = require('./helpers');
+const { buildDocx, compoundFile } = require('./helpers');
 
 const ROOT = path.resolve(__dirname, '..');
 const HTML = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
@@ -237,21 +237,20 @@ async function truncatedDocx() {
     return zip.generateAsync({ type: 'nodebuffer' });
 }
 
-// The 8-byte signature and a directory entry naming the EncryptionInfo stream, at offset 512
-function compoundFile({ encrypted }) {
-    const bytes = Buffer.alloc(1024);
-    Buffer.from([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]).copy(bytes);
-    const name = encrypted ? 'EncryptionInfo' : 'WordDocument';
-    bytes.write(name, 512, 'utf16le');
-    bytes.writeUInt16LE((name.length + 1) * 2, 512 + 64);
-    bytes[512 + 66] = 2;
-    return bytes;
+// A Strict Open XML .docx: a well-formed document in the Strict WordprocessingML namespace
+async function strictDocx() {
+    const zip = await JSZip.loadAsync(await buildDocx('<w:p><w:r><w:t>Dilekçe metni</w:t></w:r></w:p>'));
+    const documentXml = await zip.file('word/document.xml').async('string');
+    zip.file('word/document.xml', documentXml.replace('http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+        'http://purl.oclc.org/ooxml/wordprocessingml/main'));
+    return zip.generateAsync({ type: 'nodebuffer' });
 }
 
 const NAMED_FAILURES = [
     ['a damaged .docx', 'error.corrupt', truncatedDocx],
-    ['a password-protected .docx', 'error.encrypted', async () => compoundFile({ encrypted: true })],
-    ['a .doc renamed to .docx', 'error.legacyDoc', async () => compoundFile({ encrypted: false })]
+    ['a password-protected .docx', 'error.encrypted', async () => compoundFile(['EncryptionInfo', 'EncryptedPackage'])],
+    ['a .doc renamed to .docx', 'error.legacyDoc', async () => compoundFile(['WordDocument', '1Table'])],
+    ['a Strict Open XML .docx', 'error.strict', strictDocx]
 ];
 
 for (const [what, key, build] of NAMED_FAILURES) {
