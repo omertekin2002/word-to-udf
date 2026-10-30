@@ -33,6 +33,72 @@ const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike'];
 // Points per unit of an OOXML universal measure (ST_UniversalMeasure, e.g. "2.5cm")
 const POINTS_PER_UNIT = { mm: 72 / 25.4, cm: 72 / 2.54, in: 72, pt: 1, pc: 12, pi: 12 };
 
+// Signature of an OLE compound file: a Word 97-2003 .doc, or a password-protected .docx
+const COMPOUND_FILE_SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+
+// Name of the stream an encrypted OOXML package keeps its encryption parameters in (MS-OFFCRYPTO 2.3.4)
+const ENCRYPTION_INFO_STREAM = 'EncryptionInfo';
+
+// Messages for the parse failures the app explains; error.code tells them apart
+const PARSE_FAILURES = {
+    corrupt: 'The Word document is damaged: word/document.xml is missing or not well-formed.',
+    encrypted: 'The Word document is password-protected.',
+    legacyDoc: 'The file is a Word 97-2003 document (.doc), not a .docx.'
+};
+
+/**
+ * An Error for a parse failure the app explains to the user
+ * @param {string} code - A PARSE_FAILURES key
+ * @returns {Error}
+ */
+function parseFailure(code) {
+    const error = new Error(PARSE_FAILURES[code]);
+    error.code = code;
+    return error;
+}
+
+/**
+ * Read the bytes of a parse() input
+ * @param {Blob|ArrayBuffer|Uint8Array} file - A browser File, or a Buffer in the tests
+ * @param {number} [length] - Read only this many leading bytes
+ * @returns {Promise<Uint8Array|null>} null for an input that isn't one of those
+ */
+async function readBytes(file, length) {
+    if (file && typeof file.arrayBuffer === 'function' && typeof file.slice === 'function') {
+        const blob = length === undefined ? file : file.slice(0, length);
+        return new Uint8Array(await blob.arrayBuffer());
+    }
+    let bytes = null;
+    if (ArrayBuffer.isView(file)) {
+        bytes = new Uint8Array(file.buffer, file.byteOffset, file.byteLength);
+    } else if (Object.prototype.toString.call(file) === '[object ArrayBuffer]') {
+        bytes = new Uint8Array(file);
+    }
+    return bytes && length !== undefined ? bytes.subarray(0, length) : bytes;
+}
+
+/**
+ * Whether a compound file has a stream with this name. Directory entries are 128 bytes,
+ * and every sector starts on a 128-byte boundary, so each entry does too: a UTF-16LE
+ * name, its byte length with the terminator at offset 64, and the type (2, a stream) at 66.
+ * Matching all three keeps the same text inside a .doc's body from counting.
+ * @param {Uint8Array} bytes - The whole compound file
+ * @param {string} name - Stream name
+ * @returns {boolean}
+ */
+function hasCompoundStream(bytes, name) {
+    const nameBytes = (name.length + 1) * 2;
+    for (let entry = 512; entry + 128 <= bytes.length; entry += 128) {
+        if (bytes[entry + 64] !== nameBytes || bytes[entry + 65] !== 0 || bytes[entry + 66] !== 2) continue;
+        let matches = true;
+        for (let i = 0; i < name.length && matches; i++) {
+            matches = bytes[entry + i * 2] === name.charCodeAt(i) && bytes[entry + i * 2 + 1] === 0;
+        }
+        if (matches) return true;
+    }
+    return false;
+}
+
 class DocxParser {
     constructor() {
         this.zip = null;
@@ -58,6 +124,9 @@ class DocxParser {
             this.numbering = {};
             this.styles = this.emptyStyles();
 
+            // A compound file is not a ZIP: name why it can't be read instead of a generic failure
+            await this.rejectCompoundFile(file);
+
             // Load the DOCX as a ZIP
             this.zip = await JSZip.loadAsync(file);
 
@@ -76,9 +145,17 @@ class DocxParser {
             // Parse style definitions
             await this.parseStyles();
 
-            // Parse the main document content
-            const documentXml = await this.zip.file('word/document.xml').async('string');
-            this.document = parseXml(documentXml);
+            // Parse the main document content. A malformed part parses to a parsererror
+            // document instead of throwing (or, in Chromium, keeps a partial w:document with a
+            // parsererror inside), and would convert to a blank UDF
+            const documentFile = this.zip.file('word/document.xml');
+            if (!documentFile) throw parseFailure('corrupt');
+            this.document = parseXml(await documentFile.async('string'));
+            const root = this.document.documentElement;
+            if (!root || root.namespaceURI !== WORD_NS || root.localName !== 'document' ||
+                this.document.getElementsByTagName('parsererror').length > 0) {
+                throw parseFailure('corrupt');
+            }
 
             // Extract document elements
             const elements = await this.extractElements();
@@ -91,8 +168,25 @@ class DocxParser {
             };
         } catch (error) {
             console.error('Error parsing DOCX:', error);
+            if (Object.prototype.hasOwnProperty.call(PARSE_FAILURES, error && error.code)) {
+                throw parseFailure(error.code);
+            }
             throw new Error('Failed to parse DOCX file. Make sure it is a valid Word document.');
         }
+    }
+
+    /**
+     * Throw if the file is an OLE compound file: 'encrypted' when it holds an
+     * EncryptionInfo stream (a password-protected .docx), 'legacyDoc' otherwise
+     * @param {Blob|ArrayBuffer|Uint8Array} file - The input given to parse()
+     */
+    async rejectCompoundFile(file) {
+        const header = await readBytes(file, COMPOUND_FILE_SIGNATURE.length);
+        if (!header || header.length < COMPOUND_FILE_SIGNATURE.length ||
+            !COMPOUND_FILE_SIGNATURE.every((byte, i) => header[i] === byte)) {
+            return;
+        }
+        throw parseFailure(hasCompoundStream(await readBytes(file), ENCRYPTION_INFO_STREAM) ? 'encrypted' : 'legacyDoc');
     }
 
     /**
