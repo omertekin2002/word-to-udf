@@ -7,7 +7,8 @@
 const PARSE_FAILURE_KEYS = {
     corrupt: 'error.corrupt',
     encrypted: 'error.encrypted',
-    legacyDoc: 'error.legacyDoc'
+    legacyDoc: 'error.legacyDoc',
+    strict: 'error.strict'
 };
 
 class WordToUdfApp {
@@ -167,7 +168,7 @@ class WordToUdfApp {
 
         } catch (error) {
             console.error('Conversion error:', error);
-            // Damaged, password-protected and .doc files get a message saying what to do
+            // Damaged, password-protected, .doc and Strict Open XML files get a message saying what to do
             if (failureKey === 'error.parse' && error &&
                 Object.prototype.hasOwnProperty.call(PARSE_FAILURE_KEYS, error.code)) {
                 failureKey = PARSE_FAILURE_KEYS[error.code];
