@@ -20,6 +20,8 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 3. Click "UDF’YE DÖNÜŞTÜR" ("Convert to UDF" in English)
 4. Download the converted `.udf` file
 
+Password-protected `.docx` files and Word 97–2003 `.doc` files (even renamed to `.docx`) are refused with a message saying how to fix them, and so is a `.docx` whose main document part is damaged: none of them is turned into an empty `.udf`.
+
 ## Local Development
 
 To run locally, start a simple HTTP server:
@@ -89,6 +91,7 @@ Paragraph spacing (`w:spacing`) is read from the document defaults, the paragrap
 
 - Nested tables are flattened: their text goes into the containing cell, in reading order
 - Embedded OLE objects are not supported
+- Password-protected documents and `.doc` files are not converted: remove the password, or save the file as `.docx`, in Word first
 - Track changes / comments are not preserved (inserted text is kept, deleted text is dropped)
 - Headers/footers not yet implemented
 - Exact and at-least line heights, automatic paragraph spacing and contextual spacing are not converted (see Paragraph spacing)

@@ -229,6 +229,48 @@ test('a corrupt .docx gets a translated error and the raw error still goes to th
     assert.equal(document.getElementById('errorText').textContent, strings.tr['error.parse']);
 });
 
+// A .docx whose word/document.xml stops mid-paragraph
+async function truncatedDocx() {
+    const zip = await JSZip.loadAsync(await buildDocx('<w:p><w:r><w:t>Dilekçe metni</w:t></w:r></w:p>'));
+    const documentXml = await zip.file('word/document.xml').async('string');
+    zip.file('word/document.xml', documentXml.slice(0, documentXml.indexOf('</w:t>')));
+    return zip.generateAsync({ type: 'nodebuffer' });
+}
+
+// The 8-byte signature and a directory entry naming the EncryptionInfo stream, at offset 512
+function compoundFile({ encrypted }) {
+    const bytes = Buffer.alloc(1024);
+    Buffer.from([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]).copy(bytes);
+    const name = encrypted ? 'EncryptionInfo' : 'WordDocument';
+    bytes.write(name, 512, 'utf16le');
+    bytes.writeUInt16LE((name.length + 1) * 2, 512 + 64);
+    bytes[512 + 66] = 2;
+    return bytes;
+}
+
+const NAMED_FAILURES = [
+    ['a damaged .docx', 'error.corrupt', truncatedDocx],
+    ['a password-protected .docx', 'error.encrypted', async () => compoundFile({ encrypted: true })],
+    ['a .doc renamed to .docx', 'error.legacyDoc', async () => compoundFile({ encrypted: false })]
+];
+
+for (const [what, key, build] of NAMED_FAILURES) {
+    test(`${what} gets ${key} in the page language and no download`, async () => {
+        const { window, document, strings } = await loadPage({ app: true });
+        window.app.processFile(fileOf('dilekce.docx', await build()));
+        await window.app.handleConvert();
+
+        const errorText = document.getElementById('errorText');
+        assert.ok(visible(document.getElementById('errorMessage')));
+        assert.ok(!visible(document.getElementById('downloadSection')));
+        assert.equal(window.app.convertedBlob, null);
+        assert.equal(errorText.textContent, strings.tr[key]);
+
+        document.querySelector('[data-set-lang="en"]').click();
+        assert.equal(errorText.textContent, strings.en[key]);
+    });
+}
+
 test('an upper-case .DOCX name downloads as .udf', async () => {
     const { window } = await loadPage({ app: true });
     window.app.processFile(fileOf('DILEKCE.DOCX', 'not converted here'));

@@ -3,6 +3,13 @@
  * Handles UI interactions and orchestrates the conversion process
  */
 
+// Messages for the parse failures DocxParser tells apart with error.code
+const PARSE_FAILURE_KEYS = {
+    corrupt: 'error.corrupt',
+    encrypted: 'error.encrypted',
+    legacyDoc: 'error.legacyDoc'
+};
+
 class WordToUdfApp {
     constructor() {
         // DOM Elements
@@ -123,8 +130,9 @@ class WordToUdfApp {
     async handleConvert() {
         if (!this.selectedFile) return;
 
-        // The parser reports any failure with an English message; show the translated
-        // message for the step that failed and keep the raw error for the console
+        // The parser reports any failure with an English message (and an error.code for the
+        // failures it can name); show the translated message for the step that failed and
+        // keep the raw error for the console
         let failureKey = 'error.parse';
 
         try {
@@ -159,6 +167,11 @@ class WordToUdfApp {
 
         } catch (error) {
             console.error('Conversion error:', error);
+            // Damaged, password-protected and .doc files get a message saying what to do
+            if (failureKey === 'error.parse' && error &&
+                Object.prototype.hasOwnProperty.call(PARSE_FAILURE_KEYS, error.code)) {
+                failureKey = PARSE_FAILURE_KEYS[error.code];
+            }
             this.progressContainer.classList.add('hidden');
             this.convertBtn.classList.remove('hidden');
             this.showError(failureKey);
