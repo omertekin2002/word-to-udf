@@ -5,7 +5,7 @@ const { JSDOM } = require('jsdom');
 const { convert, assertOffsetsInBounds, textOf } = require('./helpers');
 const { petitions } = require('./fixtures/petitions');
 
-const [dava, itiraz, tablo] = petitions;
+const [dava, itiraz, tablo, cevap] = petitions;
 const { DOMParser } = new JSDOM('').window;
 const TURKISH = 'ğüşıöçİĞÜŞÖÇ';
 
@@ -233,6 +233,23 @@ test('ekli tablo dilekçesi: a "%1-" list keeps the dash number style', async ()
     const { doc, content } = await converted(tablo);
     for (const item of tablo.listItems) {
         assert.equal(listParagraph(doc, content, item).getAttribute('NumberType'), 'NUMBER_TYPE_NUMBER_TRE', item.text);
+    }
+});
+
+test('cevap dilekçesi: items numbered only through their paragraph style keep list, level and number style', async () => {
+    const { doc, content } = await converted(cevap);
+    for (const item of cevap.listItems) {
+        const para = listParagraph(doc, content, item);
+        assert.equal(para.getAttribute('Numbered'), 'true', item.text);
+        assert.equal(para.getAttribute('ListId'), String(item.listId), item.text);
+        assert.equal(para.getAttribute('ListLevel'), String(item.level), item.text);
+        assert.equal(para.getAttribute('NumberType'), item.numberType, item.text);
+    }
+    for (const text of cevap.unnumbered) {
+        const para = paragraphOf(doc, content, text);
+        for (const attribute of ['Numbered', 'Bulleted', 'NumberType', 'BulletType', 'ListLevel', 'ListId']) {
+            assert.equal(para.getAttribute(attribute), null, `${text}: ${attribute}`);
+        }
     }
 });
 

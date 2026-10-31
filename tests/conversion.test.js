@@ -610,6 +610,140 @@ test('paragraph alignment and indents come from the paragraph style unless set d
     assert.deepEqual(para('Unknown style'), ['3', '0.0', '0.0', null]);
 });
 
+// Lists from paragraph styles: w:numPr in styles.xml inherits through w:basedOn,
+// and the paragraph's own w:numId and w:ilvl each override the style's
+
+const LIST_ATTRIBUTES = ['Numbered', 'Bulleted', 'NumberType', 'BulletType', 'ListLevel', 'ListId'];
+const numPr = ({ numId, ilvl } = {}) => '<w:numPr>' +
+    (ilvl === undefined ? '' : `<w:ilvl w:val="${ilvl}"/>`) +
+    (numId === undefined ? '' : `<w:numId w:val="${numId}"/>`) + '</w:numPr>';
+
+/** The list attributes of the paragraph holding this text */
+function listAttrs(doc, content, text) {
+    const el = contentWithText(doc, content, text).closest('paragraph');
+    return Object.fromEntries(LIST_ATTRIBUTES.map(name => [name, el.getAttribute(name)])
+        .filter(([, value]) => value !== null));
+}
+
+const STYLE_LISTS = abstractNum(0, lvl(0, 'decimal', '%1.') + lvl(1, 'lowerLetter', '%2)')) +
+    abstractNum(1, lvl(0, 'bullet', '')) + num(5, 0) + num(6, 1);
+
+test('a paragraph style\'s w:numPr numbers the paragraph, directly or through w:basedOn', async () => {
+    const { doc, content, parsed } = await convertBody(
+        styled('Argument', run('Direct style')) + styled('SubArgument', run('Inherited')) +
+        styled('Point', run('Bullet style')), {
+            styles: paragraphStyle('Argument', { pPr: numPr({ numId: 5, ilvl: 0 }) }) +
+                paragraphStyle('SubArgument', { basedOn: 'Argument', pPr: numPr({ ilvl: 1 }) }) +
+                paragraphStyle('Point', { pPr: numPr({ numId: 6, ilvl: 0 }) }),
+            numbering: STYLE_LISTS
+        });
+
+    assert.deepEqual(listAttrs(doc, content, 'Direct style'),
+        { Numbered: 'true', NumberType: 'NUMBER_TYPE_NUMBER_DOT', ListLevel: '0', ListId: '5' });
+    assert.deepEqual(listAttrs(doc, content, 'Inherited'),
+        { Numbered: 'true', NumberType: 'NUMBER_TYPE_CHAR_SMALL_PARENTHESIS', ListLevel: '1', ListId: '5' });
+    assert.deepEqual(listAttrs(doc, content, 'Bullet style'),
+        { Bulleted: 'true', BulletType: 'BULLET_TYPE_ELLIPSE', ListLevel: '0', ListId: '6' });
+
+    // Only the numbering object carries the list; no style-only keys leak into the paragraph
+    const first = parsed.elements[0];
+    // Copied into this realm: the parser's objects come from the vm context
+    assert.deepEqual({ ...first.numbering }, { level: 0, numId: '5', format: 'decimal', lvlText: '%1.' });
+    for (const key of ['numId', 'level', 'ilvl', 'numPr']) assert.equal(first[key], undefined, key);
+});
+
+test('the paragraph\'s own w:ilvl and w:numId override the style\'s, each on its own', async () => {
+    const { doc, content } = await convertBody(
+        styled('Argument', run('Own level'), numPr({ ilvl: 1 })) +
+        styled('Argument', run('Own list'), numPr({ numId: 6 })) +
+        styled('Argument', run('Own both'), numPr({ numId: 6, ilvl: 0 })), {
+            styles: paragraphStyle('Argument', { pPr: numPr({ numId: 5, ilvl: 0 }) }),
+            numbering: STYLE_LISTS
+        });
+
+    assert.deepEqual(listAttrs(doc, content, 'Own level'),
+        { Numbered: 'true', NumberType: 'NUMBER_TYPE_CHAR_SMALL_PARENTHESIS', ListLevel: '1', ListId: '5' });
+    assert.deepEqual(listAttrs(doc, content, 'Own list'),
+        { Bulleted: 'true', BulletType: 'BULLET_TYPE_ELLIPSE', ListLevel: '0', ListId: '6' });
+    assert.deepEqual(listAttrs(doc, content, 'Own both'),
+        { Bulleted: 'true', BulletType: 'BULLET_TYPE_ELLIPSE', ListLevel: '0', ListId: '6' });
+});
+
+test('w:numId 0 on the paragraph or a nearer style switches style numbering off', async () => {
+    const { doc, content } = await convertBody(
+        styled('Argument', run('Off on paragraph'), numPr({ numId: 0 })) +
+        styled('Unnumbered', run('Off in style')) +
+        styled('Unnumbered', run('Back on'), numPr({ numId: 5 })), {
+            styles: paragraphStyle('Argument', { pPr: numPr({ numId: 5, ilvl: 1 }) }) +
+                paragraphStyle('Unnumbered', { basedOn: 'Argument', pPr: numPr({ numId: 0 }) }),
+            numbering: STYLE_LISTS
+        });
+
+    assert.deepEqual(listAttrs(doc, content, 'Off on paragraph'), {});
+    assert.deepEqual(listAttrs(doc, content, 'Off in style'), {});
+    // The level still inherits from Argument underneath the switched-off style
+    assert.deepEqual(listAttrs(doc, content, 'Back on'),
+        { Numbered: 'true', NumberType: 'NUMBER_TYPE_CHAR_SMALL_PARENTHESIS', ListLevel: '1', ListId: '5' });
+});
+
+test('a w:numPr with w:numId but no w:ilvl, on the paragraph or a style, is level 0', async () => {
+    const { doc, content } = await convertBody(
+        p(run('Paragraph without ilvl'), `<w:pPr>${numPr({ numId: 5 })}</w:pPr>`) +
+        styled('NoLevel', run('Style without ilvl')), {
+            styles: paragraphStyle('NoLevel', { pPr: numPr({ numId: 5 }) }),
+            numbering: STYLE_LISTS
+        });
+
+    for (const text of ['Paragraph without ilvl', 'Style without ilvl']) {
+        assert.deepEqual(listAttrs(doc, content, text),
+            { Numbered: 'true', NumberType: 'NUMBER_TYPE_NUMBER_DOT', ListLevel: '0', ListId: '5' }, text);
+    }
+});
+
+test('a w:ilvl without any w:numId is not a list item', async () => {
+    const { doc, content } = await convertBody(
+        p(run('Level only'), `<w:pPr>${numPr({ ilvl: 1 })}</w:pPr>`) + styled('LevelOnly', run('Style level only')), {
+            styles: paragraphStyle('LevelOnly', { pPr: numPr({ ilvl: 1 }) }),
+            numbering: STYLE_LISTS
+        });
+
+    assert.deepEqual(listAttrs(doc, content, 'Level only'), {});
+    assert.deepEqual(listAttrs(doc, content, 'Style level only'), {});
+});
+
+test('style numbering survives a looping or dangling w:basedOn and a numId missing from numbering.xml', async () => {
+    const { doc, content } = await convertBody(
+        styled('A', run('Cycle')) + styled('Dangling', run('Dangling')) +
+        styled('Unknown', run('Odd unknown')) + styled('UnknownEven', run('Even unknown')), {
+            styles: paragraphStyle('A', { basedOn: 'B', pPr: numPr({ ilvl: 1 }) }) +
+                paragraphStyle('B', { basedOn: 'A', pPr: numPr({ numId: 5, ilvl: 0 }) }) +
+                paragraphStyle('Dangling', { basedOn: 'Missing', pPr: numPr({ numId: 6 }) }) +
+                paragraphStyle('Unknown', { pPr: numPr({ numId: 7, ilvl: 0 }) }) +
+                paragraphStyle('UnknownEven', { pPr: numPr({ numId: 8, ilvl: 0 }) }),
+            numbering: STYLE_LISTS
+        });
+
+    assert.deepEqual(listAttrs(doc, content, 'Cycle'),
+        { Numbered: 'true', NumberType: 'NUMBER_TYPE_CHAR_SMALL_PARENTHESIS', ListLevel: '1', ListId: '5' });
+    assert.deepEqual(listAttrs(doc, content, 'Dangling'),
+        { Bulleted: 'true', BulletType: 'BULLET_TYPE_ELLIPSE', ListLevel: '0', ListId: '6' });
+    // The same numId guess a paragraph w:numPr without a list definition gets
+    assert.deepEqual(listAttrs(doc, content, 'Odd unknown'),
+        { Numbered: 'true', NumberType: 'NUMBER_TYPE_NUMBER_TRE', ListLevel: '0', ListId: '7' });
+    assert.deepEqual(listAttrs(doc, content, 'Even unknown'),
+        { Bulleted: 'true', BulletType: 'BULLET_TYPE_ELLIPSE', ListLevel: '0', ListId: '8' });
+});
+
+test('the default paragraph style\'s w:numPr numbers paragraphs without a w:pStyle', async () => {
+    const { doc, content } = await convertBody(p(run('Unstyled')), {
+        styles: paragraphStyle('Normal', { isDefault: true, pPr: numPr({ numId: 5, ilvl: 0 }) }),
+        numbering: STYLE_LISTS
+    });
+
+    assert.deepEqual(listAttrs(doc, content, 'Unstyled'),
+        { Numbered: 'true', NumberType: 'NUMBER_TYPE_NUMBER_DOT', ListLevel: '0', ListId: '5' });
+});
+
 // Paragraph spacing: w:spacing -> SpaceAbove, SpaceBelow and LineSpacing
 
 const SPACING_ATTRIBUTES = ['SpaceAbove', 'SpaceBelow', 'LineSpacing'];

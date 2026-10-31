@@ -350,7 +350,90 @@ function tabloDilekcesi() {
     };
 }
 
-const petitions = [davaDilekcesi(), itirazDilekcesi(), tabloDilekcesi()];
+/**
+ * 4. Cevap dilekçesi: the arguments and the "Sonuç ve istem" items are numbered
+ * only through their paragraph styles, the way Word's numbered heading and list
+ * styles work: the paragraphs name a style whose w:numPr sets the list, with no
+ * w:numPr of their own. One item moves itself a level down with its own w:ilvl,
+ * and a note in a numbered style switches numbering off with w:numId 0.
+ */
+function cevapDilekcesi() {
+    const rec = recorder();
+    const margins = { top: 1418, right: 1134, bottom: 1418, left: 1701 };
+    const ARGUMENTS = 2;
+    const REQUESTS = 3;
+    const styled = (styleId, pPr = '') => `<w:pStyle w:val="${styleId}"/>${pPr}`;
+    const numPr = (numId, ilvl) =>
+        `<w:numPr>${ilvl === undefined ? '' : `<w:ilvl w:val="${ilvl}"/>`}<w:numId w:val="${numId}"/></w:numPr>`;
+
+    // Argument headings carry the list; sub-arguments take it from Gerekce through w:basedOn
+    // and set only their level. The request items' style gives a numId without a w:ilvl.
+    const styles = BASE_STYLES +
+        '<w:style w:type="paragraph" w:styleId="Gerekce"><w:name w:val="Gerekce"/><w:basedOn w:val="Normal"/>' +
+        `<w:pPr>${numPr(ARGUMENTS, 0)}<w:ind w:left="567" w:hanging="567"/></w:pPr><w:rPr><w:b/></w:rPr></w:style>` +
+        '<w:style w:type="paragraph" w:styleId="AltGerekce"><w:name w:val="Alt Gerekce"/><w:basedOn w:val="Gerekce"/>' +
+        '<w:pPr><w:numPr><w:ilvl w:val="1"/></w:numPr><w:ind w:left="1134" w:hanging="567"/><w:jc w:val="both"/></w:pPr>' +
+        '<w:rPr><w:b w:val="0"/></w:rPr></w:style>' +
+        '<w:style w:type="paragraph" w:styleId="IstemMaddesi"><w:name w:val="Istem Maddesi"/><w:basedOn w:val="ListeParagraf"/>' +
+        `<w:pPr><w:numPr><w:numId w:val="${REQUESTS}"/></w:numPr></w:pPr></w:style>`;
+
+    const body = [
+        p(rec.run(BOLD, "ÖRNEK ASLİYE HUKUK MAHKEMESİ'NE"), jc('center')),
+        p(rec.run('Esas No: 2026/0000'), jc('right')),
+        empty(),
+        party(rec, 'DAVALI', 'Ad Soyad (T.C. Kimlik No: 00000000000)'),
+        party(rec, 'DAVACI', 'Örnek Yapı A.Ş.'),
+        party(rec, 'KONU', 'Dava dilekçesine karşı cevaplarımızın sunulmasıdır.'),
+        empty(),
+        p(rec.run(BOLD, 'CEVAPLARIMIZ'), ''),
+        p(rec.run('Usule ilişkin itirazlarımız'), styled('Gerekce')),
+        p(rec.run('Dava, zamanaşımı süresi geçtikten sonra açılmıştır.'), styled('AltGerekce')),
+        p(rec.run('Görevli mahkeme Örnek Ticaret Mahkemesidir.'), styled('AltGerekce')),
+        p(rec.run('Esasa ilişkin itirazlarımız'), styled('Gerekce')),
+        p(rec.run('Sözleşmedeki edimler eksiksiz ifa edilmiştir.'), styled('AltGerekce')),
+        // A style-numbered paragraph that switches its numbering off
+        p(rec.run('Ödeme belgeleri dilekçemiz ekindedir; ayrıca sayılmamıştır.'), styled('AltGerekce', numPr(0))),
+        p(rec.run(BOLD, 'SONUÇ VE İSTEM'), jc('center')),
+        p(rec.run('Davanın usulden reddine,'), styled('IstemMaddesi')),
+        p(rec.run('Aksi kanaatte olunursa esastan reddine,'), styled('IstemMaddesi')),
+        // Its own w:ilvl, over the style's list
+        p(rec.run('Bu talep bir alt maddedir.'), styled('IstemMaddesi', '<w:numPr><w:ilvl w:val="1"/></w:numPr>')),
+        p(rec.run('Yargılama giderlerinin davacıya yükletilmesine karar verilmesini saygıyla arz ederim. ' +
+            'ĞÜŞÖÇİ ğüşöçı'), styled('IstemMaddesi')),
+        empty(),
+        p(rec.run('Davalı'), jc('right')),
+        p(rec.run('Ad Soyad'), jc('right'))
+    ].join('');
+
+    const numbering =
+        abstractNum(0, level(0, 'upperRoman', '%1.', 567) + level(1, 'decimal', '%2-', 1134)) +
+        abstractNum(1, level(0, 'decimal', '%1)', 720) + level(1, 'lowerLetter', '%2)', 1080)) +
+        num(ARGUMENTS, 0) + num(REQUESTS, 1);
+
+    return {
+        name: 'cevap dilekçesi',
+        options: { styles, numbering, sectPr: a4(margins) },
+        body,
+        ...recorded(rec),
+        margins,
+        listItems: [
+            { text: 'Usule ilişkin itirazlarımız', kind: 'number', level: 0, listId: ARGUMENTS, numberType: 'NUMBER_TYPE_ROMAN_BIG_DOT' },
+            { text: 'Dava, zamanaşımı süresi geçtikten sonra açılmıştır.', kind: 'number', level: 1, listId: ARGUMENTS, numberType: 'NUMBER_TYPE_NUMBER_TRE' },
+            { text: 'Görevli mahkeme Örnek Ticaret Mahkemesidir.', kind: 'number', level: 1, listId: ARGUMENTS, numberType: 'NUMBER_TYPE_NUMBER_TRE' },
+            { text: 'Esasa ilişkin itirazlarımız', kind: 'number', level: 0, listId: ARGUMENTS, numberType: 'NUMBER_TYPE_ROMAN_BIG_DOT' },
+            { text: 'Sözleşmedeki edimler eksiksiz ifa edilmiştir.', kind: 'number', level: 1, listId: ARGUMENTS, numberType: 'NUMBER_TYPE_NUMBER_TRE' },
+            { text: 'Davanın usulden reddine,', kind: 'number', level: 0, listId: REQUESTS, numberType: 'NUMBER_TYPE_NUMBER_PARENTHESIS' },
+            { text: 'Aksi kanaatte olunursa esastan reddine,', kind: 'number', level: 0, listId: REQUESTS, numberType: 'NUMBER_TYPE_NUMBER_PARENTHESIS' },
+            { text: 'Bu talep bir alt maddedir.', kind: 'number', level: 1, listId: REQUESTS, numberType: 'NUMBER_TYPE_CHAR_SMALL_PARENTHESIS' },
+            { text: 'Yargılama giderlerinin davacıya yükletilmesine karar verilmesini saygıyla arz ederim. ' +
+                'ĞÜŞÖÇİ ğüşöçı', kind: 'number', level: 0, listId: REQUESTS, numberType: 'NUMBER_TYPE_NUMBER_PARENTHESIS' }
+        ],
+        // In a numbered style, but switched off with w:numId 0
+        unnumbered: ['Ödeme belgeleri dilekçemiz ekindedir; ayrıca sayılmamıştır.']
+    };
+}
+
+const petitions = [davaDilekcesi(), itirazDilekcesi(), tabloDilekcesi(), cevapDilekcesi()];
 for (const petition of petitions) {
     petition.build = () => buildDocx(petition.body, petition.options);
 }
