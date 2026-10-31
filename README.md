@@ -11,6 +11,7 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 - 🖼️ **Images**: Embeds images as base64
 - 📐 **Page Setup**: Keeps the page margins, orientation and header/footer offsets
 - ↕️ **Spacing**: Keeps the space before and after paragraphs and their line spacing
+- 🔢 **Lists**: Keeps numbered and bulleted lists, including lists that come from a paragraph style (such as numbered headings)
 - 🇹🇷 **Turkish UI**: The page is in Turkish by default, with a TR | EN toggle for English (or open it with `?lang=en`)
 
 ## Usage
@@ -52,6 +53,12 @@ The site itself still has no build step; `package.json` exists only for the test
 
 `tests/petitions.test.js` converts whole synthetic petitions built in `tests/fixtures/petitions.js`. Known conversion gaps show up as `todo` tests: they are listed in the output but don't fail the run. The fixtures use invented placeholder content only (`Ad Soyad`, `00000000000`, `2026/0000`); never add real names, ID numbers, case numbers or addresses to them.
 
+## Privacy and dependencies
+
+The page loads nothing from another site. [JSZip](https://stuk.github.io/jszip/) is vendored as `js/vendor/jszip.min.js`, a copy of `dist/jszip.min.js` from the `jszip` devDependency, which is pinned to an exact version. To update it, change that version, run `bun install`, and copy `node_modules/jszip/dist/jszip.min.js` over the vendored file; `tests/security.test.js` fails if the two differ.
+
+A Content-Security-Policy `<meta>` tag in `index.html` lets the page load scripts, styles and images only from its own site, and blocks every request a script could make (`connect-src 'none'`) and every form submission, so a document can't be sent anywhere. Inline scripts, inline `style` attributes and `on*=` handlers would be blocked by it; the same test file checks that the page has none.
+
 ## Technical Details
 
 ### UDF Format
@@ -75,6 +82,13 @@ Paragraph spacing (`w:spacing`) is read from the document defaults, the paragrap
 - Attributes that would be zero, or single (or tighter) line spacing, are left out.
 - Exact and at-least line heights (`w:lineRule="exact"` / `"atLeast"`) have no UDF equivalent, so those paragraphs get single spacing.
 - Automatic spacing (`w:beforeAutospacing`, `w:afterAutospacing`), `w:contextualSpacing` and spacing in lines (`w:beforeLines`, `w:afterLines`) are ignored.
+
+### Lists
+A paragraph's list comes from `w:numPr`, read from the paragraph style and its `w:basedOn` chain and from the paragraph itself, each attribute on its own: a numbered paragraph style gives the list (`w:numId`) and level (`w:ilvl`), and the paragraph can set just its own `w:ilvl` to move to another level of that list, or just its own `w:numId`.
+- `w:numId w:val="0"`, on the paragraph or on a style nearer in the chain, switches numbering off, including numbering a style would give.
+- A missing `w:ilvl` means level 0.
+- Bullet or number, and the number style, come from that list level in `word/numbering.xml`. A list missing from `numbering.xml` is still written as a list.
+- Numbering in `w:docDefaults` and table styles, restarts (`w:startOverride`) and the level a `w:lvl/w:pStyle` names are not read.
 
 ### Tables
 - Cell shading (`w:shd`) is written as `fillColor`, and vertical alignment (`w:vAlign`) as `align="vcenter"` or `align="bottom"`; top, the default, is left out.
