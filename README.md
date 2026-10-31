@@ -52,6 +52,12 @@ The site itself still has no build step; `package.json` exists only for the test
 
 `tests/petitions.test.js` converts whole synthetic petitions built in `tests/fixtures/petitions.js`. Known conversion gaps show up as `todo` tests: they are listed in the output but don't fail the run. The fixtures use invented placeholder content only (`Ad Soyad`, `00000000000`, `2026/0000`); never add real names, ID numbers, case numbers or addresses to them.
 
+## Privacy and dependencies
+
+The page loads nothing from another site. [JSZip](https://stuk.github.io/jszip/) is vendored as `js/vendor/jszip.min.js`, a copy of `dist/jszip.min.js` from the `jszip` devDependency, which is pinned to an exact version. To update it, change that version, run `bun install`, and copy `node_modules/jszip/dist/jszip.min.js` over the vendored file; `tests/security.test.js` fails if the two differ.
+
+A Content-Security-Policy `<meta>` tag in `index.html` lets the page load scripts, styles and images only from its own site, and blocks every request a script could make (`connect-src 'none'`) and every form submission, so a document can't be sent anywhere. Inline scripts, inline `style` attributes and `on*=` handlers would be blocked by it; the same test file checks that the page has none.
+
 ## Technical Details
 
 ### UDF Format
