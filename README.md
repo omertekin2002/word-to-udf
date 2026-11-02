@@ -57,7 +57,7 @@ The site itself still has no build step; `package.json` exists only for the test
 
 The page loads nothing from another site. [JSZip](https://stuk.github.io/jszip/) is vendored as `js/vendor/jszip.min.js`, a copy of `dist/jszip.min.js` from the `jszip` devDependency, which is pinned to an exact version. To update it, change that version, run `bun install`, and copy `node_modules/jszip/dist/jszip.min.js` over the vendored file; `tests/security.test.js` fails if the two differ.
 
-A Content-Security-Policy `<meta>` tag in `index.html` lets the page load scripts, styles and images only from its own site, and blocks every request a script could make (`connect-src 'none'`) and every form submission, so a document can't be sent anywhere. Inline scripts, inline `style` attributes and `on*=` handlers would be blocked by it; the same test file checks that the page has none.
+A Content-Security-Policy `<meta>` tag in `index.html` restricts scripts, styles and images to the same origin, blocking cross-origin resource loads, script connection APIs such as `fetch`, XMLHttpRequest and WebSocket (`connect-src 'none'`), and form submissions. Same-origin image requests remain permitted, so the policy alone does not guarantee that document contents stay local; the converter's client-side code processes documents without uploading them. Inline scripts, inline `style` attributes and `on*=` handlers would be blocked by it; the same test file checks that the page has none.
 
 ## Technical Details
 
