@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Vendored files must stay byte-identical to their npm package (tests/security.test.js)
+js/vendor/** -text

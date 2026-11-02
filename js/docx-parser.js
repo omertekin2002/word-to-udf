@@ -579,7 +579,8 @@ class DocxParser {
                 definitions.set(id, {
                     basedOn: basedOn ? basedOn.getAttribute('w:val') : null,
                     run: this.readRunProperties(childElement(style, 'rPr')),
-                    paragraph: type === 'paragraph' ? this.readParagraphProperties(childElement(style, 'pPr')) : {}
+                    paragraph: type === 'paragraph' ? this.readParagraphProperties(childElement(style, 'pPr')) : {},
+                    numPr: type === 'paragraph' ? this.readNumberingProperties(childElement(style, 'pPr')) : {}
                 });
 
                 if (type === 'paragraph' && this.styles.defaultParagraph === null && this.isOn(style, 'w:default', false)) {
@@ -598,7 +599,7 @@ class DocxParser {
      * chain that loops or names a missing style, stops the chain there.
      * @param {string} type - 'paragraph' or 'character'
      * @param {string|null} styleId - The style id (null: no style)
-     * @returns {{run: Object, paragraph: Object}} Only the properties set somewhere
+     * @returns {{run: Object, paragraph: Object, numPr: Object}} Only the properties set somewhere
      */
     resolveStyle(type, styleId) {
         const resolved = this.styles.resolved[type];
@@ -611,7 +612,8 @@ class DocxParser {
 
             resolved.set(styleId, {
                 run: Object.assign({}, ...chain.map(style => style.run)),
-                paragraph: Object.assign({}, ...chain.map(style => style.paragraph))
+                paragraph: Object.assign({}, ...chain.map(style => style.paragraph)),
+                numPr: Object.assign({}, ...chain.map(style => style.numPr))
             });
         }
         return resolved.get(styleId);
@@ -702,6 +704,30 @@ class DocxParser {
             const line = Number(spacing.getAttribute('w:line'));
             if (spacing.hasAttribute('w:line') && Number.isFinite(line) && line > 0) props.line = line;
             if (spacing.getAttribute('w:lineRule')) props.lineRule = spacing.getAttribute('w:lineRule');
+        }
+
+        return props;
+    }
+
+    /**
+     * Read the list a w:pPr puts its paragraph in, from a paragraph or a paragraph style.
+     * w:numId and w:ilvl inherit separately, so each is kept only if set.
+     * @param {Element|null} pPr - The w:pPr element
+     * @returns {{numId?: string, level?: number}} Only the values it sets
+     */
+    readNumberingProperties(pPr) {
+        const props = {};
+        const numPr = pPr && childElement(pPr, 'numPr');
+        if (!numPr) return props;
+
+        const numId = childElement(numPr, 'numId');
+        if (numId && numId.hasAttribute('w:val')) props.numId = numId.getAttribute('w:val');
+
+        // A w:ilvl without a readable level is level 0, as before
+        const ilvl = childElement(numPr, 'ilvl');
+        if (ilvl) {
+            const level = parseInt(ilvl.getAttribute('w:val'), 10);
+            props.level = level >= 0 ? level : 0;
         }
 
         return props;
@@ -887,26 +913,17 @@ class DocxParser {
         Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, this.readParagraphProperties(pPr));
         paragraph.lineSpacing = this.lineSpacing(paragraph);
 
-        if (pPr) {
-            // Numbering
-            const numPr = childElement(pPr, 'numPr');
-            if (numPr) {
-                const ilvl = childElement(numPr, 'ilvl');
-                const numId = childElement(numPr, 'numId');
-                // numId 0 switches numbering off for the paragraph
-                if (ilvl && numId && numId.getAttribute('w:val') !== '0') {
-                    paragraph.numbering = {
-                        level: parseInt(ilvl.getAttribute('w:val') || '0'),
-                        numId: numId.getAttribute('w:val')
-                    };
-                    // The list definition, if numbering.xml has one for this level
-                    const definition = (this.numbering[paragraph.numbering.numId] || {})[paragraph.numbering.level];
-                    if (definition) {
-                        // A level without w:numFmt is decimal
-                        paragraph.numbering.format = definition.format || 'decimal';
-                        paragraph.numbering.lvlText = definition.lvlText || '';
-                    }
-                }
+        // Numbering: the paragraph style chain, then the paragraph's own w:numPr, each value
+        // on its own. numId 0 switches numbering off, and a missing w:ilvl means level 0.
+        const { numId, level = 0 } = { ...style.numPr, ...this.readNumberingProperties(pPr) };
+        if (numId !== undefined && numId !== '0') {
+            paragraph.numbering = { level, numId };
+            // The list definition, if numbering.xml has one for this level
+            const definition = (this.numbering[numId] || {})[level];
+            if (definition) {
+                // A level without w:numFmt is decimal
+                paragraph.numbering.format = definition.format || 'decimal';
+                paragraph.numbering.lvlText = definition.lvlText || '';
             }
         }
 
