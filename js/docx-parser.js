@@ -33,6 +33,14 @@ const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike'];
 // Points per unit of an OOXML universal measure (ST_UniversalMeasure, e.g. "2.5cm")
 const POINTS_PER_UNIT = { mm: 72 / 25.4, cm: 72 / 2.54, in: 72, pt: 1, pc: 12, pi: 12 };
 
+// Note types (w:type) of a footnote or endnote that are Word's separator lines, not note text
+const SEPARATOR_NOTE_TYPES = ['separator', 'continuationSeparator', 'continuationNotice'];
+
+// Endnote number formats (w:endnotePr/w:numFmt) the generator can write. Word numbers
+// endnotes in lower-case Roman numerals unless the document says otherwise.
+const ENDNOTE_FORMATS = ['decimal', 'lowerRoman', 'upperRoman', 'lowerLetter', 'upperLetter'];
+const DEFAULT_ENDNOTE_FORMAT = 'lowerRoman';
+
 // Signature of an OLE compound file: a Word 97-2003 .doc, or a password-protected .docx
 const COMPOUND_FILE_SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
@@ -201,6 +209,7 @@ class DocxParser {
         this.relationships = {};
         this.images = {};
         this.footnotes = {};
+        this.endnotes = {};
         this.numbering = {};
         this.styles = this.emptyStyles();
     }
@@ -216,6 +225,7 @@ class DocxParser {
             this.relationships = {};
             this.images = {};
             this.footnotes = {};
+            this.endnotes = {};
             this.numbering = {};
             this.styles = this.emptyStyles();
 
@@ -232,8 +242,9 @@ class DocxParser {
             // Extract images
             await this.extractImages();
 
-            // Parse footnotes
-            await this.parseFootnotes();
+            // Parse footnotes and endnotes
+            this.footnotes = await this.parseNotes('footnote');
+            this.endnotes = await this.parseNotes('endnote');
 
             // Parse list definitions
             await this.parseNumbering();
@@ -266,6 +277,8 @@ class DocxParser {
                 elements: elements,
                 images: this.images,
                 footnotes: this.footnotes,
+                endnotes: this.endnotes,
+                endnoteFormat: await this.parseEndnoteFormat(),
                 pageSetup: await this.parsePageSetup()
             };
         } catch (error) {
@@ -360,42 +373,68 @@ class DocxParser {
     }
 
     /**
-     * Parse footnotes from the footnotes part (word/footnotes.xml)
+     * Parse the notes of the footnotes part (word/footnotes.xml) or the endnotes part
+     * (word/endnotes.xml) into plain text keyed by w:id. Word's separator notes are left out.
+     * @param {'footnote'|'endnote'} type - The note element's local name
+     * @returns {Promise<Object<string, string>>}
      */
-    async parseFootnotes() {
-        const footnotesFile = this.zip.file(this.relatedPart('footnotes', 'word/footnotes.xml'));
-        if (!footnotesFile) return;
+    async parseNotes(type) {
+        const notes = {};
+        const notesFile = this.zip.file(this.relatedPart(`${type}s`, `word/${type}s.xml`));
+        if (!notesFile) return notes;
 
         try {
-            const footnotesXml = await readXmlPart(footnotesFile);
-            const footnotesDoc = parseXml(footnotesXml);
-            const footnotes = footnotesDoc.getElementsByTagNameNS(WORD_NS, 'footnote');
+            const notesDoc = parseXml(await readXmlPart(notesFile));
 
-            for (const footnote of footnotes) {
-                const id = footnote.getAttribute('w:id');
-                // Skip separator and continuationSeparator footnotes (id 0 and -1)
-                if (id === '0' || id === '-1') continue;
+            for (const note of notesDoc.getElementsByTagNameNS(WORD_NS, type)) {
+                const id = note.getAttribute('w:id');
+                // Separator and continuation separator notes are lines, not text. Word
+                // gives them ids -1 and 0, and marks them with w:type.
+                if (id === '0' || id === '-1' || SEPARATOR_NOTE_TYPES.includes(note.getAttribute('w:type'))) continue;
 
-                // Extract text content from the footnote
-                const paragraphs = footnote.getElementsByTagNameNS(WORD_NS, 'p');
-                let footnoteText = '';
-
-                for (const para of paragraphs) {
-                    const runs = para.getElementsByTagNameNS(WORD_NS, 'r');
-                    for (const run of runs) {
-                        const textElements = run.getElementsByTagNameNS(WORD_NS, 't');
-                        for (const t of textElements) {
-                            footnoteText += t.textContent || '';
-                        }
-                    }
-                    footnoteText += ' ';
-                }
-
-                this.footnotes[id] = footnoteText.trim();
+                notes[id] = this.noteText(note);
             }
         } catch (error) {
-            console.warn('Could not parse footnotes:', error);
+            console.warn(`Could not parse ${type}s:`, error);
         }
+        return notes;
+    }
+
+    /**
+     * Plain text of a footnote or endnote: the text of its runs, one space between paragraphs
+     * @param {Element} note - The w:footnote or w:endnote element
+     * @returns {string}
+     */
+    noteText(note) {
+        let text = '';
+        for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
+            for (const run of para.getElementsByTagNameNS(WORD_NS, 'r')) {
+                for (const t of run.getElementsByTagNameNS(WORD_NS, 't')) {
+                    text += t.textContent || '';
+                }
+            }
+            text += ' ';
+        }
+        return text.trim();
+    }
+
+    /**
+     * Number format of the endnote reference marks: w:endnotePr/w:numFmt in the body's
+     * final w:sectPr, then in the settings part. Word's default is lower-case Roman
+     * numerals; a format the generator can't write falls back to decimal.
+     * @returns {Promise<string>} An ENDNOTE_FORMATS value
+     */
+    async parseEndnoteFormat() {
+        const numFmt = parent => {
+            const endnotePr = parent && childElement(parent, 'endnotePr');
+            const format = endnotePr && childElement(endnotePr, 'numFmt');
+            return format && format.hasAttribute('w:val') ? format.getAttribute('w:val') : null;
+        };
+
+        const body = this.document.getElementsByTagNameNS(WORD_NS, 'body')[0];
+        const format = numFmt(body && childElements(body, 'sectPr').pop()) ?? numFmt(await this.settingsRoot());
+        if (format === null) return DEFAULT_ENDNOTE_FORMAT;
+        return ENDNOTE_FORMATS.includes(format) ? format : 'decimal';
     }
 
     /**
@@ -495,13 +534,21 @@ class DocxParser {
      * @returns {Promise<boolean>}
      */
     async isGutterAtTop() {
+        const settings = await this.settingsRoot();
+        const gutterAtTop = settings && childElement(settings, 'gutterAtTop');
+        return gutterAtTop ? this.isOn(gutterAtTop) : false;
+    }
+
+    /**
+     * The w:settings element of the settings part (word/settings.xml)
+     * @returns {Promise<Element|null>} null without a settings part, or for a malformed one
+     */
+    async settingsRoot() {
         const settingsFile = this.zip.file(this.relatedPart('settings', 'word/settings.xml'));
-        if (!settingsFile) return false;
+        if (!settingsFile) return null;
 
         const root = parseXml(await readXmlPart(settingsFile)).documentElement;
-        const gutterAtTop = root.namespaceURI === WORD_NS && root.localName === 'settings'
-            ? childElement(root, 'gutterAtTop') : null;
-        return gutterAtTop ? this.isOn(gutterAtTop) : false;
+        return root && root.namespaceURI === WORD_NS && root.localName === 'settings' ? root : null;
     }
 
     /**
@@ -939,7 +986,7 @@ class DocxParser {
      * Parse a run element (text with formatting)
      * @param {Element} run - The run element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
-     * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image, footnoteRef)
+     * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image, footnoteRef, endnoteRef)
      */
     parseRun(run, paragraphRun = {}) {
         const items = [];
@@ -965,14 +1012,16 @@ class DocxParser {
                 items.push({ type: breakType === 'page' ? 'pageBreak' : 'break' });
             } else if (localName === 'cr') {
                 items.push({ type: 'break' });
-            } else if (localName === 'footnoteReference') {
-                const footnoteId = child.getAttribute('w:id');
-                // Use 'in' to check key presence - empty string is still valid
-                if (footnoteId && footnoteId in this.footnotes) {
+            } else if (localName === 'footnoteReference' || localName === 'endnoteReference') {
+                const kind = localName === 'footnoteReference' ? 'footnote' : 'endnote';
+                const notes = kind === 'footnote' ? this.footnotes : this.endnotes;
+                const id = child.getAttribute('w:id');
+                // A note with no text is still a note; a reference to a missing one adds nothing
+                if (id && Object.prototype.hasOwnProperty.call(notes, id)) {
                     items.push({
-                        type: 'footnoteRef',
-                        id: footnoteId,
-                        content: this.footnotes[footnoteId] || '[Empty footnote]'
+                        type: `${kind}Ref`,
+                        id: id,
+                        content: notes[id] || `[Empty ${kind}]`
                     });
                 }
             } else if (localName !== 'rPr') {
