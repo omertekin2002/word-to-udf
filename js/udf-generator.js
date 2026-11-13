@@ -26,6 +26,15 @@ const BORDER_TOP = 1;
 const BORDER_BOTTOM = 4;
 const BORDER_ALL = 15; // top, right, bottom and left
 
+// Line that sets the footnote and endnote sections off from the text above them
+const NOTE_SEPARATOR = '────────────────────';
+
+// Roman numeral digits, largest first
+const ROMAN_NUMERALS = [
+    [1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'], [100, 'c'], [90, 'xc'],
+    [50, 'l'], [40, 'xl'], [10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i']
+];
+
 class UdfGenerator {
     constructor() {
         this.content = '';
@@ -34,6 +43,9 @@ class UdfGenerator {
         this.currentOffset = 0;
         this.collectedFootnotes = []; // Store footnotes to append at end
         this.footnoteCounter = 0; // Track display numbers for footnotes
+        this.collectedEndnotes = []; // Endnotes, appended after everything else
+        this.endnoteCounter = 0; // Endnotes are numbered on their own
+        this.endnoteFormat = 'lowerRoman';
     }
 
     /**
@@ -48,6 +60,9 @@ class UdfGenerator {
         this.currentOffset = 0;
         this.collectedFootnotes = [];
         this.footnoteCounter = 0;
+        this.collectedEndnotes = [];
+        this.endnoteCounter = 0;
+        this.endnoteFormat = document.endnoteFormat || 'lowerRoman';
         this.pageSetup = document.pageSetup || {};
 
         // Process all document elements
@@ -61,7 +76,12 @@ class UdfGenerator {
 
         // Append footnotes section at the end if there are any
         if (this.collectedFootnotes.length > 0) {
-            this.appendFootnotesSection();
+            this.appendNotesSection(this.collectedFootnotes);
+        }
+
+        // Endnotes go after everything else, where Word puts them
+        if (this.collectedEndnotes.length > 0) {
+            this.appendNotesSection(this.collectedEndnotes);
         }
 
         // Ensure we have at least one paragraph
@@ -124,7 +144,7 @@ class UdfGenerator {
 
                 // Insert footnotes for this page before the page break
                 if (this.collectedFootnotes.length > 0) {
-                    this.appendFootnotesSection();
+                    this.appendNotesSection(this.collectedFootnotes);
                     this.collectedFootnotes = []; // Clear for next page
                 }
 
@@ -139,23 +159,12 @@ class UdfGenerator {
                 if (emittedFragment) {
                     paraProps = { ...paragraph, numbering: null, firstLineIndent: 0, spaceBefore: 0 };
                 }
-            } else if (run.type === 'footnoteRef') {
-                // Handle footnote reference - insert superscript number only
-                // Use counter for display number (w:id can be non-contiguous)
-                this.footnoteCounter++;
-                const displayNum = String(this.footnoteCounter);
-                const footnoteText = run.content;
-
-                // Collect footnote for later
-                this.collectedFootnotes.push({
-                    number: displayNum,
-                    text: footnoteText
-                });
-
-                // Add the superscript footnote number in text
-                paraElements.push(`<content startOffset="${this.currentOffset}" length="${displayNum.length}" family="Times New Roman" size="10" superscript="true" />`);
-                paraContent.push(displayNum);
-                this.currentOffset += displayNum.length;
+            } else if (run.type === 'footnoteRef' || run.type === 'endnoteRef') {
+                // Only the superscript mark goes in the text; the note is appended later
+                const mark = this.collectNote(run);
+                paraElements.push(`<content startOffset="${this.currentOffset}" length="${mark.length}" family="Times New Roman" size="10" superscript="true" />`);
+                paraContent.push(mark);
+                this.currentOffset += mark.length;
             }
         }
 
@@ -172,27 +181,70 @@ class UdfGenerator {
     }
 
     /**
-     * Append footnotes section at the end of the document
+     * Number a footnote or endnote reference and keep its text for the notes section.
+     * Footnotes and endnotes are numbered separately, in reference order (w:id can be
+     * non-contiguous): footnotes 1, 2, 3, endnotes in the document's endnote format.
+     * @param {Object} run - A footnoteRef or endnoteRef item
+     * @returns {string} The reference mark
      */
-    appendFootnotesSection() {
-        // Add a separator line
-        const separator = '────────────────────';
+    collectNote(run) {
+        let mark;
+        if (run.type === 'endnoteRef') {
+            mark = this.formatNoteNumber(++this.endnoteCounter, this.endnoteFormat);
+            this.collectedEndnotes.push({ number: mark, text: run.content });
+        } else {
+            mark = String(++this.footnoteCounter);
+            this.collectedFootnotes.push({ number: mark, text: run.content });
+        }
+        return mark;
+    }
 
+    /**
+     * Write a note number in a Word number format
+     * @param {number} number - A positive integer
+     * @param {string} format - decimal, lowerRoman, upperRoman, lowerLetter or upperLetter; anything else is decimal
+     * @returns {string}
+     */
+    formatNoteNumber(number, format) {
+        if (format === 'lowerRoman' || format === 'upperRoman') {
+            let roman = '';
+            let rest = number;
+            for (const [value, digits] of ROMAN_NUMERALS) {
+                while (rest >= value) {
+                    roman += digits;
+                    rest -= value;
+                }
+            }
+            return format === 'upperRoman' ? roman.toUpperCase() : roman;
+        }
+        if (format === 'lowerLetter' || format === 'upperLetter') {
+            // Word's letters run a-z, then aa-zz, aaa-zzz: the letter repeats
+            const letter = String.fromCharCode(97 + (number - 1) % 26).repeat(Math.ceil(number / 26));
+            return format === 'upperLetter' ? letter.toUpperCase() : letter;
+        }
+        return String(number);
+    }
+
+    /**
+     * Append a notes section: an empty line, the separator line, then one "<mark>. <text>"
+     * paragraph per note
+     * @param {Array<{number: string, text: string}>} notes - Footnotes or endnotes in reference order
+     */
+    appendNotesSection(notes) {
         // Empty line before separator (element references this newline)
         this.elements.push(`<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0"><content startOffset="${this.currentOffset}" length="1" family="Times New Roman" size="12" /></paragraph>`);
         this.content += '\n';
         this.currentOffset += 1;
 
         // Separator line
-        this.elements.push(`<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0"><content startOffset="${this.currentOffset}" length="${separator.length}" family="Times New Roman" size="10" /></paragraph>`);
-        this.content += separator;
-        this.currentOffset += separator.length;
+        this.elements.push(`<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0"><content startOffset="${this.currentOffset}" length="${NOTE_SEPARATOR.length}" family="Times New Roman" size="10" /></paragraph>`);
+        this.content += NOTE_SEPARATOR;
+        this.currentOffset += NOTE_SEPARATOR.length;
 
-        // Add each footnote
-        for (const footnote of this.collectedFootnotes) {
+        for (const note of notes) {
             // Create paragraph with superscript number and regular text
-            const numPart = footnote.number + '. ';
-            const textPart = footnote.text;
+            const numPart = note.number + '. ';
+            const textPart = note.text;
 
             const paraElements = [];
 
@@ -201,7 +253,7 @@ class UdfGenerator {
             this.content += numPart;
             this.currentOffset += numPart.length;
 
-            // Footnote text
+            // Note text
             paraElements.push(`<content startOffset="${this.currentOffset}" length="${textPart.length}" family="Times New Roman" size="10" />`);
             this.content += textPart;
             this.currentOffset += textPart.length;
@@ -486,23 +538,11 @@ class UdfGenerator {
                     paraElements.push(`<image startOffset="${this.currentOffset}" length="1" imageData="${run.data}" width="${run.width}" height="${run.height}" />`);
                     this.content += '\uFFFC';
                     this.currentOffset += 1;
-                } else if (run.type === 'footnoteRef') {
-                    // Handle footnote reference in table cells
-                    // Use counter for display number (w:id can be non-contiguous)
-                    this.footnoteCounter++;
-                    const displayNum = String(this.footnoteCounter);
-                    const footnoteText = run.content;
-
-                    // Collect footnote for later
-                    this.collectedFootnotes.push({
-                        number: displayNum,
-                        text: footnoteText
-                    });
-
-                    // Add the superscript footnote number
-                    paraElements.push(`<content startOffset="${this.currentOffset}" length="${displayNum.length}" family="Times New Roman" size="10" superscript="true" />`);
-                    this.content += displayNum;
-                    this.currentOffset += displayNum.length;
+                } else if (run.type === 'footnoteRef' || run.type === 'endnoteRef') {
+                    const mark = this.collectNote(run);
+                    paraElements.push(`<content startOffset="${this.currentOffset}" length="${mark.length}" family="Times New Roman" size="10" superscript="true" />`);
+                    this.content += mark;
+                    this.currentOffset += mark.length;
                 }
             }
 

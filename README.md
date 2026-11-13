@@ -12,6 +12,7 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 - 📐 **Page Setup**: Keeps the page margins, orientation and header/footer offsets
 - ↕️ **Spacing**: Keeps the space before and after paragraphs and their line spacing
 - 🔢 **Lists**: Keeps numbered and bulleted lists, including lists that come from a paragraph style (such as numbered headings)
+- 📝 **Footnotes and endnotes**: Keeps the reference marks as superscript numbers and the note text. Footnotes are placed before the next manual page break, or at the end; endnotes are moved to the end of the document, after a separator line, numbered the way the document numbers them (`i`, `ii`, ... by default)
 - 🇹🇷 **Turkish UI**: The page is in Turkish by default, with a TR | EN toggle for English (or open it with `?lang=en`)
 
 ## Usage
@@ -108,6 +109,7 @@ A paragraph's list comes from `w:numPr`, read from the paragraph style and its `
 - Password-protected documents and `.doc` files are not converted: remove the password, or save the file as `.docx`, in Word first
 - Track changes / comments are not preserved (inserted text is kept, deleted text is dropped)
 - Headers/footers not yet implemented
+- Footnote and endnote text is converted as plain text, without its formatting. All endnotes go at the end of the document, even when Word places them at the end of each section, and they are always numbered from the start
 - Exact and at-least line heights, automatic paragraph spacing and contextual spacing are not converted (see Paragraph spacing)
 
 ## License

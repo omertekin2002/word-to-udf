@@ -49,12 +49,13 @@ const MEDIA_CONTENT_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/
  * @param {string} bodyXml - Contents of <w:body>
  * @param {Object} [options]
  * @param {Object<string,string>} [options.footnotes] - Footnote id -> inner XML (paragraphs)
+ * @param {Object<string,string>} [options.endnotes] - Endnote id -> inner XML (paragraphs)
  * @param {Object<string,Buffer>} [options.media] - File name under word/media/ -> bytes. Each gets
  *   a document relationship with id `rId_<name without extension>`, e.g. image1.png -> rId_image1
  * @param {string} [options.styles] - Contents of <w:styles> in word/styles.xml
  * @param {string} [options.numbering] - Contents of <w:numbering> in word/numbering.xml
- * @param {string} [options.sectPr] - Contents of the body's final <w:sectPr>
- * @param {string} [options.settings] - Contents of <w:settings> in word/settings.xml
+ * @param {string} [options.sectPr] - Contents of the body's final <w:sectPr>, e.g. a <w:endnotePr>
+ * @param {string} [options.settings] - Contents of <w:settings> in word/settings.xml, e.g. a <w:endnotePr>
  * @returns {Promise<Buffer>}
  */
 async function buildDocx(bodyXml, options = {}) {
@@ -77,13 +78,15 @@ async function buildDocx(bodyXml, options = {}) {
     if (options.numbering !== undefined) wordPart('numbering.xml', 'numbering', options.numbering);
     if (options.settings !== undefined) wordPart('settings.xml', 'settings', options.settings);
 
-    if (options.footnotes) {
-        const notes = Object.entries(options.footnotes)
-            .map(([id, inner]) => `<w:footnote w:id="${id}">${inner}</w:footnote>`)
+    // Notes parts start with Word's separator and continuation separator notes
+    for (const type of ['footnote', 'endnote']) {
+        if (!options[`${type}s`]) continue;
+        const notes = Object.entries(options[`${type}s`])
+            .map(([id, inner]) => `<w:${type} w:id="${id}">${inner}</w:${type}>`)
             .join('');
-        wordPart('footnotes.xml', 'footnotes',
-            '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>' +
-            '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>' +
+        wordPart(`${type}s.xml`, `${type}s`,
+            `<w:${type} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:${type}>` +
+            `<w:${type} w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:${type}>` +
             notes);
     }
 
