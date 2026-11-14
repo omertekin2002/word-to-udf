@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { convertBody, textOf, loadConverter, buildDocx } = require('./helpers');
+const JSZip = require('jszip');
+const { convert, convertBody, assertOffsetsInBounds, textOf, loadConverter, buildDocx } = require('./helpers');
 
 const p = (runs, pPr = '') => `<w:p>${pPr}${runs}</w:p>`;
 
@@ -302,6 +303,169 @@ test('"]]>" in a table cell and a footnote keeps content.xml well-formed', async
     assert.deepEqual(contentElements(doc, cell).map(el => textOf(el, content)), ['cell ]]> one']);
     assert.equal(textOf(contentElements(doc).at(-1), content), 'note ]]> text');
     assert.ok(content.endsWith('note ]]> text'));
+});
+
+// Endnotes: numbered on their own, appended after the body and any footnotes
+const SEPARATOR = '────────────────────';
+const footnoteRef = id => `<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="${id}"/></w:r>`;
+const endnoteRef = id => `<w:r><w:rPr><w:rStyle w:val="EndnoteReference"/></w:rPr><w:endnoteReference w:id="${id}"/></w:r>`;
+const footnoteBody = text => p(`<w:r><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> ${text}</w:t></w:r>`);
+const endnoteBody = text => p(`<w:r><w:endnoteRef/></w:r><w:r><w:t xml:space="preserve"> ${text}</w:t></w:r>`);
+const endnotePr = numFmt => `<w:endnotePr><w:numFmt w:val="${numFmt}"/></w:endnotePr>`;
+
+// Superscript marks in the body, before any notes section
+function bodyMarks(doc, content) {
+    const separatorAt = content.indexOf(SEPARATOR);
+    return contentElements(doc)
+        .filter(el => el.getAttribute('superscript') === 'true' &&
+            (separatorAt < 0 || Number(el.getAttribute('startOffset')) < separatorAt))
+        .map(el => textOf(el, content));
+}
+
+test('an endnote reference becomes a superscript "i" with the text appended after a separator', async () => {
+    const { doc, content } = await convertBody(
+        p(run('Claim') + endnoteRef(1)),
+        { endnotes: { 1: endnoteBody('Source text') } });
+
+    assert.equal(content, `Claimi\n${SEPARATOR}i. Source text`);
+
+    const els = contentElements(doc);
+    assert.equal(textOf(els[0], content), 'Claim');
+    assert.equal(textOf(els[1], content), 'i');
+    assert.equal(els[1].getAttribute('superscript'), 'true');
+
+    const paragraphs = [...doc.querySelectorAll('elements > paragraph')];
+    assert.equal(paragraphs.length, 4, 'the text, an empty line, the separator, the endnote');
+    assert.deepEqual(contentElements(doc, paragraphs[2]).map(el => textOf(el, content)), [SEPARATOR]);
+    const note = contentElements(doc, paragraphs[3]);
+    assert.deepEqual(note.map(el => textOf(el, content)), ['i. ', 'Source text']);
+    assert.deepEqual(note.map(el => el.getAttribute('superscript')), ['true', null]);
+    assert.deepEqual(note.map(el => el.getAttribute('size')), ['10', '10']);
+});
+
+test('footnotes and endnotes are numbered separately, with the footnotes section first', async () => {
+    const { doc, content } = await convertBody(
+        p(run('A') + footnoteRef(1) + run('B') + endnoteRef(1)),
+        {
+            footnotes: { 1: footnoteBody('Foot text') },
+            endnotes: { 1: endnoteBody('End text') }
+        });
+
+    assert.deepEqual(bodyMarks(doc, content), ['1', 'i']);
+    assert.equal(content, `A1Bi\n${SEPARATOR}1. Foot text\n${SEPARATOR}i. End text`);
+    assert.equal(content.split('Foot text').length - 1, 1);
+    assert.equal(content.split('End text').length - 1, 1);
+});
+
+test('footnotes are still flushed at a page break, and endnotes still go last', async () => {
+    const { doc, content } = await convertBody(
+        p(run('A') + footnoteRef(1) + endnoteRef(1) + '<w:r><w:br w:type="page"/></w:r>' + run('B') + footnoteRef(2) + endnoteRef(2)),
+        {
+            footnotes: { 1: footnoteBody('F1'), 2: footnoteBody('F2') },
+            endnotes: { 1: endnoteBody('E1'), 2: endnoteBody('E2') }
+        });
+
+    assert.equal(content, `A1i\n${SEPARATOR}1. F1B2ii\n${SEPARATOR}2. F2\n${SEPARATOR}i. E1ii. E2`);
+    const children = [...doc.querySelector('elements').children].map(el => el.localName);
+    assert.equal(children.indexOf('page-break'), 4, 'the first footnotes section comes before the page break');
+});
+
+test('endnote numbers follow w:endnotePr/w:numFmt in the final sectPr, then in settings.xml', async () => {
+    const twoNotes = p(run('A') + endnoteRef(1) + run('B') + endnoteRef(2));
+    const endnotes = { 1: endnoteBody('One'), 2: endnoteBody('Two') };
+    const cases = [
+        [{}, ['i', 'ii']],
+        [{ sectPr: endnotePr('decimal') }, ['1', '2']],
+        [{ sectPr: endnotePr('upperRoman') }, ['I', 'II']],
+        [{ sectPr: endnotePr('lowerLetter') }, ['a', 'b']],
+        [{ sectPr: endnotePr('upperLetter') }, ['A', 'B']],
+        [{ sectPr: endnotePr('chicago') }, ['1', '2']],
+        [{ sectPr: '<w:pgSz w:w="11906" w:h="16838"/>', settings: endnotePr('decimal') }, ['1', '2']],
+        [{ settings: endnotePr('upperRoman') }, ['I', 'II']],
+        [{ sectPr: endnotePr('upperRoman'), settings: endnotePr('decimal') }, ['I', 'II']],
+        [{ sectPr: '<w:endnotePr><w:pos w:val="docEnd"/></w:endnotePr>', settings: endnotePr('decimal') }, ['1', '2']]
+    ];
+
+    for (const [options, marks] of cases) {
+        const { doc, content } = await convertBody(twoNotes, { endnotes, ...options });
+        const label = JSON.stringify(options);
+        assert.deepEqual(bodyMarks(doc, content), marks, label);
+        assert.ok(content.endsWith(`${marks[0]}. One${marks[1]}. Two`), label);
+    }
+});
+
+test('endnote numbers past the simple cases follow Word\'s Roman and letter numbering', () => {
+    const generator = new (loadConverter().UdfGenerator)();
+    const format = (format, numbers) => numbers.map(number => generator.formatNoteNumber(number, format));
+
+    assert.deepEqual(format('lowerRoman', [3, 4, 9, 14, 40, 1999]), ['iii', 'iv', 'ix', 'xiv', 'xl', 'mcmxcix']);
+    assert.deepEqual(format('upperRoman', [49]), ['XLIX']);
+    assert.deepEqual(format('lowerLetter', [26, 27, 28, 53]), ['z', 'aa', 'bb', 'aaa']);
+    assert.deepEqual(format('upperLetter', [27]), ['AA']);
+    assert.deepEqual(format('decimal', [12]), ['12']);
+    assert.deepEqual(format('ordinal', [12]), ['12']);
+});
+
+test('an endnote reference in a table cell is numbered and its text appended after the body', async () => {
+    const { doc, content } = await convertBody(
+        table([[p(run('Cell') + endnoteRef(1)), p(run('Other'))]]) + p(run('After') + endnoteRef(2)),
+        { endnotes: { 1: endnoteBody('In a cell'), 2: endnoteBody('In the body') } });
+
+    const cell = doc.querySelector('elements cell');
+    const cellEls = contentElements(doc, cell);
+    assert.deepEqual(cellEls.map(el => textOf(el, content)), ['Cell', 'i']);
+    assert.equal(cellEls[1].getAttribute('superscript'), 'true');
+    assert.equal(content, `CelliOtherAfterii\n${SEPARATOR}i. In a cellii. In the body`);
+});
+
+test('separator notes never show up, and a reference to a missing endnote adds nothing', async () => {
+    const zip = await JSZip.loadAsync(await buildDocx(
+        p(run('A') + endnoteRef(-1) + endnoteRef(0) + endnoteRef(2) + endnoteRef(99) + run('B') + endnoteRef(1)),
+        { endnotes: { 1: endnoteBody('Real note') } }));
+    // A continuation notice with text, under an id Word would use for a real note
+    const notes = await zip.file('word/endnotes.xml').async('string');
+    zip.file('word/endnotes.xml', notes.replace('</w:endnotes>',
+        '<w:endnote w:type="continuationNotice" w:id="2"><w:p><w:r><w:t>Continued</w:t></w:r></w:p></w:endnote></w:endnotes>'));
+
+    const result = await convert(await zip.generateAsync({ type: 'nodebuffer' }));
+    assertOffsetsInBounds(result);
+    assert.deepEqual(Object.keys(result.parsed.endnotes), ['1']);
+    assert.equal(result.content, `ABi\n${SEPARATOR}i. Real note`);
+});
+
+test('a document without an endnotes part converts as before', async () => {
+    const body = p(run('Claim') + endnoteRef(1)) + p(run('Next') + footnoteRef(1));
+    const footnotes = { 1: footnoteBody('Foot text') };
+    const { parsed, content, xml } = await convertBody(body, { footnotes });
+
+    assert.deepEqual({ ...parsed.endnotes }, {});
+    assert.equal(content, `ClaimNext1\n${SEPARATOR}1. Foot text`);
+    // The same as the document without the dangling reference
+    const plain = await convertBody(p(run('Claim')) + p(run('Next') + footnoteRef(1)), { footnotes });
+    assert.equal(xml, plain.xml);
+});
+
+test('a reused parser does not carry endnotes into the next document', async () => {
+    const { DocxParser } = loadConverter();
+    const parser = new DocxParser();
+    const body = p(run('Claim') + endnoteRef(1));
+
+    const first = await parser.parse(await buildDocx(body, { endnotes: { 1: endnoteBody('Note') }, sectPr: endnotePr('decimal') }));
+    assert.equal(first.elements[0].runs[1].type, 'endnoteRef');
+    assert.equal(first.endnoteFormat, 'decimal');
+
+    const second = await parser.parse(await buildDocx(body));
+    assert.deepEqual([...second.elements[0].runs].map(r => r.type), ['text']);
+    assert.equal(second.endnoteFormat, 'lowerRoman');
+});
+
+test('"]]>" in an endnote keeps content.xml well-formed', async () => {
+    const { doc, content } = await convertBody(
+        p(run('Claim') + endnoteRef(1)),
+        { endnotes: { 1: endnoteBody('note ]]&gt; text') } });
+
+    assert.equal(textOf(contentElements(doc).at(-1), content), 'note ]]> text');
+    assert.ok(content.endsWith('i. note ]]> text'));
 });
 
 // Lists: bullet vs. number and the number style come from word/numbering.xml

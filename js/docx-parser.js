@@ -33,6 +33,14 @@ const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike'];
 // Points per unit of an OOXML universal measure (ST_UniversalMeasure, e.g. "2.5cm")
 const POINTS_PER_UNIT = { mm: 72 / 25.4, cm: 72 / 2.54, in: 72, pt: 1, pc: 12, pi: 12 };
 
+// Note types (w:type) of a footnote or endnote that are Word's separator lines, not note text
+const SEPARATOR_NOTE_TYPES = ['separator', 'continuationSeparator', 'continuationNotice'];
+
+// Endnote number formats (w:endnotePr/w:numFmt) the generator can write. Word numbers
+// endnotes in lower-case Roman numerals unless the document says otherwise.
+const ENDNOTE_FORMATS = ['decimal', 'lowerRoman', 'upperRoman', 'lowerLetter', 'upperLetter'];
+const DEFAULT_ENDNOTE_FORMAT = 'lowerRoman';
+
 // Signature of an OLE compound file: a Word 97-2003 .doc, or a password-protected .docx
 const COMPOUND_FILE_SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
@@ -62,6 +70,65 @@ const PARSE_FAILURES = {
     legacyDoc: 'The file is a Word 97-2003 document (.doc), not a .docx.',
     strict: 'The Word document is saved as Strict Open XML, which is not supported.'
 };
+
+// Codes of the conversion findings parse() reports, in the order it lists them: content the
+// conversion drops or simplifies, so the user can fix it in Word before filing
+const FINDING_CODES = ['headersFooters', 'comments', 'nestedTables', 'missingImage', 'unsupportedImage'];
+
+// How many location hints a finding keeps, and how long each may be
+const MAX_FINDING_EXAMPLES = 3;
+const MAX_EXAMPLE_LENGTH = 40;
+
+// Picture formats, told apart by their leading bytes rather than the part's file extension.
+// UDF documents only PNG and JPEG. EMF starts with an EMR_HEADER record (type 1) whose
+// signature " EMF" sits at byte 40; WMF either starts with a placeable header or with a
+// METAHEADER of type 1 or 2 and header size 9.
+const IMAGE_SIGNATURES = [
+    ['PNG', [0x89, 0x50, 0x4E, 0x47]],
+    ['JPEG', [0xFF, 0xD8, 0xFF]],
+    ['GIF', [0x47, 0x49, 0x46, 0x38]],
+    ['TIFF', [0x49, 0x49, 0x2A, 0x00]],
+    ['TIFF', [0x4D, 0x4D, 0x00, 0x2A]],
+    ['WMF', [0xD7, 0xCD, 0xC6, 0x9A]],
+    ['WMF', [0x01, 0x00, 0x09, 0x00]],
+    ['WMF', [0x02, 0x00, 0x09, 0x00]]
+];
+const SUPPORTED_IMAGE_FORMATS = ['PNG', 'JPEG'];
+
+/**
+ * Name of a picture's format from its leading bytes
+ * @param {Uint8Array} bytes - The picture part
+ * @returns {string} 'PNG', 'JPEG', 'EMF', 'WMF', 'GIF', 'TIFF', 'SVG' or 'unknown'
+ */
+function imageFormat(bytes) {
+    const startsWith = (signature, offset = 0) => signature.every((byte, i) => bytes[offset + i] === byte);
+    if (startsWith([0x01, 0x00, 0x00, 0x00]) && startsWith([0x20, 0x45, 0x4D, 0x46], 40)) return 'EMF';
+    const match = IMAGE_SIGNATURES.find(([, signature]) => startsWith(signature));
+    if (match) return match[0];
+    // SVG is XML text: look for its root element near the start, past any prolog or comment
+    const head = new TextDecoder('utf-8').decode(bytes.subarray(0, 1024));
+    if (/^﻿?\s*</.test(head) && /<svg[\s>]/.test(head)) return 'SVG';
+    return 'unknown';
+}
+
+/**
+ * A short location hint from document text: whitespace collapsed, cut to MAX_EXAMPLE_LENGTH
+ * @param {string} text
+ * @returns {string} '' for blank text
+ */
+function shortExample(text) {
+    const collapsed = text.replace(/\s+/g, ' ').trim();
+    return collapsed.length > MAX_EXAMPLE_LENGTH ? `${collapsed.slice(0, MAX_EXAMPLE_LENGTH).trimEnd()}…` : collapsed;
+}
+
+/**
+ * Plain text of a parsed paragraph's text runs
+ * @param {Object} paragraph - A parsed paragraph
+ * @returns {string}
+ */
+function paragraphText(paragraph) {
+    return paragraph.runs.filter(run => run.type === 'text').map(run => run.text).join('');
+}
 
 /**
  * An Error for a parse failure the app explains to the user
@@ -200,9 +267,13 @@ class DocxParser {
         this.document = null;
         this.relationships = {};
         this.images = {};
+        this.imageFormats = {};
         this.footnotes = {};
+        this.endnotes = {};
         this.numbering = {};
         this.styles = this.emptyStyles();
+        this.findings = {};
+        this.documentParagraphs = null;
     }
 
     /**
@@ -215,9 +286,13 @@ class DocxParser {
             // Reset state: the app reuses one parser for every file
             this.relationships = {};
             this.images = {};
+            this.imageFormats = {};
             this.footnotes = {};
+            this.endnotes = {};
             this.numbering = {};
             this.styles = this.emptyStyles();
+            this.findings = {};
+            this.documentParagraphs = null;
 
             // A compound file is not a ZIP: name why it can't be read instead of a generic failure
             await this.rejectCompoundFile(file);
@@ -232,8 +307,9 @@ class DocxParser {
             // Extract images
             await this.extractImages();
 
-            // Parse footnotes
-            await this.parseFootnotes();
+            // Parse footnotes and endnotes
+            this.footnotes = await this.parseNotes('footnote');
+            this.endnotes = await this.parseNotes('endnote');
 
             // Parse list definitions
             await this.parseNumbering();
@@ -259,6 +335,10 @@ class DocxParser {
                 throw parseFailure('corrupt');
             }
 
+            // Header and footer text and comments are never converted; note them
+            await this.detectHeadersFooters();
+            await this.detectComments();
+
             // Extract document elements
             const elements = await this.extractElements();
 
@@ -266,7 +346,10 @@ class DocxParser {
                 elements: elements,
                 images: this.images,
                 footnotes: this.footnotes,
-                pageSetup: await this.parsePageSetup()
+                endnotes: this.endnotes,
+                endnoteFormat: await this.parseEndnoteFormat(),
+                pageSetup: await this.parsePageSetup(),
+                findings: this.listFindings()
             };
         } catch (error) {
             console.error('Error parsing DOCX:', error);
@@ -356,46 +439,182 @@ class DocxParser {
 
             const data = await file.async('arraybuffer');
             this.images[path] = arrayBufferToBase64(data);
+            this.imageFormats[path] = imageFormat(new Uint8Array(data));
         }
     }
 
     /**
-     * Parse footnotes from the footnotes part (word/footnotes.xml)
+     * Record one occurrence of a conversion finding
+     * @param {string} code - A FINDING_CODES value
+     * @param {string} [example] - A short location hint; blank and repeated ones aren't kept
      */
-    async parseFootnotes() {
-        const footnotesFile = this.zip.file(this.relatedPart('footnotes', 'word/footnotes.xml'));
-        if (!footnotesFile) return;
+    addFinding(code, example = '') {
+        const finding = this.findings[code] || (this.findings[code] = { code, count: 0, examples: [] });
+        finding.count++;
+        if (example && finding.examples.length < MAX_FINDING_EXAMPLES && !finding.examples.includes(example)) {
+            finding.examples.push(example);
+        }
+    }
 
+    /**
+     * The findings recorded during this parse, in FINDING_CODES order
+     * @returns {Array<{code: string, count: number, examples: Array<string>}>} Empty when nothing applies
+     */
+    listFindings() {
+        return FINDING_CODES.filter(code => this.findings[code]).map(code => ({
+            code,
+            count: this.findings[code].count,
+            examples: [...this.findings[code].examples]
+        }));
+    }
+
+    /**
+     * Whether an XML part holds any non-whitespace text (w:t)
+     * @param {string} path - Part name
+     * @returns {Promise<boolean>} false for a missing or unreadable part
+     */
+    async partHasText(path) {
+        const file = path && this.zip.file(path);
+        if (!file) return false;
         try {
-            const footnotesXml = await readXmlPart(footnotesFile);
-            const footnotesDoc = parseXml(footnotesXml);
-            const footnotes = footnotesDoc.getElementsByTagNameNS(WORD_NS, 'footnote');
+            const doc = parseXml(await readXmlPart(file));
+            return Array.from(doc.getElementsByTagNameNS(WORD_NS, 't')).some(t => (t.textContent || '').trim() !== '');
+        } catch (error) {
+            console.warn(`Could not read ${path}:`, error);
+            return false;
+        }
+    }
 
-            for (const footnote of footnotes) {
-                const id = footnote.getAttribute('w:id');
-                // Skip separator and continuationSeparator footnotes (id 0 and -1)
-                if (id === '0' || id === '-1') continue;
+    /**
+     * Note header and footer text, which is not converted: once for the document, when any
+     * w:sectPr references a header or footer part with text in it
+     */
+    async detectHeadersFooters() {
+        const paths = new Set();
+        for (const sectPr of this.document.getElementsByTagNameNS(WORD_NS, 'sectPr')) {
+            for (const reference of [...childElements(sectPr, 'headerReference'), ...childElements(sectPr, 'footerReference')]) {
+                const rel = this.relationships[reference.getAttributeNS(RELATIONSHIPS_NS, 'id')];
+                if (rel && rel.path) paths.add(rel.path);
+            }
+        }
+        for (const path of paths) {
+            if (await this.partHasText(path)) {
+                this.addFinding('headersFooters');
+                return;
+            }
+        }
+    }
 
-                // Extract text content from the footnote
-                const paragraphs = footnote.getElementsByTagNameNS(WORD_NS, 'p');
-                let footnoteText = '';
-
-                for (const para of paragraphs) {
-                    const runs = para.getElementsByTagNameNS(WORD_NS, 'r');
-                    for (const run of runs) {
-                        const textElements = run.getElementsByTagNameNS(WORD_NS, 't');
-                        for (const t of textElements) {
-                            footnoteText += t.textContent || '';
-                        }
-                    }
-                    footnoteText += ' ';
-                }
-
-                this.footnotes[id] = footnoteText.trim();
+    /**
+     * Note comments, which are not converted: one occurrence per comment with text in the
+     * comments part (word/comments.xml)
+     */
+    async detectComments() {
+        const commentsFile = this.zip.file(this.relatedPart('comments', 'word/comments.xml'));
+        if (!commentsFile) return;
+        try {
+            const commentsDoc = parseXml(await readXmlPart(commentsFile));
+            for (const comment of commentsDoc.getElementsByTagNameNS(WORD_NS, 'comment')) {
+                const hasText = Array.from(comment.getElementsByTagNameNS(WORD_NS, 't'))
+                    .some(t => (t.textContent || '').trim() !== '');
+                if (hasText) this.addFinding('comments');
             }
         } catch (error) {
-            console.warn('Could not parse footnotes:', error);
+            console.warn('Could not read comments:', error);
         }
+    }
+
+    /**
+     * Text of the paragraph nearest to an element, as a finding's location hint: the
+     * paragraph holding it, else the closest paragraph before or after it with text
+     * @param {Element} element - An element in the main document part
+     * @returns {string} '' when no paragraph has text
+     */
+    nearestParagraphText(element) {
+        let para = element;
+        while (para && !(para.namespaceURI === WORD_NS && para.localName === 'p')) para = para.parentElement;
+        if (!para) return '';
+        if (!this.documentParagraphs) {
+            this.documentParagraphs = Array.from(this.document.getElementsByTagNameNS(WORD_NS, 'p'));
+        }
+        const paragraphs = this.documentParagraphs;
+        const index = paragraphs.indexOf(para);
+        for (let distance = 0; distance < paragraphs.length; distance++) {
+            for (const i of distance === 0 ? [index] : [index - distance, index + distance]) {
+                if (i < 0 || i >= paragraphs.length) continue;
+                const text = shortExample(this.paragraphRuns(paragraphs[i])
+                    .flatMap(run => childElements(run, 't'))
+                    .map(t => t.textContent || '')
+                    .join(''));
+                if (text) return text;
+            }
+        }
+        return '';
+    }
+
+    /**
+     * Parse the notes of the footnotes part (word/footnotes.xml) or the endnotes part
+     * (word/endnotes.xml) into plain text keyed by w:id. Word's separator notes are left out.
+     * @param {'footnote'|'endnote'} type - The note element's local name
+     * @returns {Promise<Object<string, string>>}
+     */
+    async parseNotes(type) {
+        const notes = {};
+        const notesFile = this.zip.file(this.relatedPart(`${type}s`, `word/${type}s.xml`));
+        if (!notesFile) return notes;
+
+        try {
+            const notesDoc = parseXml(await readXmlPart(notesFile));
+
+            for (const note of notesDoc.getElementsByTagNameNS(WORD_NS, type)) {
+                const id = note.getAttribute('w:id');
+                // Separator and continuation separator notes are lines, not text. Word
+                // gives them ids -1 and 0, and marks them with w:type.
+                if (id === '0' || id === '-1' || SEPARATOR_NOTE_TYPES.includes(note.getAttribute('w:type'))) continue;
+
+                notes[id] = this.noteText(note);
+            }
+        } catch (error) {
+            console.warn(`Could not parse ${type}s:`, error);
+        }
+        return notes;
+    }
+
+    /**
+     * Plain text of a footnote or endnote: the text of its runs, one space between paragraphs
+     * @param {Element} note - The w:footnote or w:endnote element
+     * @returns {string}
+     */
+    noteText(note) {
+        let text = '';
+        for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
+            for (const run of para.getElementsByTagNameNS(WORD_NS, 'r')) {
+                for (const t of run.getElementsByTagNameNS(WORD_NS, 't')) {
+                    text += t.textContent || '';
+                }
+            }
+            text += ' ';
+        }
+        return text.trim();
+    }
+
+    /**
+     * Number format of the endnote reference marks: w:endnotePr/w:numFmt in the body's
+     * final w:sectPr, then in the settings part. Word's default is lower-case Roman
+     * numerals; a format the generator can't write falls back to decimal.
+     * @returns {Promise<string>} An ENDNOTE_FORMATS value
+     */
+    async parseEndnoteFormat() {
+        const numFmt = parent => {
+            const endnotePr = parent && childElement(parent, 'endnotePr');
+            const format = endnotePr && childElement(endnotePr, 'numFmt');
+            return format && format.hasAttribute('w:val') ? format.getAttribute('w:val') : null;
+        };
+
+        const body = this.document.getElementsByTagNameNS(WORD_NS, 'body')[0];
+        const format = numFmt(body && childElements(body, 'sectPr').pop()) ?? numFmt(await this.settingsRoot());
+        if (format === null) return DEFAULT_ENDNOTE_FORMAT;
+        return ENDNOTE_FORMATS.includes(format) ? format : 'decimal';
     }
 
     /**
@@ -495,13 +714,21 @@ class DocxParser {
      * @returns {Promise<boolean>}
      */
     async isGutterAtTop() {
+        const settings = await this.settingsRoot();
+        const gutterAtTop = settings && childElement(settings, 'gutterAtTop');
+        return gutterAtTop ? this.isOn(gutterAtTop) : false;
+    }
+
+    /**
+     * The w:settings element of the settings part (word/settings.xml)
+     * @returns {Promise<Element|null>} null without a settings part, or for a malformed one
+     */
+    async settingsRoot() {
         const settingsFile = this.zip.file(this.relatedPart('settings', 'word/settings.xml'));
-        if (!settingsFile) return false;
+        if (!settingsFile) return null;
 
         const root = parseXml(await readXmlPart(settingsFile)).documentElement;
-        const gutterAtTop = root.namespaceURI === WORD_NS && root.localName === 'settings'
-            ? childElement(root, 'gutterAtTop') : null;
-        return gutterAtTop ? this.isOn(gutterAtTop) : false;
+        return root && root.namespaceURI === WORD_NS && root.localName === 'settings' ? root : null;
     }
 
     /**
@@ -939,7 +1166,7 @@ class DocxParser {
      * Parse a run element (text with formatting)
      * @param {Element} run - The run element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
-     * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image, footnoteRef)
+     * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image, footnoteRef, endnoteRef)
      */
     parseRun(run, paragraphRun = {}) {
         const items = [];
@@ -965,14 +1192,16 @@ class DocxParser {
                 items.push({ type: breakType === 'page' ? 'pageBreak' : 'break' });
             } else if (localName === 'cr') {
                 items.push({ type: 'break' });
-            } else if (localName === 'footnoteReference') {
-                const footnoteId = child.getAttribute('w:id');
-                // Use 'in' to check key presence - empty string is still valid
-                if (footnoteId && footnoteId in this.footnotes) {
+            } else if (localName === 'footnoteReference' || localName === 'endnoteReference') {
+                const kind = localName === 'footnoteReference' ? 'footnote' : 'endnote';
+                const notes = kind === 'footnote' ? this.footnotes : this.endnotes;
+                const id = child.getAttribute('w:id');
+                // A note with no text is still a note; a reference to a missing one adds nothing
+                if (id && Object.prototype.hasOwnProperty.call(notes, id)) {
                     items.push({
-                        type: 'footnoteRef',
-                        id: footnoteId,
-                        content: this.footnotes[footnoteId] || '[Empty footnote]'
+                        type: `${kind}Ref`,
+                        id: id,
+                        content: notes[id] || `[Empty ${kind}]`
                     });
                 }
             } else if (localName !== 'rPr') {
@@ -1062,6 +1291,12 @@ class DocxParser {
             const path = embed && this.relationships[embed] && this.relationships[embed].path;
             if (path && this.images[path]) {
                 image.data = this.images[path];
+                // Embedded as-is, though UDF documents only PNG and JPEG
+                const format = this.imageFormats[path];
+                if (!SUPPORTED_IMAGE_FORMATS.includes(format)) this.addFinding('unsupportedImage', format);
+            } else {
+                // No relationship, or no media part behind it: the generator skips the picture
+                this.addFinding('missingImage', this.nearestParagraphText(drawing));
             }
         }
 
@@ -1211,7 +1446,13 @@ class DocxParser {
 
         // Get paragraphs in cell. Nested tables can't be represented yet, so
         // their paragraphs are flattened into this cell in reading order.
-        cell.paragraphs = this.flattenToParagraphs(this.parseBlocks(tc));
+        const blocks = this.parseBlocks(tc);
+        for (const block of blocks) {
+            if (block.type !== 'table') continue;
+            const firstText = this.flattenToParagraphs([block]).map(paragraphText).find(text => text.trim() !== '');
+            this.addFinding('nestedTables', shortExample(firstText || ''));
+        }
+        cell.paragraphs = this.flattenToParagraphs(blocks);
 
         return cell;
     }
