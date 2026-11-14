@@ -22,6 +22,8 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 3. Click "UDF’YE DÖNÜŞTÜR" ("Convert to UDF" in English)
 4. Download the converted `.udf` file
 
+After a successful conversion, the page lists any [conversion notes](#conversion-notes): parts of the document the converter dropped or simplified, with what to change in Word.
+
 Password-protected `.docx` files and Word 97–2003 `.doc` files (even renamed to `.docx`) are refused with a message saying how to fix them, and so is a `.docx` whose main document part is damaged: none of them is turned into an empty `.udf`.
 
 ## Local Development
@@ -94,6 +96,19 @@ A paragraph's list comes from `w:numPr`, read from the paragraph style and its `
 ### Tables
 - Cell shading (`w:shd`) is written as `fillColor`, and vertical alignment (`w:vAlign`) as `align="vcenter"` or `align="bottom"`; top, the default, is left out.
 - The format has no `rowspan`, so a vertical merge (`w:vMerge`) keeps one cell per row: the first holds the text, the rows below get an empty cell in the same grid column, shaded like the first. In bordered tables the cells are joined by `borderSpec` dropping the edges between them (`11` first, `10` middle, `14` last); cells outside a merge get no `borderSpec`.
+
+### Conversion notes
+`DocxParser.parse()` also returns `findings`: one `{ code, count, examples }` entry per kind of content the conversion drops or simplifies, in a fixed order, and `[]` when nothing applies. `examples` holds up to 3 short location hints (at most about 40 characters each). The page shows them under the download button as "Bu dönüşümle ilgili notlar" / "Notes on this conversion", each with a sentence in Turkish or English saying what happened and what to change in Word. These constructs are reported:
+
+| Code | Reported when | Examples |
+| --- | --- | --- |
+| `headersFooters` | A section (`w:sectPr`) references a header or footer part with non-whitespace text. Reported once for the document. | none |
+| `comments` | The comments part has comments with text; `count` is the number of such comments. | none |
+| `nestedTables` | A table inside a table cell is flattened into that cell. | The start of the nested table's first non-empty paragraph |
+| `missingImage` | A picture's relationship or media part is missing, so it is skipped. | The text of the nearest paragraph |
+| `unsupportedImage` | A picture's data is not PNG or JPEG, judged by its leading bytes, not its file extension. It is still embedded as-is. | The format: `EMF`, `WMF`, `GIF`, `TIFF`, `SVG` or `unknown` |
+
+The notes only report: the converted `.udf` is the same with or without them.
 
 ### Conversion Pipeline
 1. **Parse DOCX**: Extract and parse `word/document.xml`

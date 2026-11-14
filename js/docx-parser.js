@@ -71,6 +71,65 @@ const PARSE_FAILURES = {
     strict: 'The Word document is saved as Strict Open XML, which is not supported.'
 };
 
+// Codes of the conversion findings parse() reports, in the order it lists them: content the
+// conversion drops or simplifies, so the user can fix it in Word before filing
+const FINDING_CODES = ['headersFooters', 'comments', 'nestedTables', 'missingImage', 'unsupportedImage'];
+
+// How many location hints a finding keeps, and how long each may be
+const MAX_FINDING_EXAMPLES = 3;
+const MAX_EXAMPLE_LENGTH = 40;
+
+// Picture formats, told apart by their leading bytes rather than the part's file extension.
+// UDF documents only PNG and JPEG. EMF starts with an EMR_HEADER record (type 1) whose
+// signature " EMF" sits at byte 40; WMF either starts with a placeable header or with a
+// METAHEADER of type 1 or 2 and header size 9.
+const IMAGE_SIGNATURES = [
+    ['PNG', [0x89, 0x50, 0x4E, 0x47]],
+    ['JPEG', [0xFF, 0xD8, 0xFF]],
+    ['GIF', [0x47, 0x49, 0x46, 0x38]],
+    ['TIFF', [0x49, 0x49, 0x2A, 0x00]],
+    ['TIFF', [0x4D, 0x4D, 0x00, 0x2A]],
+    ['WMF', [0xD7, 0xCD, 0xC6, 0x9A]],
+    ['WMF', [0x01, 0x00, 0x09, 0x00]],
+    ['WMF', [0x02, 0x00, 0x09, 0x00]]
+];
+const SUPPORTED_IMAGE_FORMATS = ['PNG', 'JPEG'];
+
+/**
+ * Name of a picture's format from its leading bytes
+ * @param {Uint8Array} bytes - The picture part
+ * @returns {string} 'PNG', 'JPEG', 'EMF', 'WMF', 'GIF', 'TIFF', 'SVG' or 'unknown'
+ */
+function imageFormat(bytes) {
+    const startsWith = (signature, offset = 0) => signature.every((byte, i) => bytes[offset + i] === byte);
+    if (startsWith([0x01, 0x00, 0x00, 0x00]) && startsWith([0x20, 0x45, 0x4D, 0x46], 40)) return 'EMF';
+    const match = IMAGE_SIGNATURES.find(([, signature]) => startsWith(signature));
+    if (match) return match[0];
+    // SVG is XML text: look for its root element near the start, past any prolog or comment
+    const head = new TextDecoder('utf-8').decode(bytes.subarray(0, 1024));
+    if (/^﻿?\s*</.test(head) && /<svg[\s>]/.test(head)) return 'SVG';
+    return 'unknown';
+}
+
+/**
+ * A short location hint from document text: whitespace collapsed, cut to MAX_EXAMPLE_LENGTH
+ * @param {string} text
+ * @returns {string} '' for blank text
+ */
+function shortExample(text) {
+    const collapsed = text.replace(/\s+/g, ' ').trim();
+    return collapsed.length > MAX_EXAMPLE_LENGTH ? `${collapsed.slice(0, MAX_EXAMPLE_LENGTH).trimEnd()}…` : collapsed;
+}
+
+/**
+ * Plain text of a parsed paragraph's text runs
+ * @param {Object} paragraph - A parsed paragraph
+ * @returns {string}
+ */
+function paragraphText(paragraph) {
+    return paragraph.runs.filter(run => run.type === 'text').map(run => run.text).join('');
+}
+
 /**
  * An Error for a parse failure the app explains to the user
  * @param {string} code - A PARSE_FAILURES key
@@ -208,10 +267,13 @@ class DocxParser {
         this.document = null;
         this.relationships = {};
         this.images = {};
+        this.imageFormats = {};
         this.footnotes = {};
         this.endnotes = {};
         this.numbering = {};
         this.styles = this.emptyStyles();
+        this.findings = {};
+        this.documentParagraphs = null;
     }
 
     /**
@@ -224,10 +286,13 @@ class DocxParser {
             // Reset state: the app reuses one parser for every file
             this.relationships = {};
             this.images = {};
+            this.imageFormats = {};
             this.footnotes = {};
             this.endnotes = {};
             this.numbering = {};
             this.styles = this.emptyStyles();
+            this.findings = {};
+            this.documentParagraphs = null;
 
             // A compound file is not a ZIP: name why it can't be read instead of a generic failure
             await this.rejectCompoundFile(file);
@@ -270,6 +335,10 @@ class DocxParser {
                 throw parseFailure('corrupt');
             }
 
+            // Header and footer text and comments are never converted; note them
+            await this.detectHeadersFooters();
+            await this.detectComments();
+
             // Extract document elements
             const elements = await this.extractElements();
 
@@ -279,7 +348,8 @@ class DocxParser {
                 footnotes: this.footnotes,
                 endnotes: this.endnotes,
                 endnoteFormat: await this.parseEndnoteFormat(),
-                pageSetup: await this.parsePageSetup()
+                pageSetup: await this.parsePageSetup(),
+                findings: this.listFindings()
             };
         } catch (error) {
             console.error('Error parsing DOCX:', error);
@@ -369,7 +439,117 @@ class DocxParser {
 
             const data = await file.async('arraybuffer');
             this.images[path] = arrayBufferToBase64(data);
+            this.imageFormats[path] = imageFormat(new Uint8Array(data));
         }
+    }
+
+    /**
+     * Record one occurrence of a conversion finding
+     * @param {string} code - A FINDING_CODES value
+     * @param {string} [example] - A short location hint; blank and repeated ones aren't kept
+     */
+    addFinding(code, example = '') {
+        const finding = this.findings[code] || (this.findings[code] = { code, count: 0, examples: [] });
+        finding.count++;
+        if (example && finding.examples.length < MAX_FINDING_EXAMPLES && !finding.examples.includes(example)) {
+            finding.examples.push(example);
+        }
+    }
+
+    /**
+     * The findings recorded during this parse, in FINDING_CODES order
+     * @returns {Array<{code: string, count: number, examples: Array<string>}>} Empty when nothing applies
+     */
+    listFindings() {
+        return FINDING_CODES.filter(code => this.findings[code]).map(code => ({
+            code,
+            count: this.findings[code].count,
+            examples: [...this.findings[code].examples]
+        }));
+    }
+
+    /**
+     * Whether an XML part holds any non-whitespace text (w:t)
+     * @param {string} path - Part name
+     * @returns {Promise<boolean>} false for a missing or unreadable part
+     */
+    async partHasText(path) {
+        const file = path && this.zip.file(path);
+        if (!file) return false;
+        try {
+            const doc = parseXml(await readXmlPart(file));
+            return Array.from(doc.getElementsByTagNameNS(WORD_NS, 't')).some(t => (t.textContent || '').trim() !== '');
+        } catch (error) {
+            console.warn(`Could not read ${path}:`, error);
+            return false;
+        }
+    }
+
+    /**
+     * Note header and footer text, which is not converted: once for the document, when any
+     * w:sectPr references a header or footer part with text in it
+     */
+    async detectHeadersFooters() {
+        const paths = new Set();
+        for (const sectPr of this.document.getElementsByTagNameNS(WORD_NS, 'sectPr')) {
+            for (const reference of [...childElements(sectPr, 'headerReference'), ...childElements(sectPr, 'footerReference')]) {
+                const rel = this.relationships[reference.getAttributeNS(RELATIONSHIPS_NS, 'id')];
+                if (rel && rel.path) paths.add(rel.path);
+            }
+        }
+        for (const path of paths) {
+            if (await this.partHasText(path)) {
+                this.addFinding('headersFooters');
+                return;
+            }
+        }
+    }
+
+    /**
+     * Note comments, which are not converted: one occurrence per comment with text in the
+     * comments part (word/comments.xml)
+     */
+    async detectComments() {
+        const commentsFile = this.zip.file(this.relatedPart('comments', 'word/comments.xml'));
+        if (!commentsFile) return;
+        try {
+            const commentsDoc = parseXml(await readXmlPart(commentsFile));
+            for (const comment of commentsDoc.getElementsByTagNameNS(WORD_NS, 'comment')) {
+                const hasText = Array.from(comment.getElementsByTagNameNS(WORD_NS, 't'))
+                    .some(t => (t.textContent || '').trim() !== '');
+                if (hasText) this.addFinding('comments');
+            }
+        } catch (error) {
+            console.warn('Could not read comments:', error);
+        }
+    }
+
+    /**
+     * Text of the paragraph nearest to an element, as a finding's location hint: the
+     * paragraph holding it, else the closest paragraph before or after it with text
+     * @param {Element} element - An element in the main document part
+     * @returns {string} '' when no paragraph has text
+     */
+    nearestParagraphText(element) {
+        let para = element;
+        while (para && !(para.namespaceURI === WORD_NS && para.localName === 'p')) para = para.parentElement;
+        if (!para) return '';
+        if (!this.documentParagraphs) {
+            this.documentParagraphs = Array.from(this.document.getElementsByTagNameNS(WORD_NS, 'p'));
+        }
+        const paragraphs = this.documentParagraphs;
+        const index = paragraphs.indexOf(para);
+        for (let distance = 0; distance < paragraphs.length; distance++) {
+            for (const i of distance === 0 ? [index] : [index - distance, index + distance]) {
+                if (i < 0 || i >= paragraphs.length) continue;
+                const text = shortExample(this.paragraphRuns(paragraphs[i])
+                    .flatMap(run => childElements(run, 't'))
+                    .map(t => t.textContent || '')
+                    .join(''));
+                if (text) return text;
+            }
+        }
+        return '';
     }
 
     /**
@@ -1111,6 +1291,12 @@ class DocxParser {
             const path = embed && this.relationships[embed] && this.relationships[embed].path;
             if (path && this.images[path]) {
                 image.data = this.images[path];
+                // Embedded as-is, though UDF documents only PNG and JPEG
+                const format = this.imageFormats[path];
+                if (!SUPPORTED_IMAGE_FORMATS.includes(format)) this.addFinding('unsupportedImage', format);
+            } else {
+                // No relationship, or no media part behind it: the generator skips the picture
+                this.addFinding('missingImage', this.nearestParagraphText(drawing));
             }
         }
 
@@ -1260,7 +1446,13 @@ class DocxParser {
 
         // Get paragraphs in cell. Nested tables can't be represented yet, so
         // their paragraphs are flattened into this cell in reading order.
-        cell.paragraphs = this.flattenToParagraphs(this.parseBlocks(tc));
+        const blocks = this.parseBlocks(tc);
+        for (const block of blocks) {
+            if (block.type !== 'table') continue;
+            const firstText = this.flattenToParagraphs([block]).map(paragraphText).find(text => text.trim() !== '');
+            this.addFinding('nestedTables', shortExample(firstText || ''));
+        }
+        cell.paragraphs = this.flattenToParagraphs(blocks);
 
         return cell;
     }

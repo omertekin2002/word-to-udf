@@ -607,6 +607,47 @@ p {
   font-size: 14px;
 }
 
+/* What the conversion dropped or simplified: a boxed memo under the download button */
+.conversion-notes {
+  align-self: stretch;
+  padding: 10px 12px;
+  background: var(--white);
+  border: 1px solid var(--ink);
+  border-left: 6px solid var(--yellow);
+  text-align: left;
+}
+
+.conversion-notes-title {
+  margin: 0 0 6px;
+  font: 700 12px/1.2 var(--font-ui);
+  text-transform: uppercase;
+}
+
+.conversion-notes-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.conversion-note {
+  font: 14px/1.4 var(--font-body);
+}
+
+.conversion-note + .conversion-note {
+  margin-top: 8px;
+}
+
+.conversion-note-count,
+.conversion-note-examples-label {
+  font: 700 11px/1.4 var(--font-ui);
+}
+
+.conversion-note-examples {
+  margin: 0;
+  padding-left: 18px;
+  list-style: square;
+  overflow-wrap: anywhere;
+}
+
 .convert-another {
   padding: 4px;
   background: none;
