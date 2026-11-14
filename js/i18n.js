@@ -2,6 +2,7 @@
  * Interface language: Turkish by default, with English available
  * Strings live in the dictionaries below; markup marks them with data-i18n attributes:
  *   data-i18n="key"            - sets the element's text
+ *   data-i18n-params='{"n":1}' - values for the {placeholders} of its data-i18n string (JSON)
  *   data-i18n-html="key"       - sets the element's markup (dictionary strings only, never user input)
  *   data-i18n-attr="attr:key"  - sets an attribute; separate several pairs with ";"
  */
@@ -43,6 +44,14 @@ const I18N_STRINGS = {
         'download.success': 'Dönüştürme tamamlandı.',
         'download.button': 'UDF DOSYASINI İNDİR',
         'download.another': 'Başka bir dosya dönüştür',
+        'notes.title': 'Bu dönüşümle ilgili notlar',
+        'notes.count': 'Sayı: {count}',
+        'notes.examples': 'Örnekler:',
+        'notes.headersFooters': 'Üst ve alt bilgiler dönüştürülmedi. İçlerindeki metin gerekiyorsa Word’de belgenin gövdesine taşıyın.',
+        'notes.comments': 'Açıklamalar (yorumlar) dönüştürülmedi. Gerekli bir açıklama varsa metnini Word’de belgenin gövdesine yazın.',
+        'notes.nestedTables': 'İç içe tablolar düzleştirildi: içteki tablonun metni, dıştaki tablonun hücresine sırayla yazıldı. Düzen önemliyse Word’de içteki tabloyu ayrı bir tabloya ya da düz metne dönüştürün.',
+        'notes.missingImage': 'Verisi belgede bulunmayan görseller atlandı. Bu görselleri Word’de silip Ekle › Resimler ile yeniden ekleyin.',
+        'notes.unsupportedImage': 'Bazı görseller PNG ya da JPEG değil; UDF yalnızca bu iki biçimi tanımlar, bu yüzden UYAP’ta görünmeyebilirler. Görselleri PNG ya da JPEG olarak kaydedip Word’de yeniden ekleyin.',
         'error.icon': 'HATA',
         'error.default': 'Bir hata oluştu',
         'error.invalidType': 'Lütfen geçerli bir Word belgesi (.docx dosyası) seçin.',
@@ -100,6 +109,14 @@ const I18N_STRINGS = {
         'download.success': 'Conversion complete.',
         'download.button': 'DOWNLOAD UDF FILE',
         'download.another': 'Convert another file',
+        'notes.title': 'Notes on this conversion',
+        'notes.count': 'Count: {count}',
+        'notes.examples': 'Examples:',
+        'notes.headersFooters': 'Headers and footers were not converted. If their text is needed, move it into the body of the document in Word.',
+        'notes.comments': 'Comments were not converted. If a comment matters, write its text into the body of the document in Word.',
+        'notes.nestedTables': 'Nested tables were flattened: the inner table’s text was written into the outer table’s cell in reading order. If the layout matters, turn the inner table into a separate table or plain text in Word.',
+        'notes.missingImage': 'Pictures whose image data is missing from the document were skipped. Delete them in Word and insert them again with Insert › Pictures.',
+        'notes.unsupportedImage': 'Some pictures are not PNG or JPEG, the only formats UDF defines, so they may not show in UYAP. Save them as PNG or JPEG and insert them again in Word.',
         'error.icon': 'ERROR',
         'error.default': 'An error occurred',
         'error.invalidType': 'Please select a valid Word document (.docx file)',
@@ -173,7 +190,7 @@ function applyLanguage(lang) {
     document.title = t('meta.title');
 
     for (const el of document.querySelectorAll('[data-i18n]')) {
-        el.textContent = t(el.dataset.i18n);
+        el.textContent = t(el.dataset.i18n, el.dataset.i18nParams ? JSON.parse(el.dataset.i18nParams) : {});
     }
     for (const el of document.querySelectorAll('[data-i18n-html]')) {
         el.innerHTML = t(el.dataset.i18nHtml);
@@ -214,10 +231,13 @@ function setLanguage(lang) {
  * Show a dictionary string in an element and keep it translated on later language changes
  * @param {HTMLElement} el
  * @param {string} key - Dictionary key
+ * @param {Object} [params] - Values for {name} placeholders, kept for later language changes
  */
-function setTranslatedText(el, key) {
+function setTranslatedText(el, key, params) {
     el.dataset.i18n = key;
-    el.textContent = t(key);
+    if (params) el.dataset.i18nParams = JSON.stringify(params);
+    else delete el.dataset.i18nParams;
+    el.textContent = t(key, params);
 }
 
 function currentLanguage() {

@@ -56,6 +56,9 @@ const MEDIA_CONTENT_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/
  * @param {string} [options.numbering] - Contents of <w:numbering> in word/numbering.xml
  * @param {string} [options.sectPr] - Contents of the body's final <w:sectPr>, e.g. a <w:endnotePr>
  * @param {string} [options.settings] - Contents of <w:settings> in word/settings.xml, e.g. a <w:endnotePr>
+ * @param {Array<{name: string, root: string, type: string, id: string, inner: string}>} [options.parts] - More
+ *   parts under word/, e.g. { name: 'header1.xml', root: 'hdr', type: 'header', id: 'rIdHeader1', inner: '<w:p>...</w:p>' }:
+ *   `inner` goes in the <w:{root}> root, `type` names both the relationship and the content type
  * @returns {Promise<Buffer>}
  */
 async function buildDocx(bodyXml, options = {}) {
@@ -63,11 +66,11 @@ async function buildDocx(bodyXml, options = {}) {
     const defaults = [];
     const overrides = [];
     const rels = [];
-    const wordPart = (name, rootTag, inner) => {
+    const wordPart = (name, rootTag, inner, type = rootTag, id = `rId_${rootTag}`) => {
         parts.push([`word/${name}`,
             `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:${rootTag} ${NAMESPACES}>${inner}</w:${rootTag}>`]);
-        overrides.push(`<Override PartName="/word/${name}" ContentType="${WORDML_CONTENT_TYPE}${rootTag}+xml"/>`);
-        rels.push(`<Relationship Id="rId_${rootTag}" Type="${RELATIONSHIP_TYPE}${rootTag}" Target="${name}"/>`);
+        overrides.push(`<Override PartName="/word/${name}" ContentType="${WORDML_CONTENT_TYPE}${type}+xml"/>`);
+        rels.push(`<Relationship Id="${id}" Type="${RELATIONSHIP_TYPE}${type}" Target="${name}"/>`);
     };
 
     const sectPr = options.sectPr === undefined ? '' : `<w:sectPr>${options.sectPr}</w:sectPr>`;
@@ -77,6 +80,7 @@ async function buildDocx(bodyXml, options = {}) {
     if (options.styles !== undefined) wordPart('styles.xml', 'styles', options.styles);
     if (options.numbering !== undefined) wordPart('numbering.xml', 'numbering', options.numbering);
     if (options.settings !== undefined) wordPart('settings.xml', 'settings', options.settings);
+    for (const { name, root, type, id, inner } of options.parts || []) wordPart(name, root, inner, type, id);
 
     // Notes parts start with Word's separator and continuation separator notes
     for (const type of ['footnote', 'endnote']) {

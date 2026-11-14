@@ -51,7 +51,7 @@ function assertPageIn(document, dictionary, lang) {
     assert.equal(document.documentElement.lang, lang);
     assert.equal(document.title, dictionary['meta.title']);
     for (const el of document.querySelectorAll('[data-i18n]')) {
-        assert.equal(el.textContent, dictionary[el.dataset.i18n], `[data-i18n="${el.dataset.i18n}"]`);
+        assert.equal(el.textContent, fill(dictionary[el.dataset.i18n], el), `[data-i18n="${el.dataset.i18n}"]`);
     }
     for (const el of document.querySelectorAll('[data-i18n-html]')) {
         assert.equal(el.innerHTML, dictionary[el.dataset.i18nHtml], `[data-i18n-html="${el.dataset.i18nHtml}"]`);
@@ -61,6 +61,12 @@ function assertPageIn(document, dictionary, lang) {
             assert.equal(el.getAttribute(attr), dictionary[key], `${attr} of [data-i18n-attr] ${key}`);
         }
     }
+}
+
+// A dictionary string with an element's data-i18n-params filled in
+function fill(text, el) {
+    const params = el.dataset.i18nParams ? JSON.parse(el.dataset.i18nParams) : {};
+    return text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match));
 }
 
 function attrPairs(el) {
@@ -98,8 +104,8 @@ test('every key used by index.html and app.js exists in both dictionaries', asyn
         }
     }
     const appSource = fs.readFileSync(path.join(ROOT, 'js/app.js'), 'utf8');
-    const appKeys = [...appSource.matchAll(/'((?:error|progress)\.\w+)'/g)].map(match => match[1]);
-    assert.ok(appKeys.length >= 6, 'app.js message keys found');
+    const appKeys = [...appSource.matchAll(/'((?:error|progress|notes)\.\w+)'/g)].map(match => match[1]);
+    assert.ok(appKeys.length >= 13, 'app.js message keys found');
     for (const key of appKeys) keys.add(key);
 
     for (const key of keys) {
@@ -294,3 +300,102 @@ for (const lang of ['tr', 'en']) {
         assert.match(await udf.file('content.xml').async('string'), /Dilekçe metni/);
     });
 }
+
+test('every finding code the parser reports has a TR and an EN message, and app.js maps it', async () => {
+    const { strings, run } = await loadPage({ app: true });
+    const codes = run('FINDING_CODES');
+    assert.deepEqual([...codes], ['headersFooters', 'comments', 'nestedTables', 'missingImage', 'unsupportedImage']);
+    const keys = run('FINDING_KEYS');
+    assert.deepEqual(Object.keys(keys).sort(), [...codes].sort());
+    for (const code of codes) {
+        assert.equal(keys[code], `notes.${code}`);
+        for (const lang of ['tr', 'en']) {
+            assert.ok(strings[lang][`notes.${code}`], `${lang} message for ${code}`);
+        }
+    }
+    for (const key of ['notes.title', 'notes.count', 'notes.examples']) {
+        assert.ok(strings.tr[key] && strings.en[key], key);
+    }
+    assert.match(strings.tr['notes.count'], /\{count\}/);
+    assert.match(strings.en['notes.count'], /\{count\}/);
+});
+
+// A document with a header, two comments, a nested table whose text looks like markup, and a GIF picture
+async function docxWithFindings() {
+    const p = inner => `<w:p>${inner}</w:p>`;
+    const r = text => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+    const tbl = cells => `<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr>${cells.map(c => `<w:tc>${c}</w:tc>`).join('')}</w:tr></w:tbl>`;
+    const picture = '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>' +
+        '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+        '<pic:pic><pic:blipFill><a:blip r:embed="rId_image1"/></pic:blipFill></pic:pic>' +
+        '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+    const comment = (id, text) => `<w:comment w:id="${id}" w:author="Yazar">${p(r(text))}</w:comment>`;
+    return buildDocx(p(r('Dilekçe metni')) + tbl([p(r('Dış')) + tbl([p(r('&lt;img src=x&gt; iç tablo'))])]) + p(picture), {
+        sectPr: '<w:headerReference w:type="default" r:id="rIdHeader1"/>',
+        media: { 'image1.gif': Buffer.from('GIF89a', 'latin1') },
+        parts: [
+            { name: 'header1.xml', root: 'hdr', type: 'header', id: 'rIdHeader1', inner: p(r('Üst bilgi')) },
+            { name: 'comments.xml', root: 'comments', type: 'comments', id: 'rIdComments', inner: comment(0, 'Bir') + comment(1, 'İki') }
+        ]
+    });
+}
+
+function noteItems(document) {
+    return [...document.querySelectorAll('#conversionNotesList > li')].map(item => ({
+        code: item.dataset.code,
+        text: item.querySelector('.conversion-note-text').textContent,
+        count: item.querySelector('.conversion-note-count')?.textContent ?? null,
+        examples: [...item.querySelectorAll('.conversion-note-examples > li')].map(li => li.textContent)
+    }));
+}
+
+test('a conversion with findings lists them under the download button, translated, and the list follows a language change', async () => {
+    const { window, document, strings } = await loadPage({ app: true });
+    window.app.processFile(fileOf('dilekce.docx', await docxWithFindings()));
+    await window.app.handleConvert();
+
+    assert.ok(visible(document.getElementById('downloadSection')));
+    const notes = document.getElementById('conversionNotes');
+    assert.ok(visible(notes));
+    assert.equal(notes.getAttribute('role'), 'status');
+    assert.ok(notes.contains(document.getElementById('conversionNotesTitle')));
+
+    const expected = lang => [
+        { code: 'headersFooters', text: strings[lang]['notes.headersFooters'], count: null, examples: [] },
+        { code: 'comments', text: strings[lang]['notes.comments'], count: strings[lang]['notes.count'].replace('{count}', '2'), examples: [] },
+        { code: 'nestedTables', text: strings[lang]['notes.nestedTables'], count: null, examples: ['“<img src=x> iç tablo”'] },
+        { code: 'unsupportedImage', text: strings[lang]['notes.unsupportedImage'], count: null, examples: ['GIF'] }
+    ];
+    assert.deepEqual(noteItems(document), expected('tr'));
+    assert.equal(document.getElementById('conversionNotesTitle').textContent, strings.tr['notes.title']);
+    assertPageIn(document, strings.tr, 'tr');
+
+    // Document text is shown as text, never parsed as markup
+    assert.equal(document.querySelectorAll('#conversionNotes img').length, 0);
+
+    document.querySelector('[data-set-lang="en"]').click();
+    assert.deepEqual(noteItems(document), expected('en'));
+    assert.equal(document.getElementById('conversionNotesTitle').textContent, 'Notes on this conversion');
+    assertPageIn(document, strings.en, 'en');
+});
+
+test('a clean conversion keeps the notes hidden, and "Convert another file" clears them', async () => {
+    const { window, document } = await loadPage({ url: `${PAGE_URL}?lang=en`, app: true });
+    const notes = document.getElementById('conversionNotes');
+    assert.ok(!visible(notes), 'hidden before any conversion');
+
+    window.app.processFile(fileOf('dilekce.docx', await docxWithFindings()));
+    await window.app.handleConvert();
+    assert.ok(visible(notes));
+    assert.equal(noteItems(document).length, 4);
+
+    document.getElementById('convertAnother').click();
+    assert.ok(!visible(notes));
+    assert.equal(noteItems(document).length, 0);
+
+    window.app.processFile(fileOf('temiz.docx', await buildDocx('<w:p><w:r><w:t>Temiz metin</w:t></w:r></w:p>')));
+    await window.app.handleConvert();
+    assert.ok(visible(document.getElementById('downloadSection')));
+    assert.ok(!visible(notes));
+    assert.equal(noteItems(document).length, 0);
+});
