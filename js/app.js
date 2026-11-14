@@ -11,6 +11,18 @@ const PARSE_FAILURE_KEYS = {
     strict: 'error.strict'
 };
 
+// Messages for the conversion findings DocxParser reports, by finding code
+const FINDING_KEYS = {
+    headersFooters: 'notes.headersFooters',
+    comments: 'notes.comments',
+    nestedTables: 'notes.nestedTables',
+    missingImage: 'notes.missingImage',
+    unsupportedImage: 'notes.unsupportedImage'
+};
+
+// Findings whose examples are document text, shown in quotes; the others are format names
+const QUOTED_EXAMPLE_CODES = ['nestedTables', 'missingImage'];
+
 class WordToUdfApp {
     constructor() {
         // DOM Elements
@@ -27,6 +39,8 @@ class WordToUdfApp {
         this.downloadSection = document.getElementById('downloadSection');
         this.downloadBtn = document.getElementById('downloadBtn');
         this.convertAnother = document.getElementById('convertAnother');
+        this.conversionNotes = document.getElementById('conversionNotes');
+        this.conversionNotesList = document.getElementById('conversionNotesList');
         this.errorMessage = document.getElementById('errorMessage');
         this.errorText = document.getElementById('errorText');
 
@@ -141,6 +155,7 @@ class WordToUdfApp {
             this.convertBtn.classList.add('hidden');
             this.progressContainer.classList.remove('hidden');
             this.hideError();
+            this.clearNotes();
 
             // Update progress: Parsing
             this.updateProgress(20, 'progress.parsing');
@@ -161,9 +176,10 @@ class WordToUdfApp {
             this.updateProgress(100, 'progress.complete');
             await sleep(500);
 
-            // Show download section
+            // Show download section, with notes on what the conversion dropped or simplified
             this.progressContainer.classList.add('hidden');
             this.fileInfo.classList.add('hidden');
+            this.showNotes(document.findings || []);
             this.downloadSection.classList.remove('hidden');
 
         } catch (error) {
@@ -202,7 +218,61 @@ class WordToUdfApp {
         this.convertBtn.classList.remove('hidden');
         this.convertBtn.disabled = true;
         this.progressFill.style.width = '0%';
+        this.clearNotes();
         this.hideError();
+    }
+
+    /**
+     * List the parser's findings under the download button; hidden when there are none.
+     * Examples are document text, so they only ever go in through textContent.
+     * @param {Array<{code: string, count: number, examples: Array<string>}>} findings
+     */
+    showNotes(findings) {
+        this.clearNotes();
+        const known = findings.filter(finding => Object.prototype.hasOwnProperty.call(FINDING_KEYS, finding.code));
+        if (known.length === 0) return;
+
+        for (const { code, count, examples } of known) {
+            const item = document.createElement('li');
+            item.className = 'conversion-note';
+            item.dataset.code = code;
+
+            const message = document.createElement('p');
+            message.className = 'conversion-note-text';
+            setTranslatedText(message, FINDING_KEYS[code]);
+            item.appendChild(message);
+
+            if (count > 1) {
+                const countLine = document.createElement('p');
+                countLine.className = 'conversion-note-count';
+                setTranslatedText(countLine, 'notes.count', { count });
+                item.appendChild(countLine);
+            }
+
+            if (examples.length > 0) {
+                const label = document.createElement('p');
+                label.className = 'conversion-note-examples-label';
+                setTranslatedText(label, 'notes.examples');
+                item.appendChild(label);
+
+                const list = document.createElement('ul');
+                list.className = 'conversion-note-examples';
+                for (const example of examples) {
+                    const entry = document.createElement('li');
+                    entry.textContent = QUOTED_EXAMPLE_CODES.includes(code) ? `“${example}”` : example;
+                    list.appendChild(entry);
+                }
+                item.appendChild(list);
+            }
+
+            this.conversionNotesList.appendChild(item);
+        }
+        this.conversionNotes.classList.remove('hidden');
+    }
+
+    clearNotes() {
+        this.conversionNotesList.replaceChildren();
+        this.conversionNotes.classList.add('hidden');
     }
 
     showError(messageKey) {
