@@ -36,6 +36,9 @@ const POINTS_PER_UNIT = { mm: 72 / 25.4, cm: 72 / 2.54, in: 72, pt: 1, pc: 12, p
 // Note types (w:type) of a footnote or endnote that are Word's separator lines, not note text
 const SEPARATOR_NOTE_TYPES = ['separator', 'continuationSeparator', 'continuationNotice'];
 
+// Run children of a footnote or endnote that stand for whitespace: a tab or a line break
+const NOTE_WHITESPACE_ELEMENTS = ['tab', 'br', 'cr'];
+
 // Endnote number formats (w:endnotePr/w:numFmt) the generator can write. Word numbers
 // endnotes in lower-case Roman numerals unless the document says otherwise.
 const ENDNOTE_FORMATS = ['decimal', 'lowerRoman', 'upperRoman', 'lowerLetter', 'upperLetter'];
@@ -581,7 +584,9 @@ class DocxParser {
     }
 
     /**
-     * Plain text of a footnote or endnote: the text of its runs, one space between paragraphs
+     * Plain text of a footnote or endnote: the text of its runs in document order, with one
+     * space between paragraphs. A tab (w:tab) or line break (w:br, w:cr) in a run becomes a
+     * space, so the words on either side of it stay apart.
      * @param {Element} note - The w:footnote or w:endnote element
      * @returns {string}
      */
@@ -589,8 +594,12 @@ class DocxParser {
         let text = '';
         for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
             for (const run of para.getElementsByTagNameNS(WORD_NS, 'r')) {
-                for (const t of run.getElementsByTagNameNS(WORD_NS, 't')) {
-                    text += t.textContent || '';
+                for (const child of run.getElementsByTagNameNS(WORD_NS, '*')) {
+                    if (child.localName === 't') {
+                        text += child.textContent || '';
+                    } else if (NOTE_WHITESPACE_ELEMENTS.includes(child.localName) && child.parentNode === run) {
+                        text += ' ';
+                    }
                 }
             }
             text += ' ';

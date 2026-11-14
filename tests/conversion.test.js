@@ -418,6 +418,30 @@ test('an endnote reference in a table cell is numbered and its text appended aft
     assert.equal(content, `CelliOtherAfterii\n${SEPARATOR}i. In a cellii. In the body`);
 });
 
+test('a tab or line break inside a note becomes a space instead of joining the words around it', async () => {
+    const noteWith = (ref, inner) => p(`<w:r><w:${ref}/></w:r><w:r><w:tab/><w:t>Source A</w:t>${inner}<w:t>Source B</w:t></w:r>`);
+    for (const inner of ['<w:br/>', '<w:cr/>', '<w:tab/>', '</w:r><w:r><w:br/></w:r><w:r>']) {
+        const { parsed, content } = await convertBody(
+            p(run('A') + footnoteRef(1) + run('B') + endnoteRef(1)),
+            {
+                footnotes: { 1: noteWith('footnoteRef', inner) },
+                endnotes: { 1: noteWith('endnoteRef', inner) }
+            });
+
+        assert.equal(parsed.footnotes[1], 'Source A Source B', inner);
+        assert.equal(parsed.endnotes[1], 'Source A Source B', inner);
+        assert.equal(content, `A1Bi\n${SEPARATOR}1. Source A Source B\n${SEPARATOR}i. Source A Source B`, inner);
+    }
+});
+
+test('tab stops of a paragraph inside a note add no text', async () => {
+    const { parsed } = await convertBody(
+        p(run('A') + endnoteRef(1)),
+        { endnotes: { 1: '<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr><w:r><w:endnoteRef/></w:r><w:r><w:t>One</w:t></w:r></w:p>' + p(run('Two')) } });
+
+    assert.equal(parsed.endnotes[1], 'One Two');
+});
+
 test('separator notes never show up, and a reference to a missing endnote adds nothing', async () => {
     const zip = await JSZip.loadAsync(await buildDocx(
         p(run('A') + endnoteRef(-1) + endnoteRef(0) + endnoteRef(2) + endnoteRef(99) + run('B') + endnoteRef(1)),

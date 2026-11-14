@@ -124,7 +124,7 @@ The notes only report: the converted `.udf` is the same with or without them.
 - Password-protected documents and `.doc` files are not converted: remove the password, or save the file as `.docx`, in Word first
 - Track changes / comments are not preserved (inserted text is kept, deleted text is dropped)
 - Headers/footers not yet implemented
-- Footnote and endnote text is converted as plain text, without its formatting. All endnotes go at the end of the document, even when Word places them at the end of each section, and they are always numbered from the start
+- Footnote and endnote text is converted as plain text, without its formatting; a tab or line break inside a note becomes a space. All endnotes go at the end of the document, even when Word places them at the end of each section, and they are always numbered from the start
 - Exact and at-least line heights, automatic paragraph spacing and contextual spacing are not converted (see Paragraph spacing)
 
 ## License
