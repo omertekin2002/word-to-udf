@@ -11,6 +11,7 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 - 🖼️ **Images**: Embeds images as base64
 - 📐 **Page Setup**: Keeps the page margins, orientation and header/footer offsets
 - ↕️ **Spacing**: Keeps the space before and after paragraphs and their line spacing
+- ⇥ **Tab stops**: Keeps a paragraph's custom tab stops (left, center, right and decimal, with dot or dash leaders), so lines like `DAVACI : Ad Soyad` stay aligned
 - 🔢 **Lists**: Keeps numbered and bulleted lists, including lists that come from a paragraph style (such as numbered headings)
 - 📝 **Footnotes and endnotes**: Keeps the reference marks as superscript numbers and the note text. Footnotes are placed before the next manual page break, or at the end; endnotes are moved to the end of the document, after a separator line, numbered the way the document numbers them (`i`, `ii`, ... by default)
 - 🇹🇷 **Turkish UI**: The page is in Turkish by default, with a TR | EN toggle for English (or open it with `?lang=en`)
@@ -85,6 +86,15 @@ Paragraph spacing (`w:spacing`) is read from the document defaults, the paragrap
 - Attributes that would be zero, or single (or tighter) line spacing, are left out.
 - Exact and at-least line heights (`w:lineRule="exact"` / `"atLeast"`) have no UDF equivalent, so those paragraphs get single spacing.
 - Automatic spacing (`w:beforeAutospacing`, `w:afterAutospacing`), `w:contextualSpacing` and spacing in lines (`w:beforeLines`, `w:afterLines`) are ignored.
+
+### Tab stops
+A paragraph's tab stops come from `w:tabs` in `w:docDefaults`, the paragraph style and its `w:basedOn` chain, and the paragraph itself. Each layer adds to the stops it inherits: a stop replaces any inherited stop at the same position, and `w:val="clear"` removes the inherited stop at its position. The result is written as the paragraph's `TabSet` attribute, `position:alignment:leader` per stop, comma-separated and in position order, with positions in points to one decimal: `w:pos="1985"` and `w:pos="2268"` become `TabSet="99.3:0:0,113.4:0:0"`.
+- Alignment: `left`, `start` and `num` are `0`, `center` is `1`, `right` and `end` are `2`, `decimal` is `3`.
+- Leader: `dot` and `middleDot` are `1`, `hyphen` is `2`; `none`, `underscore`, `heavy` or no leader are `0`.
+- `bar` stops (a vertical line, not a text position) and stops with an unreadable or negative position are dropped. A paragraph left with no stops gets no `TabSet`.
+- Paragraphs in table cells get their stops the same way.
+- Positions are written as Word measures them, from the left margin. Whether the UYAP editor measures `TabSet` positions from the margin or from the paragraph's left indent is not documented and has not been checked in the official editor, so stops in indented paragraphs may land elsewhere there.
+- The document's default tab interval (`w:defaultTabStop`), the implicit stop Word adds at a hanging indent, and tab stops in footnote and endnote text are not converted.
 
 ### Lists
 A paragraph's list comes from `w:numPr`, read from the paragraph style and its `w:basedOn` chain and from the paragraph itself, each attribute on its own: a numbered paragraph style gives the list (`w:numId`) and level (`w:ilvl`), and the paragraph can set just its own `w:ilvl` to move to another level of that list, or just its own `w:numId`.

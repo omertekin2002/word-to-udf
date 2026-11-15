@@ -45,6 +45,13 @@ const ENDNOTE_FORMATS = ['decimal', 'lowerRoman', 'upperRoman', 'lowerLetter', '
 const DEFAULT_ENDNOTE_FORMAT = 'lowerRoman';
 
 // Signature of an OLE compound file: a Word 97-2003 .doc, or a password-protected .docx
+// UDF TabSet alignment codes for Word's w:tab w:val (left, center, right, decimal).
+// A num stop is a left stop; a bar stop draws a line and positions no text, so it isn't listed.
+const TAB_ALIGNMENTS = { left: 0, start: 0, num: 0, center: 1, right: 2, end: 2, decimal: 3 };
+
+// UDF TabSet leader codes for Word's w:tab w:leader; anything else (none, underscore, heavy) is no leader
+const TAB_LEADERS = { dot: 1, middleDot: 1, hyphen: 2 };
+
 const COMPOUND_FILE_SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 // Name of the stream an encrypted OOXML package keeps its encryption parameters in (MS-OFFCRYPTO 2.3.4)
@@ -846,9 +853,16 @@ class DocxParser {
                 chain.unshift(definitions.get(id));
             }
 
+            const paragraph = Object.assign({}, ...chain.map(style => style.paragraph));
+            // Tab stops add to and clear the inherited ones instead of replacing them, so the
+            // chain's tab operations are all kept, outermost style first
+            const tabs = chain.flatMap(style => style.paragraph.tabs || []);
+            if (tabs.length > 0) paragraph.tabs = tabs;
+            else delete paragraph.tabs;
+
             resolved.set(styleId, {
                 run: Object.assign({}, ...chain.map(style => style.run)),
-                paragraph: Object.assign({}, ...chain.map(style => style.paragraph)),
+                paragraph,
                 numPr: Object.assign({}, ...chain.map(style => style.numPr))
             });
         }
@@ -942,7 +956,55 @@ class DocxParser {
             if (spacing.getAttribute('w:lineRule')) props.lineRule = spacing.getAttribute('w:lineRule');
         }
 
+        const tabs = this.readTabs(childElement(pPr, 'tabs'));
+        if (tabs.length > 0) props.tabs = tabs;
+
         return props;
+    }
+
+    /**
+     * Read the tab stop operations of a w:tabs: each w:tab adds a stop, or with
+     * w:val="clear" removes the inherited stop at its position (see resolveTabStops).
+     * Bar stops and stops with an unreadable or negative position are left out.
+     * @param {Element|null} tabs - The w:tabs element
+     * @returns {Array<{position: number, clear?: true, alignment?: number, leader?: number}>}
+     *   Positions in points, to a tenth
+     */
+    readTabs(tabs) {
+        const operations = [];
+        for (const tab of tabs ? childElements(tabs, 'tab') : []) {
+            const points = this.measureToPoints(tab.getAttribute('w:pos'));
+            if (points === null || !Number.isFinite(points) || points < 0) continue;
+            const position = Math.round(points * 10) / 10;
+
+            const val = tab.getAttribute('w:val');
+            if (val === 'clear') {
+                operations.push({ position, clear: true });
+            } else if (Object.hasOwn(TAB_ALIGNMENTS, val)) {
+                const leader = tab.getAttribute('w:leader');
+                operations.push({
+                    position,
+                    alignment: TAB_ALIGNMENTS[val],
+                    leader: Object.hasOwn(TAB_LEADERS, leader) ? TAB_LEADERS[leader] : 0
+                });
+            }
+        }
+        return operations;
+    }
+
+    /**
+     * Apply tab stop operations in order: a stop replaces any stop at its position,
+     * and a clear removes it
+     * @param {Array<Object>} operations - See readTabs, outermost layer first
+     * @returns {Array<{position: number, alignment: number, leader: number}>} Sorted by position
+     */
+    resolveTabStops(operations) {
+        const stops = new Map();
+        for (const { position, clear, alignment, leader } of operations) {
+            if (clear) stops.delete(position);
+            else stops.set(position, { position, alignment, leader });
+        }
+        return [...stops.values()].sort((a, b) => a.position - b.position);
     }
 
     /**
@@ -1146,8 +1208,15 @@ class DocxParser {
         // Alignment, indents and spacing: document defaults, the paragraph style chain, then the paragraph's own w:pPr
         const pPr = childElement(para, 'pPr');
         const style = this.paragraphStyle(pPr);
-        Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, this.readParagraphProperties(pPr));
+        const own = this.readParagraphProperties(pPr);
+        Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, own);
         paragraph.lineSpacing = this.lineSpacing(paragraph);
+
+        // Tab stops: each layer adds to or clears the stops of the layers under it
+        delete paragraph.tabs;
+        const tabStops = this.resolveTabStops([this.styles.defaults.paragraph, style.paragraph, own]
+            .flatMap(layer => layer.tabs || []));
+        if (tabStops.length > 0) paragraph.tabStops = tabStops;
 
         // Numbering: the paragraph style chain, then the paragraph's own w:numPr, each value
         // on its own. numId 0 switches numbering off, and a missing w:ilvl means level 0.
