@@ -52,6 +52,12 @@ const TAB_ALIGNMENTS = { left: 0, start: 0, num: 0, center: 1, right: 2, end: 2,
 // UDF TabSet leader codes for Word's w:tab w:leader; anything else (none, underscore, heavy) is no leader
 const TAB_LEADERS = { dot: 1, middleDot: 1, hyphen: 2 };
 
+// Word leaders that are drawn, but have no UDF code, so they become no leader
+const LOST_TAB_LEADERS = ['underscore', 'heavy'];
+
+// Line rules (w:spacing w:lineRule) lineSpacing() can't express, so their paragraphs get single spacing
+const LOST_LINE_RULES = ['exact', 'atLeast'];
+
 const COMPOUND_FILE_SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 // Name of the stream an encrypted OOXML package keeps its encryption parameters in (MS-OFFCRYPTO 2.3.4)
@@ -83,7 +89,8 @@ const PARSE_FAILURES = {
 
 // Codes of the conversion findings parse() reports, in the order it lists them: content the
 // conversion drops or simplifies, so the user can fix it in Word before filing
-const FINDING_CODES = ['headersFooters', 'comments', 'nestedTables', 'missingImage', 'unsupportedImage'];
+const FINDING_CODES = ['headersFooters', 'comments', 'nestedTables', 'missingImage', 'unsupportedImage',
+    'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
 
 // How many location hints a finding keeps, and how long each may be
 const MAX_FINDING_EXAMPLES = 3;
@@ -284,6 +291,7 @@ class DocxParser {
         this.styles = this.emptyStyles();
         this.findings = {};
         this.documentParagraphs = null;
+        this.endnotesMoved = false;
     }
 
     /**
@@ -303,6 +311,7 @@ class DocxParser {
             this.styles = this.emptyStyles();
             this.findings = {};
             this.documentParagraphs = null;
+            this.endnotesMoved = false;
 
             // A compound file is not a ZIP: name why it can't be read instead of a generic failure
             await this.rejectCompoundFile(file);
@@ -348,6 +357,10 @@ class DocxParser {
             // Header and footer text and comments are never converted; note them
             await this.detectHeadersFooters();
             await this.detectComments();
+
+            // Whether converting moves endnotes Word places per section or renumbers;
+            // each converted endnote reference then gets a finding
+            this.endnotesMoved = await this.endnotesAreMoved();
 
             // Extract document elements
             const elements = await this.extractElements();
@@ -631,6 +644,43 @@ class DocxParser {
         const format = numFmt(body && childElements(body, 'sectPr').pop()) ?? numFmt(await this.settingsRoot());
         if (format === null) return DEFAULT_ENDNOTE_FORMAT;
         return ENDNOTE_FORMATS.includes(format) ? format : 'decimal';
+    }
+
+    /**
+     * Whether the converted endnotes end up somewhere other than Word puts them, or numbered
+     * differently. The generator writes every endnote at the end of the document, numbered from
+     * the start. That changes a document with more than one section that places endnotes at the
+     * end of each section (w:endnotePr/w:pos "sectEnd") or restarts their numbering at each
+     * section (w:numRestart "eachSect"), and any document that restarts them at each page.
+     * Each section's w:endnotePr is read from its w:sectPr, then from the settings part.
+     * @returns {Promise<boolean>} false for Word's default: at the end of the document, numbered continuously
+     */
+    async endnotesAreMoved() {
+        const body = this.document.getElementsByTagNameNS(WORD_NS, 'body')[0];
+        if (!body) return false;
+
+        // A section break is a w:sectPr in a body paragraph's w:pPr; the last section's
+        // w:sectPr is the body's own, and the section still exists without one
+        const breaks = Array.from(body.getElementsByTagNameNS(WORD_NS, 'sectPr')).filter(sectPr => {
+            const pPr = sectPr.parentElement;
+            return pPr && pPr.namespaceURI === WORD_NS && pPr.localName === 'pPr' &&
+                pPr.parentElement && pPr.parentElement.namespaceURI === WORD_NS && pPr.parentElement.localName === 'p';
+        });
+        const sections = [...breaks, childElements(body, 'sectPr').pop() || null];
+
+        const value = (parent, name) => {
+            const endnotePr = parent && childElement(parent, 'endnotePr');
+            const property = endnotePr && childElement(endnotePr, name);
+            return property && property.hasAttribute('w:val') ? property.getAttribute('w:val') : null;
+        };
+        const settings = await this.settingsRoot();
+        const effective = (sectPr, name, fallback) => value(sectPr, name) ?? value(settings, name) ?? fallback;
+
+        return sections.some(sectPr => {
+            const restart = effective(sectPr, 'numRestart', 'continuous');
+            if (restart === 'eachPage') return true;
+            return sections.length > 1 && (effective(sectPr, 'pos', 'docEnd') === 'sectEnd' || restart === 'eachSect');
+        });
     }
 
     /**
@@ -965,10 +1015,12 @@ class DocxParser {
     /**
      * Read the tab stop operations of a w:tabs: each w:tab adds a stop, or with
      * w:val="clear" removes the inherited stop at its position (see resolveTabStops).
-     * Bar stops and stops with an unreadable or negative position are left out.
+     * A bar stop is kept as { position, bar: true }, which converts to no stop, and a stop
+     * whose leader has no UDF code is marked lostLeader, for lostTabStops. Stops with an
+     * unreadable or negative position, or an unknown w:val, are left out.
      * @param {Element|null} tabs - The w:tabs element
-     * @returns {Array<{position: number, clear?: true, alignment?: number, leader?: number}>}
-     *   Positions in points, to a tenth
+     * @returns {Array<{position: number, clear?: true, bar?: true, alignment?: number, leader?: number,
+     *   lostLeader?: true}>} Positions in points, to a tenth
      */
     readTabs(tabs) {
         const operations = [];
@@ -980,13 +1032,17 @@ class DocxParser {
             const val = tab.getAttribute('w:val');
             if (val === 'clear') {
                 operations.push({ position, clear: true });
+            } else if (val === 'bar') {
+                operations.push({ position, bar: true });
             } else if (Object.hasOwn(TAB_ALIGNMENTS, val)) {
                 const leader = tab.getAttribute('w:leader');
-                operations.push({
+                const operation = {
                     position,
                     alignment: TAB_ALIGNMENTS[val],
                     leader: Object.hasOwn(TAB_LEADERS, leader) ? TAB_LEADERS[leader] : 0
-                });
+                };
+                if (LOST_TAB_LEADERS.includes(leader)) operation.lostLeader = true;
+                operations.push(operation);
             }
         }
         return operations;
@@ -994,17 +1050,34 @@ class DocxParser {
 
     /**
      * Apply tab stop operations in order: a stop replaces any stop at its position,
-     * and a clear removes it
+     * and a clear removes it. Bar stops position no text and are not converted.
      * @param {Array<Object>} operations - See readTabs, outermost layer first
      * @returns {Array<{position: number, alignment: number, leader: number}>} Sorted by position
      */
     resolveTabStops(operations) {
         const stops = new Map();
-        for (const { position, clear, alignment, leader } of operations) {
+        for (const { position, clear, bar, alignment, leader } of operations) {
+            if (bar) continue;
             if (clear) stops.delete(position);
             else stops.set(position, { position, alignment, leader });
         }
         return [...stops.values()].sort((a, b) => a.position - b.position);
+    }
+
+    /**
+     * Whether the tab stops a paragraph ends up with include one the conversion loses: a bar
+     * stop, or a stop with an underscore or heavy leader. Layers apply as in Word: a later stop
+     * at the same position replaces it, and a clear removes it.
+     * @param {Array<Object>} operations - See readTabs, outermost layer first
+     * @returns {boolean}
+     */
+    hasLostTabStops(operations) {
+        const lost = new Set();
+        for (const { position, clear, bar, lostLeader } of operations) {
+            if (!clear && (bar || lostLeader)) lost.add(position);
+            else lost.delete(position);
+        }
+        return lost.size > 0;
     }
 
     /**
@@ -1214,8 +1287,8 @@ class DocxParser {
 
         // Tab stops: each layer adds to or clears the stops of the layers under it
         delete paragraph.tabs;
-        const tabStops = this.resolveTabStops([this.styles.defaults.paragraph, style.paragraph, own]
-            .flatMap(layer => layer.tabs || []));
+        const tabOperations = [this.styles.defaults.paragraph, style.paragraph, own].flatMap(layer => layer.tabs || []);
+        const tabStops = this.resolveTabStops(tabOperations);
         if (tabStops.length > 0) paragraph.tabStops = tabStops;
 
         // Numbering: the paragraph style chain, then the paragraph's own w:numPr, each value
@@ -1235,6 +1308,14 @@ class DocxParser {
         // Get runs (text with formatting)
         for (const run of runs) {
             paragraph.runs.push(...this.parseRun(run, style.run));
+        }
+
+        // Line heights and tab stops the conversion loses, with the paragraph's text as the hint
+        if (LOST_LINE_RULES.includes(paragraph.lineRule)) {
+            this.addFinding('lineSpacing', shortExample(paragraphText(paragraph)));
+        }
+        if (this.hasLostTabStops(tabOperations)) {
+            this.addFinding('tabStops', shortExample(paragraphText(paragraph)));
         }
 
         return paragraph;
@@ -1281,6 +1362,9 @@ class DocxParser {
                         id: id,
                         content: notes[id] || `[Empty ${kind}]`
                     });
+                    // Footnotes always leave their page; endnotes only when Word places or numbers them per section
+                    if (kind === 'footnote') this.addFinding('notesMoved', shortExample(notes[id]));
+                    else if (this.endnotesMoved) this.addFinding('endnotesMoved', shortExample(notes[id]));
                 }
             } else if (localName !== 'rPr') {
                 // w:drawing, or a drawing wrapped in mc:AlternateContent
