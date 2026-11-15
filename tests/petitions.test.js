@@ -146,6 +146,8 @@ test('dava dilekçesi: heading, party block, footnotes and signature keep their 
         const el = elementWithText(doc, content, label);
         assert.equal(el.getAttribute('bold'), 'true', label);
         assert.equal(el.closest('paragraph').querySelectorAll('tab').length, 2, `${label} line keeps its tabs`);
+        // PARTY_TABS: left stops at 1985 and 2268 twips line up the colon and the value
+        assert.equal(el.closest('paragraph').getAttribute('TabSet'), '99.3:0:0,113.4:0:0', `${label} line keeps its tab stops`);
     }
 
     for (const number of ['1', '2']) {

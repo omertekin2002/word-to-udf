@@ -309,6 +309,12 @@ class UdfGenerator {
             attrs += ` LineSpacing="${decimal(extraLineSpacing)}"`;
         }
 
+        // Tab stops as position:alignment:leader, positions in points from the left margin
+        if (paragraph.tabStops && paragraph.tabStops.length > 0) {
+            const stops = paragraph.tabStops.map(stop => `${stop.position.toFixed(1)}:${stop.alignment}:${stop.leader}`);
+            attrs += ` TabSet="${stops.join(',')}"`;
+        }
+
         // Handle numbering/bullets
         if (paragraph.numbering) {
             attrs += this.buildListAttrs(paragraph.numbering);
