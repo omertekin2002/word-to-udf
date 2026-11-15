@@ -17,11 +17,15 @@ const FINDING_KEYS = {
     comments: 'notes.comments',
     nestedTables: 'notes.nestedTables',
     missingImage: 'notes.missingImage',
-    unsupportedImage: 'notes.unsupportedImage'
+    unsupportedImage: 'notes.unsupportedImage',
+    notesMoved: 'notes.notesMoved',
+    endnotesMoved: 'notes.endnotesMoved',
+    lineSpacing: 'notes.lineSpacing',
+    tabStops: 'notes.tabStops'
 };
 
 // Findings whose examples are document text, shown in quotes; the others are format names
-const QUOTED_EXAMPLE_CODES = ['nestedTables', 'missingImage'];
+const QUOTED_EXAMPLE_CODES = ['nestedTables', 'missingImage', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
 
 class WordToUdfApp {
     constructor() {

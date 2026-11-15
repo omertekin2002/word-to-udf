@@ -84,14 +84,14 @@ Paragraph spacing (`w:spacing`) is read from the document defaults, the paragrap
 - `w:before` and `w:after` become `SpaceAbove` and `SpaceBelow`, in points.
 - `w:line` with `w:lineRule="auto"` (or no rule) becomes `LineSpacing`, the extra fraction over single spacing, to two decimals: `276` (1.15 lines) is `0.15`, `360` (1.5 lines) is `0.5`, `480` (double) is `1.0`.
 - Attributes that would be zero, or single (or tighter) line spacing, are left out.
-- Exact and at-least line heights (`w:lineRule="exact"` / `"atLeast"`) have no UDF equivalent, so those paragraphs get single spacing.
+- Exact and at-least line heights (`w:lineRule="exact"` / `"atLeast"`) have no UDF equivalent, so those paragraphs get single spacing, and the page reports them as a `lineSpacing` conversion note.
 - Automatic spacing (`w:beforeAutospacing`, `w:afterAutospacing`), `w:contextualSpacing` and spacing in lines (`w:beforeLines`, `w:afterLines`) are ignored.
 
 ### Tab stops
 A paragraph's tab stops come from `w:tabs` in `w:docDefaults`, the paragraph style and its `w:basedOn` chain, and the paragraph itself. Each layer adds to the stops it inherits: a stop replaces any inherited stop at the same position, and `w:val="clear"` removes the inherited stop at its position. The result is written as the paragraph's `TabSet` attribute, `position:alignment:leader` per stop, comma-separated and in position order, with positions in points to one decimal: `w:pos="1985"` and `w:pos="2268"` become `TabSet="99.3:0:0,113.4:0:0"`.
 - Alignment: `left`, `start` and `num` are `0`, `center` is `1`, `right` and `end` are `2`, `decimal` is `3`.
 - Leader: `dot` and `middleDot` are `1`, `hyphen` is `2`; `none`, `underscore`, `heavy` or no leader are `0`.
-- `bar` stops (a vertical line, not a text position) and stops with an unreadable or negative position are dropped. A paragraph left with no stops gets no `TabSet`.
+- `bar` stops (a vertical line, not a text position) and stops with an unreadable or negative position are dropped. A paragraph left with no stops gets no `TabSet`. A paragraph that ends up with a `bar` stop, or with an `underscore` or `heavy` leader, gets a `tabStops` conversion note.
 - Paragraphs in table cells get their stops the same way.
 - Positions are written as Word measures them, from the left margin. Whether the UYAP editor measures `TabSet` positions from the margin or from the paragraph's left indent is not documented and has not been checked in the official editor, so stops in indented paragraphs may land elsewhere there.
 - The document's default tab interval (`w:defaultTabStop`), the implicit stop Word adds at a hanging indent, and tab stops in footnote and endnote text are not converted.
@@ -117,6 +117,10 @@ A paragraph's list comes from `w:numPr`, read from the paragraph style and its `
 | `nestedTables` | A table inside a table cell is flattened into that cell. | The start of the nested table's first non-empty paragraph |
 | `missingImage` | A picture's relationship or media part is missing, so it is skipped. | The text of the nearest paragraph |
 | `unsupportedImage` | A picture's data is not PNG or JPEG, judged by its leading bytes, not its file extension. It is still embedded as-is. | The format: `EMF`, `WMF`, `GIF`, `TIFF`, `SVG` or `unknown` |
+| `notesMoved` | A footnote reference is converted: its note is written as plain text before the next manual page break or at the end, not at the bottom of its page. Counted per reference. | The start of the note text |
+| `endnotesMoved` | An endnote reference is converted in a document whose endnotes Word would place or number differently: at the end of each section (`w:endnotePr/w:pos w:val="sectEnd"`) or restarted at each section (`w:numRestart w:val="eachSect"`) when there is more than one section, or restarted at each page. Each section's `w:endnotePr` is read from its `w:sectPr`, then from `word/settings.xml`. Endnotes at the end of the document with continuous numbering, Word's default, are not reported. Counted per reference. | The start of the note text |
+| `lineSpacing` | A converted paragraph's line rule, resolved from `w:docDefaults`, the paragraph style chain and the paragraph itself, is `exact` or `atLeast`, so it gets single spacing. Counted per paragraph, table cells included. | The start of the paragraph's text |
+| `tabStops` | A converted paragraph's resolved tab stops include a `bar` stop, or a stop with an `underscore` or `heavy` leader, which becomes no leader. A stop the paragraph clears or replaces doesn't count. Counted per paragraph. | The start of the paragraph's text |
 
 The notes only report: the converted `.udf` is the same with or without them.
 
@@ -134,8 +138,9 @@ The notes only report: the converted `.udf` is the same with or without them.
 - Password-protected documents and `.doc` files are not converted: remove the password, or save the file as `.docx`, in Word first
 - Track changes / comments are not preserved (inserted text is kept, deleted text is dropped)
 - Headers/footers not yet implemented
-- Footnote and endnote text is converted as plain text, without its formatting; a tab or line break inside a note becomes a space. All endnotes go at the end of the document, even when Word places them at the end of each section, and they are always numbered from the start
-- Exact and at-least line heights, automatic paragraph spacing and contextual spacing are not converted (see Paragraph spacing)
+- Footnote and endnote text is converted as plain text, without its formatting; a tab or line break inside a note becomes a space. All endnotes go at the end of the document, even when Word places them at the end of each section, and they are always numbered from the start. Footnotes and such endnotes are listed in the conversion notes
+- Exact and at-least line heights, automatic paragraph spacing and contextual spacing are not converted (see Paragraph spacing); exact and at-least line heights are listed in the conversion notes
+- Bar tab stops and underscore or heavy tab leaders are not converted (see Tab stops), and are listed in the conversion notes
 
 ## License
 
