@@ -131,6 +131,8 @@ A paragraph's list comes from `w:numPr`, read from the paragraph style and its `
 | `lineSpacing` | A converted paragraph's line rule, resolved from `w:docDefaults`, the paragraph style chain and the paragraph itself, is `exact` or `atLeast`, so it gets single spacing. Counted per paragraph, table cells included. | The start of the paragraph's text |
 | `tabStops` | A converted paragraph's resolved tab stops include a `bar` stop, or a stop with an `underscore` or `heavy` leader, which becomes no leader. A stop the paragraph clears or replaces doesn't count. Counted per paragraph. | The start of the paragraph's text |
 
+`lineSpacing` and `tabStops` count the paragraphs that are written as paragraphs. A body paragraph that holds only manual page breaks becomes the page breaks alone, so it is not counted; in a table cell a page break is a line break, and such a paragraph is written and counted. Nothing is reported for the content of a cell that continues a vertical merge, which is written empty.
+
 The notes only report: the converted `.udf` is the same with or without them.
 
 ### Conversion Pipeline

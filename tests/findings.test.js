@@ -492,6 +492,109 @@ test('a nested table is flattened with its joined cells, so their findings count
     ]);
 });
 
+const pageBreak = '<w:r><w:br w:type="page"/></w:r>';
+// A paragraph of these runs with an exact line height, a bar stop and a left stop: converted, it
+// gives one lineSpacing and one tabStops finding and is written with TabSet="72.0:0:0"
+const lossyRuns = runs => `<w:p><w:pPr>${spacing('exact') + tabsOf(stop('bar', 720), stop('left', 1440))}</w:pPr>${runs}</w:p>`;
+const writtenLossy = doc => doc.querySelectorAll('elements paragraph[TabSet="72.0:0:0"]').length;
+const topLevel = doc => [...doc.querySelector('elements').children].map(el => el.localName);
+
+test('a body paragraph holding only a page break is written as the break alone, and gives no findings', async () => {
+    const { parsed, doc } = await convert(await buildDocx(
+        p(r('Önce')) + lossyRuns(pageBreak) + p(r('Arada')) + lossyRuns(pageBreak + pageBreak) + p(r('Sonra'))));
+
+    assert.deepEqual(topLevel(doc), ['paragraph', 'page-break', 'paragraph', 'page-break', 'page-break', 'paragraph']);
+    assert.equal(writtenLossy(doc), 0);
+    assert.deepEqual(plain(parsed.findings), []);
+});
+
+test('a picture that is skipped does not make a page-break paragraph a written one', async () => {
+    const { parsed, doc } = await convert(await buildDocx(p(r('Önce')) + lossyRuns(picture('rId_yok') + pageBreak)));
+
+    assert.deepEqual(topLevel(doc), ['paragraph', 'page-break']);
+    // The picture is still reported as skipped, with the nearest text
+    assert.deepEqual(plain(parsed.findings), [{ code: 'missingImage', count: 1, examples: ['Önce'] }]);
+});
+
+test('a paragraph with text before or after its page break is written, and counted once', async () => {
+    const { parsed, doc } = await convert(await buildDocx(
+        lossyRuns(r('Kesmeden önce') + pageBreak) + lossyRuns(pageBreak + r('Kesmeden sonra')) +
+        lossyRuns(r('İki') + pageBreak + r('yanında'))));
+
+    assert.equal(writtenLossy(doc), 4, 'the paragraph split in two is written as two');
+    assert.deepEqual(plain(parsed.findings), [
+        { code: 'lineSpacing', count: 3, examples: ['Kesmeden önce', 'Kesmeden sonra', 'İkiyanında'] },
+        { code: 'tabStops', count: 3, examples: ['Kesmeden önce', 'Kesmeden sonra', 'İkiyanında'] }
+    ]);
+});
+
+test('in a table cell a page break is a line break, so a paragraph holding only one is written and counted', async () => {
+    const { parsed, doc } = await convert(await buildDocx(tbl([[lossyRuns(pageBreak), p(r('Yan hücre'))]])));
+
+    assert.equal(doc.querySelector('elements page-break'), null);
+    assert.equal(writtenLossy(doc), 1);
+    assert.deepEqual(plain(parsed.findings), [
+        { code: 'lineSpacing', count: 1, examples: [] },
+        { code: 'tabStops', count: 1, examples: [] }
+    ]);
+});
+
+test('a text box paragraph in the body follows the body rule, one in a cell the cell rule', async () => {
+    const textBox = inner => '<w:r><w:drawing><wp:anchor><wp:extent cx="914400" cy="457200"/>' +
+        '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
+        `<wps:wsp><wps:txbx><w:txbxContent>${inner}</w:txbxContent></wps:txbx></wps:wsp>` +
+        '</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+
+    const inBody = await convert(await buildDocx(p(r('Çapa') + textBox(lossyRuns(pageBreak)))));
+    assert.equal(writtenLossy(inBody.doc), 0);
+    assert.deepEqual(plain(inBody.parsed.findings), []);
+
+    const inCell = await convert(await buildDocx(tbl([[p(r('Çapa') + textBox(lossyRuns(pageBreak)))]])));
+    assert.equal(writtenLossy(inCell.doc), 1);
+    assert.deepEqual(plain(inCell.parsed.findings).map(finding => [finding.code, finding.count]),
+        [['lineSpacing', 1], ['tabStops', 1]]);
+});
+
+// Every kind of item a run can hold, and whether it puts something in the converted text
+const RUN_ITEMS = {
+    text: [r('Metin'), true],
+    emptyText: ['<w:r><w:t></w:t></w:r>', false],
+    tab: ['<w:r><w:tab/></w:r>', true],
+    lineBreak: ['<w:r><w:br/></w:r>', true],
+    carriageReturn: ['<w:r><w:cr/></w:r>', true],
+    picture: [picture(), true],
+    missingPicture: [picture('rId_yok'), false],
+    footnote: [footnoteRef(1), true],
+    endnote: [endnoteRef(1), true]
+};
+
+test('lineSpacing and tabStops are recorded for exactly the paragraphs the generator writes', async () => {
+    const cases = [[], ['pageBreak'], ['pageBreak', 'pageBreak']];
+    for (const name of Object.keys(RUN_ITEMS)) {
+        cases.push([name], [name, 'pageBreak'], ['pageBreak', name], ['pageBreak', name, 'pageBreak']);
+    }
+
+    for (const context of ['body', 'cell']) {
+        for (const names of cases) {
+            const label = `${context}: [${names.join(', ')}]`;
+            const paragraph = lossyRuns(names.map(name => (name === 'pageBreak' ? pageBreak : RUN_ITEMS[name][0])).join(''));
+            const { parsed, doc } = await convert(await buildDocx(context === 'cell' ? tbl([[paragraph]]) : paragraph, {
+                footnotes: { 1: p(r('Dipnot')) }, endnotes: ENDNOTES, media: { 'image1.png': IMAGES.png }
+            }));
+
+            // What the generator did with the paragraph, and what it is expected to do
+            const written = writtenLossy(doc) > 0;
+            const hasContent = names.some(name => name !== 'pageBreak' && RUN_ITEMS[name][1]);
+            assert.equal(written, context === 'cell' || hasContent || !names.includes('pageBreak'), `${label} written`);
+
+            // The parser's findings follow it
+            const counts = Object.fromEntries(plain(parsed.findings).map(finding => [finding.code, finding.count]));
+            assert.equal(counts.lineSpacing || 0, written ? 1 : 0, `${label} lineSpacing`);
+            assert.equal(counts.tabStops || 0, written ? 1 : 0, `${label} tabStops`);
+        }
+    }
+});
+
 test('paragraphs and footnotes that are never converted give no finding', async () => {
     // A deleted footnote reference, and tab stops and line heights only in a style no paragraph uses
     const findings = await findingsOf(

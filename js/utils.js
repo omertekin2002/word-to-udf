@@ -198,6 +198,23 @@ function verticalMerges(table) {
   return merges;
 }
 
+/**
+ * Whether the generator writes a parsed paragraph as a paragraph. In the document body it
+ * doesn't when the paragraph holds manual page breaks and nothing that becomes text: only
+ * the page breaks are written, and the paragraph's own formatting goes nowhere. A picture
+ * whose data is missing is skipped, so it is not text. In a table cell a page break is a
+ * line break, and every paragraph is written. The parser and the generator both use this,
+ * so paragraph findings are recorded for exactly the paragraphs that are written.
+ * @param {Object} paragraph - Parsed paragraph; only its runs' type and data are read
+ * @param {boolean} [inCell] - Whether the paragraph is in a table cell
+ * @returns {boolean}
+ */
+function paragraphIsWritten(paragraph, inCell = false) {
+  if (inCell) return true;
+  const becomesText = run => run.type !== 'pageBreak' && (run.type !== 'image' || Boolean(run.data));
+  return !paragraph.runs.some(run => run.type === 'pageBreak') || paragraph.runs.some(becomesText);
+}
+
 // Word ML namespace
 const WORD_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const DRAWING_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main';

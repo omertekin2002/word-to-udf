@@ -1217,7 +1217,7 @@ class DocxParser {
 
             if (localName === 'p') {
                 const runs = this.paragraphRuns(child);
-                elements.push(this.parseParagraph(child, runs));
+                elements.push(this.parseParagraph(child, runs, inCell));
                 // Text boxes anchored in the paragraph follow it as their own blocks
                 for (const run of runs) {
                     for (const textBox of this.findTextBoxes(run)) {
@@ -1306,9 +1306,10 @@ class DocxParser {
      * Parse a paragraph element
      * @param {Element} para - The paragraph element
      * @param {Array<Element>} [runs] - The paragraph's runs, if already collected
+     * @param {boolean} [inCell] - Whether the paragraph ends up in a table cell
      * @returns {Object} Parsed paragraph
      */
-    parseParagraph(para, runs = this.paragraphRuns(para)) {
+    parseParagraph(para, runs = this.paragraphRuns(para), inCell = false) {
         const paragraph = {
             type: 'paragraph',
             alignment: 'left',
@@ -1348,12 +1349,15 @@ class DocxParser {
             paragraph.runs.push(...this.parseRun(run, style.run));
         }
 
-        // Line heights and tab stops the conversion loses, with the paragraph's text as the hint
-        if (LOST_LINE_RULES.includes(paragraph.lineRule)) {
-            this.addFinding('lineSpacing', shortExample(paragraphText(paragraph)));
-        }
-        if (this.hasLostTabStops(tabOperations)) {
-            this.addFinding('tabStops', shortExample(paragraphText(paragraph)));
+        // Line heights and tab stops the conversion loses, with the paragraph's text as the hint.
+        // A paragraph the generator doesn't write as one has no line height or stops to lose.
+        if (paragraphIsWritten(paragraph, inCell)) {
+            if (LOST_LINE_RULES.includes(paragraph.lineRule)) {
+                this.addFinding('lineSpacing', shortExample(paragraphText(paragraph)));
+            }
+            if (this.hasLostTabStops(tabOperations)) {
+                this.addFinding('tabStops', shortExample(paragraphText(paragraph)));
+            }
         }
 
         return paragraph;

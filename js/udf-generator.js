@@ -105,6 +105,14 @@ class UdfGenerator {
      * @param {Object} paragraph - Parsed paragraph
      */
     processParagraph(paragraph) {
+        // Page breaks and nothing that becomes text: only the breaks are written
+        if (!paragraphIsWritten(paragraph)) {
+            for (const run of paragraph.runs) {
+                if (run.type === 'pageBreak') this.writePageBreak();
+            }
+            return;
+        }
+
         const paraContent = [];
         const paraElements = [];
         let paraOffset = this.currentOffset;
@@ -135,20 +143,14 @@ class UdfGenerator {
                 paraContent.push('\n');
                 this.currentOffset += 1;
             } else if (run.type === 'pageBreak') {
-                // Handle page break - first flush any pending footnotes
+                // Write the runs before the break as a paragraph of their own
                 this.content += paraContent.join('');
                 const emittedFragment = paraElements.length > 0;
                 if (emittedFragment) {
                     this.elements.push(this.buildParagraphElement(paraProps, paraElements));
                 }
 
-                // Insert footnotes for this page before the page break
-                if (this.collectedFootnotes.length > 0) {
-                    this.appendNotesSection(this.collectedFootnotes);
-                    this.collectedFootnotes = []; // Clear for next page
-                }
-
-                this.elements.push('<page-break />');
+                this.writePageBreak();
 
                 // Runs after the break continue in a new paragraph on the next page.
                 // It is the same Word paragraph, so it must not start another list
@@ -168,7 +170,7 @@ class UdfGenerator {
             }
         }
 
-        // If paragraph is empty, add placeholder (unless it only held a page break)
+        // If paragraph is empty, add placeholder (unless it ends with a page break)
         if (paraContent.length === 0) {
             if (afterPageBreak) return;
             paraContent.push('\u200B'); // Zero-width space
@@ -178,6 +180,18 @@ class UdfGenerator {
 
         this.content += paraContent.join('');
         this.elements.push(this.buildParagraphElement(paraProps, paraElements));
+    }
+
+    /**
+     * Write a manual page break, after the footnotes collected on the page it ends
+     */
+    writePageBreak() {
+        if (this.collectedFootnotes.length > 0) {
+            this.appendNotesSection(this.collectedFootnotes);
+            this.collectedFootnotes = []; // Clear for next page
+        }
+
+        this.elements.push('<page-break />');
     }
 
     /**
@@ -508,7 +522,7 @@ class UdfGenerator {
                 }
             }
 
-            // Empty paragraph
+            // Empty paragraph: still written, as every paragraph of a cell is (see paragraphIsWritten)
             if (paraElements.length === 0) {
                 this.content += ' ';
                 paraElements.push(`<content startOffset="${this.currentOffset}" length="1" family="Times New Roman" size="12" />`);
