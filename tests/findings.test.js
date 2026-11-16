@@ -378,6 +378,17 @@ test('a lost stop from a style or w:docDefaults counts, unless the paragraph cle
     assert.deepEqual(findings, [{ code: 'tabStops', count: 2, examples: ['Stilden çubuk', 'Varsayılandan kalın'] }]);
 });
 
+test('a clear or a stop one twip from a lost stop does not remove it, so it still counts', async () => {
+    // 1441 and 1442 twips both round to 72.1 points, but they are different stops
+    const styles = paraStyle('Heavy', tabsOf(stop('left', 1442, 'heavy'))) + paraStyle('Bar', tabsOf(stop('bar', 1442)));
+    const findings = await findingsOf(
+        withPPr('<w:pStyle w:val="Heavy"/>' + tabsOf(stop('clear', 1441)), 'Yanından temizlenen') +
+        withPPr('<w:pStyle w:val="Heavy"/>' + tabsOf(stop('clear', 1442)), 'Tam yerinden temizlenen') +
+        withPPr('<w:pStyle w:val="Bar"/>' + tabsOf(stop('left', 1441)), 'Yanına eklenen') +
+        withPPr('<w:pStyle w:val="Bar"/>' + tabsOf(stop('left', 1442)), 'Tam yerinde değiştirilen'), { styles });
+    assert.deepEqual(findings, [{ code: 'tabStops', count: 2, examples: ['Yanından temizlenen', 'Yanına eklenen'] }]);
+});
+
 test('a bar stop in a table cell gives tabStops', async () => {
     const findings = await findingsOf(tbl([[withPPr(tabsOf(stop('bar', 720)), 'Hücrede çubuk'), p(r('Düz'))]]));
     assert.deepEqual(findings, [{ code: 'tabStops', count: 1, examples: ['Hücrede çubuk'] }]);

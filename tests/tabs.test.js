@@ -86,6 +86,31 @@ test('a clear stop removes the inherited stop at its position, along the chain a
     assert.equal(tabSetOf(doc, content, 'Clear elsewhere'), '36.0:0:0,144.0:2:0');
 });
 
+test('a clear, a stop or a bar stop one twip from an inherited stop leaves that stop in place', async () => {
+    // 1441 and 1442 twips are 72.05 and 72.1 points: different stops that are both written as 72.1
+    const { doc, content, parsed } = await convertBody(
+        styled('Styled', run('Clear beside'), tabs(tab('clear', 1441))) +
+        styled('Styled', run('Clear on it'), tabs(tab('clear', 1442))) +
+        styled('Styled', run('Stop beside'), tabs(tab('right', 1441, 'dot'))) +
+        styled('Styled', run('Stop on it'), tabs(tab('right', 1442, 'dot'))) +
+        styled('Styled', run('Bar beside'), tabs(tab('bar', 1441))) +
+        styled('Styled', run('Bar on it'), tabs(tab('bar', 1442))), {
+            styles: paragraphStyle('Styled', { pPr: tabs(tab('left', 1442)) })
+        });
+
+    assert.equal(tabSetOf(doc, content, 'Clear beside'), '72.1:0:0');
+    assert.equal(tabSetOf(doc, content, 'Clear on it'), null);
+    assert.equal(tabSetOf(doc, content, 'Stop beside'), '72.1:2:1,72.1:0:0', 'both stops stay, in position order');
+    assert.equal(tabSetOf(doc, content, 'Stop on it'), '72.1:2:1');
+    assert.equal(tabSetOf(doc, content, 'Bar beside'), '72.1:0:0');
+    assert.equal(tabSetOf(doc, content, 'Bar on it'), null);
+    // The parsed stops still carry positions to a tenth of a point
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.elements[2].tabStops)), [
+        { position: 72.1, alignment: 2, leader: 1 },
+        { position: 72.1, alignment: 0, leader: 0 }
+    ]);
+});
+
 test('stops the paragraph adds merge with the inherited ones in position order', async () => {
     const { doc, content } = await convertBody(
         styled('Styled', run('Merged'), tabs(tab('left', 1440), tab('right', 360), tab('center', 2880))), {

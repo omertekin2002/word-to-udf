@@ -1020,14 +1020,14 @@ class DocxParser {
      * unreadable or negative position, or an unknown w:val, are left out.
      * @param {Element|null} tabs - The w:tabs element
      * @returns {Array<{position: number, clear?: true, bar?: true, alignment?: number, leader?: number,
-     *   lostLeader?: true}>} Positions in points, to a tenth
+     *   lostLeader?: true}>} Positions in points, not rounded: a stop is replaced or cleared
+     *   only at its own position, and two stops a twip apart round to the same tenth
      */
     readTabs(tabs) {
         const operations = [];
         for (const tab of tabs ? childElements(tabs, 'tab') : []) {
-            const points = this.measureToPoints(tab.getAttribute('w:pos'));
-            if (points === null || !Number.isFinite(points) || points < 0) continue;
-            const position = Math.round(points * 10) / 10;
+            const position = this.measureToPoints(tab.getAttribute('w:pos'));
+            if (position === null || !Number.isFinite(position) || position < 0) continue;
 
             const val = tab.getAttribute('w:val');
             if (val === 'clear') {
@@ -1051,9 +1051,10 @@ class DocxParser {
     /**
      * Apply tab stop operations in order: a stop replaces any stop at its position,
      * and a clear removes it. Bar stops replace inherited stops but position no text
-     * and are not converted.
+     * and are not converted. Positions are compared as read and rounded only in the result.
      * @param {Array<Object>} operations - See readTabs, outermost layer first
-     * @returns {Array<{position: number, alignment: number, leader: number}>} Sorted by position
+     * @returns {Array<{position: number, alignment: number, leader: number}>} Sorted by position,
+     *   positions in points, to a tenth
      */
     resolveTabStops(operations) {
         const stops = new Map();
@@ -1061,7 +1062,8 @@ class DocxParser {
             if (clear || bar) stops.delete(position);
             else stops.set(position, { position, alignment, leader });
         }
-        return [...stops.values()].sort((a, b) => a.position - b.position);
+        return [...stops.values()].sort((a, b) => a.position - b.position)
+            .map(stop => ({ ...stop, position: Math.round(stop.position * 10) / 10 }));
     }
 
     /**
