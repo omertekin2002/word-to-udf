@@ -290,6 +290,7 @@ class DocxParser {
         this.numbering = {};
         this.styles = this.emptyStyles();
         this.findings = {};
+        this.inDiscardedCell = false;
         this.documentParagraphs = null;
         this.endnotesMoved = false;
     }
@@ -310,6 +311,7 @@ class DocxParser {
             this.numbering = {};
             this.styles = this.emptyStyles();
             this.findings = {};
+            this.inDiscardedCell = false;
             this.documentParagraphs = null;
             this.endnotesMoved = false;
 
@@ -467,11 +469,13 @@ class DocxParser {
     }
 
     /**
-     * Record one occurrence of a conversion finding
+     * Record one occurrence of a conversion finding. Nothing is recorded while parsing a
+     * cell the generator writes empty (see parseTable): its content is never converted.
      * @param {string} code - A FINDING_CODES value
      * @param {string} [example] - A short location hint; blank and repeated ones aren't kept
      */
     addFinding(code, example = '') {
+        if (this.inDiscardedCell) return;
         const finding = this.findings[code] || (this.findings[code] = { code, count: 0, examples: [] });
         finding.count++;
         if (example && finding.examples.length < MAX_FINDING_EXAMPLES && !finding.examples.includes(example)) {
@@ -1171,9 +1175,10 @@ class DocxParser {
     /**
      * Parse the block-level content (paragraphs and tables) of a body, cell or text box
      * @param {Element} container - The containing element
+     * @param {boolean} [inCell] - Whether the content ends up in a table cell, where a table is nested
      * @returns {Array<Object>} Parsed paragraphs and tables in document order
      */
-    parseBlocks(container) {
+    parseBlocks(container, inCell = false) {
         const elements = [];
 
         for (const child of this.contentChildren(container)) {
@@ -1185,11 +1190,11 @@ class DocxParser {
                 // Text boxes anchored in the paragraph follow it as their own blocks
                 for (const run of runs) {
                     for (const textBox of this.findTextBoxes(run)) {
-                        elements.push(...this.parseBlocks(textBox));
+                        elements.push(...this.parseBlocks(textBox, inCell));
                     }
                 }
             } else if (localName === 'tbl') {
-                elements.push(this.parseTable(child));
+                elements.push(this.parseTable(child, inCell));
             }
         }
 
@@ -1481,11 +1486,14 @@ class DocxParser {
     }
 
     /**
-     * Parse a table element
+     * Parse a table element. In a table of the document itself, the generator writes a cell
+     * that continues the vertical merge above it empty, so nothing in such a cell is recorded
+     * as a finding. A nested table is flattened to paragraphs instead, those cells included.
      * @param {Element} tbl - The table element
+     * @param {boolean} [nested] - Whether the table is in a cell of another table
      * @returns {Object} Parsed table
      */
-    parseTable(tbl) {
+    parseTable(tbl, nested = false) {
         const table = {
             type: 'table',
             rows: [],
@@ -1527,40 +1535,34 @@ class DocxParser {
             }
         }
 
-        // Get rows (only this table's own, not those of nested tables)
-        for (const row of this.contentChildren(tbl)) {
-            if (row.localName === 'tr') {
-                table.rows.push(this.parseTableRow(row));
-            }
+        // Get rows and cells (only this table's own, not those of nested tables). The cells'
+        // properties come first: they decide which cells continue a vertical merge.
+        const cellElements = [];
+        for (const tr of this.contentChildren(tbl)) {
+            if (tr.localName !== 'tr') continue;
+            const tcs = this.contentChildren(tr).filter(tc => tc.localName === 'tc');
+            cellElements.push(tcs);
+            table.rows.push({ type: 'row', cells: tcs.map(tc => this.parseTableCell(tc)) });
         }
+
+        const merges = verticalMerges(table);
+        table.rows.forEach((row, i) => row.cells.forEach((cell, j) => {
+            const discarded = !nested && merges[i][j].joinsAbove;
+            if (discarded) this.inDiscardedCell = true;
+            try {
+                cell.paragraphs = this.parseCellParagraphs(cellElements[i][j]);
+            } finally {
+                if (discarded) this.inDiscardedCell = false;
+            }
+        }));
 
         return table;
     }
 
     /**
-     * Parse a table row
-     * @param {Element} tr - The table row element
-     * @returns {Object} Parsed row
-     */
-    parseTableRow(tr) {
-        const row = {
-            type: 'row',
-            cells: []
-        };
-
-        for (const cell of this.contentChildren(tr)) {
-            if (cell.localName === 'tc') {
-                row.cells.push(this.parseTableCell(cell));
-            }
-        }
-
-        return row;
-    }
-
-    /**
-     * Parse a table cell
+     * Parse a table cell's properties. Its paragraphs are added by parseTable.
      * @param {Element} tc - The table cell element
-     * @returns {Object} Parsed cell
+     * @returns {Object} Parsed cell, without content
      */
     parseTableCell(tc) {
         const cell = {
@@ -1608,17 +1610,23 @@ class DocxParser {
             }
         }
 
-        // Get paragraphs in cell. Nested tables can't be represented yet, so
-        // their paragraphs are flattened into this cell in reading order.
-        const blocks = this.parseBlocks(tc);
+        return cell;
+    }
+
+    /**
+     * Parse the paragraphs of a table cell. Nested tables can't be represented yet, so
+     * their paragraphs are flattened into the cell in reading order.
+     * @param {Element} tc - The table cell element
+     * @returns {Array<Object>} Parsed paragraphs
+     */
+    parseCellParagraphs(tc) {
+        const blocks = this.parseBlocks(tc, true);
         for (const block of blocks) {
             if (block.type !== 'table') continue;
             const firstText = this.flattenToParagraphs([block]).map(paragraphText).find(text => text.trim() !== '');
             this.addFinding('nestedTables', shortExample(firstText || ''));
         }
-        cell.paragraphs = this.flattenToParagraphs(blocks);
-
-        return cell;
+        return this.flattenToParagraphs(blocks);
     }
 
     /**

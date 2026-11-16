@@ -414,7 +414,7 @@ class UdfGenerator {
             columnSpans = Array(columnCount).fill(equalWidth).join(',');
         }
 
-        const merges = this.verticalMerges(table);
+        const merges = verticalMerges(table);
         const rowElements = [];
 
         for (let i = 0; i < table.rows.length; i++) {
@@ -458,50 +458,6 @@ class UdfGenerator {
 
         const tableElement = `<table tableName="Table" columnCount="${columnCount}" columnSpans="${columnSpans}" border="${table.border}">${rowElements.join('')}</table>`;
         this.elements.push(tableElement);
-    }
-
-    /**
-     * Work out which cells belong to a vertical merge. A w:vMerge continuation cell
-     * joins the cell above it that starts in the same grid column (counting gridSpan),
-     * if that cell is part of a merge too.
-     * @param {Object} table - Parsed table
-     * @returns {Array<Array<{joinsAbove: boolean, joinsBelow: boolean, first: Object}>>}
-     *   Per row and cell: whether it continues the cell above, whether the cell below
-     *   continues it, and the merge's first cell (the cell itself outside a merge)
-     */
-    verticalMerges(table) {
-        const merges = [];
-        let above = new Map(); // grid column -> index of the cell starting there in the row above
-
-        for (let i = 0; i < table.rows.length; i++) {
-            const cells = table.rows[i].cells;
-            const row = [];
-            const starts = new Map();
-            let column = 0;
-
-            for (let j = 0; j < cells.length; j++) {
-                const cell = cells[j];
-                const merge = { joinsAbove: false, joinsBelow: false, first: cell };
-
-                const k = above.get(column);
-                const upper = k === undefined ? null : table.rows[i - 1].cells[k];
-                if (cell.vMergeContinue && upper && (upper.vMergeStart || upper.vMergeContinue)) {
-                    const upperMerge = merges[i - 1][k];
-                    upperMerge.joinsBelow = true;
-                    merge.joinsAbove = true;
-                    merge.first = upperMerge.first;
-                }
-
-                row.push(merge);
-                starts.set(column, j);
-                column += Math.max(1, cell.colspan || 1);
-            }
-
-            merges.push(row);
-            above = starts;
-        }
-
-        return merges;
     }
 
     /**

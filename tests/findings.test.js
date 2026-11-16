@@ -394,6 +394,65 @@ test('a bar stop in a table cell gives tabStops', async () => {
     assert.deepEqual(findings, [{ code: 'tabStops', count: 1, examples: ['Hücrede çubuk'] }]);
 });
 
+// A one-column table; each cell is [w:vMerge value, content]
+const mergeColumn = cells => '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>' + cells.map(([merge, inner]) =>
+    `<w:tr><w:tc><w:tcPr><w:vMerge w:val="${merge}"/></w:tcPr>${inner}</w:tc></w:tr>`).join('') + '</w:tbl>';
+// A paragraph with an exact line height and a bar stop: one lineSpacing and one tabStops finding when converted
+const lossy = text => withPPr(spacing('exact') + tabsOf(stop('bar', 720)), text);
+const lossyFindings = text => [
+    { code: 'lineSpacing', count: 1, examples: [text] },
+    { code: 'tabStops', count: 1, examples: [text] }
+];
+
+test('a cell joined to the vertical merge above it is written empty, and its paragraphs give no findings', async () => {
+    const { parsed, doc, content } = await convert(await buildDocx(mergeColumn([
+        ['restart', lossy('Birleşik')],
+        ['continue', lossy('')],
+        ['continue', lossy('Yazılmayan')]
+    ])));
+
+    // Only the merge's first cell is converted, so only its paragraph counts
+    assert.deepEqual(plain(parsed.findings), lossyFindings('Birleşik'));
+    assert.equal(content.trim(), 'Birleşik');
+    const cells = [...doc.querySelectorAll('elements table row cell')];
+    assert.equal(cells.length, 3);
+    for (const cell of cells.slice(1)) {
+        const paragraphs = cell.querySelectorAll('paragraph');
+        assert.equal(paragraphs.length, 1);
+        assert.equal(paragraphs[0].getAttribute('TabSet'), null);
+        assert.deepEqual([...paragraphs[0].children].map(el => el.getAttribute('length')), ['0']);
+    }
+});
+
+test('a footnote, a picture and a nested table in a joined cell give no findings either', async () => {
+    const { parsed, content } = await convert(await buildDocx(mergeColumn([
+        ['restart', p(r('Birleşik'))],
+        ['continue', p(r('Dipnotlu') + footnoteRef(1)) + p(r('Resimli') + picture('rId_yok')) +
+            p(picture()) + tbl([[lossy('İç tablo')]])]
+    ]), { footnotes: { 1: p(r('Yazılmayan dipnot')) }, media: { 'image1.png': IMAGES.gif } }));
+
+    assert.deepEqual(plain(parsed.findings), []);
+    assert.equal(content.trim(), 'Birleşik');
+});
+
+test('a continuation cell with no merge above it is converted, so its findings count', async () => {
+    const { parsed, content } = await convert(await buildDocx(mergeColumn([['continue', lossy('Sahipsiz devam')]])));
+
+    assert.ok(content.includes('Sahipsiz devam'), JSON.stringify(content));
+    assert.deepEqual(plain(parsed.findings), lossyFindings('Sahipsiz devam'));
+});
+
+test('a nested table is flattened with its joined cells, so their findings count', async () => {
+    const nested = mergeColumn([['restart', p(r('İç başlık'))], ['continue', lossy('Düzleştirilen devam')]]);
+    const { parsed, content } = await convert(await buildDocx(tbl([[nested, p(r('Yan hücre'))]])));
+
+    assert.ok(content.includes('Düzleştirilen devam'), JSON.stringify(content));
+    assert.deepEqual(plain(parsed.findings), [
+        { code: 'nestedTables', count: 1, examples: ['İç başlık'] },
+        ...lossyFindings('Düzleştirilen devam')
+    ]);
+});
+
 test('paragraphs and footnotes that are never converted give no finding', async () => {
     // A deleted footnote reference, and tab stops and line heights only in a style no paragraph uses
     const findings = await findingsOf(
