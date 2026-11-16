@@ -99,6 +99,8 @@ A paragraph's tab stops come from `w:tabs` in `w:docDefaults`, the paragraph sty
 - Alignment: `left`, `start` and `num` are `0`, `center` is `1`, `right` and `end` are `2`, `decimal` is `3`.
 - Leader: `dot` and `middleDot` are `1`, `hyphen` is `2`; `none`, `underscore`, `heavy` or no leader are `0`.
 - `bar` stops (a vertical line, not a text position) and stops with an unreadable or negative position are dropped. A paragraph left with no stops gets no `TabSet`. A paragraph that ends up with a `bar` stop, or with an `underscore` or `heavy` leader, gets a `tabStops` conversion note.
+- Two stops are at the same position when their `w:pos` values are the same length, in whatever unit each is written (`w:pos="432"` and `w:pos="0.3in"`). Stops a twip apart are different stops: a clear or a stop next to an inherited stop leaves it in place.
+- No position is written twice. When two stops that are left round to the same tenth of a point (1441 and 1442 twips are both `72.1`), only the first in position order is written, the one a tab reaches first.
 - Paragraphs in table cells get their stops the same way.
 - Positions are written as Word measures them, from the left margin. Whether the UYAP editor measures `TabSet` positions from the margin or from the paragraph's left indent is not documented and has not been checked in the official editor, so stops in indented paragraphs may land elsewhere there.
 - The document's default tab interval (`w:defaultTabStop`), the implicit stop Word adds at a hanging indent, and tab stops in footnote and endnote text are not converted.

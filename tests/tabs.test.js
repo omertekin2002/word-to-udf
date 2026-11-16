@@ -86,12 +86,11 @@ test('a clear stop removes the inherited stop at its position, along the chain a
     assert.equal(tabSetOf(doc, content, 'Clear elsewhere'), '36.0:0:0,144.0:2:0');
 });
 
-test('a clear, a stop or a bar stop one twip from an inherited stop leaves that stop in place', async () => {
-    // 1441 and 1442 twips are 72.05 and 72.1 points: different stops that are both written as 72.1
-    const { doc, content, parsed } = await convertBody(
+test('a clear or a bar stop one twip from an inherited stop leaves that stop in place', async () => {
+    // 1441 and 1442 twips are 72.05 and 72.1 points: different stops, though both are written as 72.1
+    const { doc, content } = await convertBody(
         styled('Styled', run('Clear beside'), tabs(tab('clear', 1441))) +
         styled('Styled', run('Clear on it'), tabs(tab('clear', 1442))) +
-        styled('Styled', run('Stop beside'), tabs(tab('right', 1441, 'dot'))) +
         styled('Styled', run('Stop on it'), tabs(tab('right', 1442, 'dot'))) +
         styled('Styled', run('Bar beside'), tabs(tab('bar', 1441))) +
         styled('Styled', run('Bar on it'), tabs(tab('bar', 1442))), {
@@ -100,15 +99,59 @@ test('a clear, a stop or a bar stop one twip from an inherited stop leaves that 
 
     assert.equal(tabSetOf(doc, content, 'Clear beside'), '72.1:0:0');
     assert.equal(tabSetOf(doc, content, 'Clear on it'), null);
-    assert.equal(tabSetOf(doc, content, 'Stop beside'), '72.1:2:1,72.1:0:0', 'both stops stay, in position order');
     assert.equal(tabSetOf(doc, content, 'Stop on it'), '72.1:2:1');
     assert.equal(tabSetOf(doc, content, 'Bar beside'), '72.1:0:0');
     assert.equal(tabSetOf(doc, content, 'Bar on it'), null);
-    // The parsed stops still carry positions to a tenth of a point
-    assert.deepEqual(JSON.parse(JSON.stringify(parsed.elements[2].tabStops)), [
-        { position: 72.1, alignment: 2, leader: 1 },
-        { position: 72.1, alignment: 0, leader: 0 }
-    ]);
+});
+
+test('two stops left at the same written position become one: the first in position order', async () => {
+    // 1441 and 1442 twips are both written as 72.1, and 1439 and 1440 both as 72.0. TabSet has
+    // no meaning for two stops at one position, so only the stop a tab reaches first is written.
+    const { doc, content, parsed } = await convertBody(
+        styled('Upper', run('Paragraph stop first'), tabs(tab('right', 1441, 'dot'))) +
+        styled('Lower', run('Style stop first'), tabs(tab('right', 1442, 'dot'))) +
+        p(run('Listed backwards'), tabs(tab('center', 1440), tab('decimal', 1439, 'hyphen'), tab('left', 720))) +
+        p(run('Two pairs'), tabs(tab('left', 1443), tab('center', 1442), tab('right', 1441), tab('left', 1444))) +
+        p(run('A twip apart, two tenths'), tabs(tab('left', 1440), tab('right', 1441))), {
+            styles: paragraphStyle('Upper', { pPr: tabs(tab('left', 1442)) }) +
+                paragraphStyle('Lower', { pPr: tabs(tab('left', 1441)) })
+        });
+
+    assert.equal(tabSetOf(doc, content, 'Paragraph stop first'), '72.1:2:1');
+    assert.equal(tabSetOf(doc, content, 'Style stop first'), '72.1:0:0');
+    assert.equal(tabSetOf(doc, content, 'Listed backwards'), '36.0:0:0,72.0:3:2');
+    // 1441, 1442, 1443 and 1444 twips are 72.05, 72.1, 72.15 and 72.2 points
+    assert.equal(tabSetOf(doc, content, 'Two pairs'), '72.1:2:0,72.2:0:0');
+    assert.equal(tabSetOf(doc, content, 'A twip apart, two tenths'), '72.0:0:0,72.1:2:0');
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.elements[0].tabStops)), [{ position: 72.1, alignment: 2, leader: 1 }]);
+
+    // No paragraph is written with a repeated position
+    for (const paragraph of doc.querySelectorAll('elements paragraph[TabSet]')) {
+        const positions = paragraph.getAttribute('TabSet').split(',').map(stop => stop.split(':')[0]);
+        assert.equal(new Set(positions).size, positions.length, paragraph.getAttribute('TabSet'));
+    }
+});
+
+test('a clear, a stop or a bar stop removes the stop at the same position written in another unit', async () => {
+    // The same lengths, which convert to different floating-point numbers of points:
+    // 432 twips is 21.6 but 0.3in is 21.599999999999998, and 7200 twips is 360 but 127mm is 360.00000000000006
+    const equal = [[432, '0.3in'], [7200, '127mm'], [9360, '16.51cm'], [264, '1.1pc'], ['0.6in', '43.2pt'], ['0.3in', 432]];
+    const body = equal.map(([inherited, own], i) =>
+        styled(`S${i}`, run(`Clear ${i}`), tabs(tab('clear', own))) +
+        styled(`S${i}`, run(`Stop ${i}`), tabs(tab('right', own, 'dot'))) +
+        styled(`S${i}`, run(`Bar ${i}`), tabs(tab('bar', own))) +
+        styled(`S${i}`, run(`Inherited ${i}`))).join('');
+    const { doc, content } = await convertBody(body, {
+        styles: equal.map(([inherited], i) => paragraphStyle(`S${i}`, { pPr: tabs(tab('left', inherited)) })).join('')
+    });
+
+    equal.forEach(([inherited, own], i) => {
+        const written = tabSetOf(doc, content, `Inherited ${i}`);
+        assert.match(written, /^\d+\.\d:0:0$/, `${inherited}`);
+        assert.equal(tabSetOf(doc, content, `Clear ${i}`), null, `clear at ${own} over a stop at ${inherited}`);
+        assert.equal(tabSetOf(doc, content, `Stop ${i}`), written.replace(':0:0', ':2:1'), `stop at ${own} over a stop at ${inherited}`);
+        assert.equal(tabSetOf(doc, content, `Bar ${i}`), null, `bar at ${own} over a stop at ${inherited}`);
+    });
 });
 
 test('stops the paragraph adds merge with the inherited ones in position order', async () => {

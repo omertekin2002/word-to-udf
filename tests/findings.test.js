@@ -414,6 +414,20 @@ test('a clear or a stop one twip from a lost stop does not remove it, so it stil
     assert.deepEqual(findings, [{ code: 'tabStops', count: 2, examples: ['Yanından temizlenen', 'Yanına eklenen'] }]);
 });
 
+test('a clear or a stop at the position of a lost stop removes it when written in another unit', async () => {
+    // 432 twips and 0.3in are the same position, but convert to 21.6 and 21.599999999999998 points
+    const styles = paraStyle('Heavy', tabsOf(stop('left', 432, 'heavy'))) + paraStyle('Bar', tabsOf(stop('bar', '127mm'))) +
+        paraStyle('Plain', tabsOf(stop('left', '0.3in')));
+    const findings = await findingsOf(
+        withPPr('<w:pStyle w:val="Heavy"/>', 'Kalın kalan') +
+        withPPr('<w:pStyle w:val="Heavy"/>' + tabsOf(stop('clear', '0.3in')), 'İnç ile temizlenen') +
+        withPPr('<w:pStyle w:val="Heavy"/>' + tabsOf(stop('left', '0.3in', 'dot')), 'İnç ile değiştirilen') +
+        withPPr('<w:pStyle w:val="Bar"/>' + tabsOf(stop('clear', 7200)), 'Twip ile temizlenen') +
+        withPPr('<w:pStyle w:val="Bar"/>' + tabsOf(stop('right', 7200)), 'Twip ile değiştirilen') +
+        withPPr('<w:pStyle w:val="Plain"/>' + tabsOf(stop('bar', 432)), 'Twip ile çubuk'), { styles });
+    assert.deepEqual(findings, [{ code: 'tabStops', count: 2, examples: ['Kalın kalan', 'Twip ile çubuk'] }]);
+});
+
 test('a bar stop in a table cell gives tabStops', async () => {
     const findings = await findingsOf(tbl([[withPPr(tabsOf(stop('bar', 720)), 'Hücrede çubuk'), p(r('Düz'))]]));
     assert.deepEqual(findings, [{ code: 'tabStops', count: 1, examples: ['Hücrede çubuk'] }]);

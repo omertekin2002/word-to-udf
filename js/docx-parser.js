@@ -55,6 +55,9 @@ const TAB_LEADERS = { dot: 1, middleDot: 1, hyphen: 2 };
 // Word leaders that are drawn, but have no UDF code, so they become no leader
 const LOST_TAB_LEADERS = ['underscore', 'heavy'];
 
+// Decimal places of a point that tell two tab stop positions apart (see tabStopKey)
+const TAB_POSITION_PRECISION = 6;
+
 // Line rules (w:spacing w:lineRule) lineSpacing() can't express, so their paragraphs get single spacing
 const LOST_LINE_RULES = ['exact', 'atLeast'];
 
@@ -145,6 +148,18 @@ function shortExample(text) {
  */
 function paragraphText(paragraph) {
     return paragraph.runs.filter(run => run.type === 'text').map(run => run.text).join('');
+}
+
+/**
+ * The identity of a tab stop position: stops are at the same position when their keys are
+ * equal. A length converts to slightly different numbers of points depending on its unit
+ * (432 twips is 21.6, 0.3in is 21.599999999999998), so positions are compared to a millionth
+ * of a point. That is far finer than a twip (0.05 points), the closest two stops Word keeps.
+ * @param {number} position - Points, as measureToPoints gives them
+ * @returns {string}
+ */
+function tabStopKey(position) {
+    return position.toFixed(TAB_POSITION_PRECISION);
 }
 
 /**
@@ -1027,7 +1042,7 @@ class DocxParser {
      * @param {Element|null} tabs - The w:tabs element
      * @returns {Array<{position: number, clear?: true, bar?: true, alignment?: number, leader?: number,
      *   lostLeader?: true}>} Positions in points, not rounded: a stop is replaced or cleared
-     *   only at its own position, and two stops a twip apart round to the same tenth
+     *   only at its own position (see tabStopKey), and two stops a twip apart round to the same tenth
      */
     readTabs(tabs) {
         const operations = [];
@@ -1057,33 +1072,47 @@ class DocxParser {
     /**
      * Apply tab stop operations in order: a stop replaces any stop at its position,
      * and a clear removes it. Bar stops replace inherited stops but position no text
-     * and are not converted. Positions are compared as read and rounded only in the result.
+     * and are not converted. Positions are compared by tabStopKey, whatever unit they were
+     * written in, and rounded to a tenth of a point only in the result. Stops that are left
+     * less than a tenth apart can round to the same position, which TabSet gives no meaning
+     * to: only the first of them in position order, the one a tab reaches first, is kept.
      * @param {Array<Object>} operations - See readTabs, outermost layer first
      * @returns {Array<{position: number, alignment: number, leader: number}>} Sorted by position,
-     *   positions in points, to a tenth
+     *   positions in points, to a tenth, each position once
      */
     resolveTabStops(operations) {
         const stops = new Map();
         for (const { position, clear, bar, alignment, leader } of operations) {
-            if (clear || bar) stops.delete(position);
-            else stops.set(position, { position, alignment, leader });
+            const key = tabStopKey(position);
+            if (clear || bar) stops.delete(key);
+            else stops.set(key, { position, alignment, leader });
         }
-        return [...stops.values()].sort((a, b) => a.position - b.position)
-            .map(stop => ({ ...stop, position: Math.round(stop.position * 10) / 10 }));
+
+        const resolved = [];
+        let lastTenths = null;
+        for (const stop of [...stops.values()].sort((a, b) => a.position - b.position)) {
+            const tenths = Math.round(stop.position * 10);
+            if (tenths === lastTenths) continue;
+            resolved.push({ ...stop, position: tenths / 10 });
+            lastTenths = tenths;
+        }
+        return resolved;
     }
 
     /**
      * Whether the tab stops a paragraph ends up with include one the conversion loses: a bar
      * stop, or a stop with an underscore or heavy leader. Layers apply as in Word: a later stop
-     * at the same position replaces it, and a clear removes it.
+     * at the same position replaces it, and a clear removes it. Positions are compared as in
+     * resolveTabStops, by tabStopKey.
      * @param {Array<Object>} operations - See readTabs, outermost layer first
      * @returns {boolean}
      */
     hasLostTabStops(operations) {
         const lost = new Set();
         for (const { position, clear, bar, lostLeader } of operations) {
-            if (!clear && (bar || lostLeader)) lost.add(position);
-            else lost.delete(position);
+            const key = tabStopKey(position);
+            if (!clear && (bar || lostLeader)) lost.add(key);
+            else lost.delete(key);
         }
         return lost.size > 0;
     }
