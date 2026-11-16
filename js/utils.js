@@ -153,6 +153,68 @@ function childElement(element, localName, namespace = WORD_NS) {
   return childElements(element, localName, namespace)[0] || null;
 }
 
+/**
+ * Work out which cells of a parsed table belong to a vertical merge. A w:vMerge
+ * continuation cell joins the cell above it that starts in the same grid column
+ * (counting gridSpan), if that cell is part of a merge too. The parser and the
+ * generator both use this, so they agree on which cells are written empty.
+ * @param {Object} table - Parsed table; only its cells' vMergeStart, vMergeContinue and colspan are read
+ * @returns {Array<Array<{joinsAbove: boolean, joinsBelow: boolean, first: Object}>>}
+ *   Per row and cell: whether it continues the cell above, whether the cell below
+ *   continues it, and the merge's first cell (the cell itself outside a merge)
+ */
+function verticalMerges(table) {
+  const merges = [];
+  let above = new Map(); // grid column -> index of the cell starting there in the row above
+
+  for (let i = 0; i < table.rows.length; i++) {
+    const cells = table.rows[i].cells;
+    const row = [];
+    const starts = new Map();
+    let column = 0;
+
+    for (let j = 0; j < cells.length; j++) {
+      const cell = cells[j];
+      const merge = { joinsAbove: false, joinsBelow: false, first: cell };
+
+      const k = above.get(column);
+      const upper = k === undefined ? null : table.rows[i - 1].cells[k];
+      if (cell.vMergeContinue && upper && (upper.vMergeStart || upper.vMergeContinue)) {
+        const upperMerge = merges[i - 1][k];
+        upperMerge.joinsBelow = true;
+        merge.joinsAbove = true;
+        merge.first = upperMerge.first;
+      }
+
+      row.push(merge);
+      starts.set(column, j);
+      column += Math.max(1, cell.colspan || 1);
+    }
+
+    merges.push(row);
+    above = starts;
+  }
+
+  return merges;
+}
+
+/**
+ * Whether the generator writes a parsed paragraph as a paragraph. In the document body it
+ * doesn't when the paragraph holds manual page breaks and nothing that becomes text: only
+ * the page breaks are written, and the paragraph's own formatting goes nowhere. A picture
+ * whose data is missing is skipped, so it is not text. In a table cell a page break is a
+ * line break, and every paragraph is written. The parser and the generator both use this,
+ * so paragraph findings are recorded for exactly the paragraphs that are written.
+ * @param {Object} paragraph - Parsed paragraph; only its runs' type and data are read
+ * @param {boolean} [inCell] - Whether the paragraph is in a table cell
+ * @returns {boolean}
+ */
+function paragraphIsWritten(paragraph, inCell = false) {
+  if (inCell) return true;
+  const becomesText = run => run.type !== 'pageBreak' && (run.type !== 'image' || Boolean(run.data));
+  return !paragraph.runs.some(run => run.type === 'pageBreak') || paragraph.runs.some(becomesText);
+}
+
 // Word ML namespace
 const WORD_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const DRAWING_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main';

@@ -304,7 +304,8 @@ for (const lang of ['tr', 'en']) {
 test('every finding code the parser reports has a TR and an EN message, and app.js maps it', async () => {
     const { strings, run } = await loadPage({ app: true });
     const codes = run('FINDING_CODES');
-    assert.deepEqual([...codes], ['headersFooters', 'comments', 'nestedTables', 'missingImage', 'unsupportedImage']);
+    assert.deepEqual([...codes], ['headersFooters', 'comments', 'nestedTables', 'missingImage', 'unsupportedImage',
+        'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops']);
     const keys = run('FINDING_KEYS');
     assert.deepEqual(Object.keys(keys).sort(), [...codes].sort());
     for (const code of codes) {
@@ -398,4 +399,34 @@ test('a clean conversion keeps the notes hidden, and "Convert another file" clea
     assert.ok(visible(document.getElementById('downloadSection')));
     assert.ok(!visible(notes));
     assert.equal(noteItems(document).length, 0);
+});
+
+test('moved notes, lost line heights and lost tab stops are listed in both languages', async () => {
+    const { window, document, strings } = await loadPage({ app: true });
+    const p = (inner, pPr = '') => `<w:p>${pPr ? `<w:pPr>${pPr}</w:pPr>` : ''}${inner}</w:p>`;
+    const r = text => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+    const docx = await buildDocx(
+        p(r('Birinci bölüm'), '<w:sectPr/>') +
+        p(r('Dipnotlu') + '<w:r><w:footnoteReference w:id="1"/></w:r>') +
+        p(r('Son notlu') + '<w:r><w:endnoteReference w:id="1"/></w:r>') +
+        p(r('Tam satır'), '<w:spacing w:line="360" w:lineRule="exact"/>') +
+        p(r('Çubuk sekme'), '<w:tabs><w:tab w:val="bar" w:pos="720"/></w:tabs>'), {
+            footnotes: { 1: p(r('Dipnot metni')) },
+            endnotes: { 1: p(r('Son not metni')) },
+            settings: '<w:endnotePr><w:pos w:val="sectEnd"/></w:endnotePr>'
+        });
+    window.app.processFile(fileOf('dilekce.docx', docx));
+    await window.app.handleConvert();
+
+    const expected = lang => [
+        { code: 'notesMoved', text: strings[lang]['notes.notesMoved'], count: null, examples: ['“Dipnot metni”'] },
+        { code: 'endnotesMoved', text: strings[lang]['notes.endnotesMoved'], count: null, examples: ['“Son not metni”'] },
+        { code: 'lineSpacing', text: strings[lang]['notes.lineSpacing'], count: null, examples: ['“Tam satır”'] },
+        { code: 'tabStops', text: strings[lang]['notes.tabStops'], count: null, examples: ['“Çubuk sekme”'] }
+    ];
+    assert.ok(visible(document.getElementById('conversionNotes')));
+    assert.deepEqual(noteItems(document), expected('tr'));
+    document.querySelector('[data-set-lang="en"]').click();
+    assert.deepEqual(noteItems(document), expected('en'));
+    assert.notEqual(strings.tr['notes.tabStops'], strings.en['notes.tabStops']);
 });

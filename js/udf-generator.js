@@ -105,6 +105,14 @@ class UdfGenerator {
      * @param {Object} paragraph - Parsed paragraph
      */
     processParagraph(paragraph) {
+        // Page breaks and nothing that becomes text: only the breaks are written
+        if (!paragraphIsWritten(paragraph)) {
+            for (const run of paragraph.runs) {
+                if (run.type === 'pageBreak') this.writePageBreak();
+            }
+            return;
+        }
+
         const paraContent = [];
         const paraElements = [];
         let paraOffset = this.currentOffset;
@@ -135,20 +143,14 @@ class UdfGenerator {
                 paraContent.push('\n');
                 this.currentOffset += 1;
             } else if (run.type === 'pageBreak') {
-                // Handle page break - first flush any pending footnotes
+                // Write the runs before the break as a paragraph of their own
                 this.content += paraContent.join('');
                 const emittedFragment = paraElements.length > 0;
                 if (emittedFragment) {
                     this.elements.push(this.buildParagraphElement(paraProps, paraElements));
                 }
 
-                // Insert footnotes for this page before the page break
-                if (this.collectedFootnotes.length > 0) {
-                    this.appendNotesSection(this.collectedFootnotes);
-                    this.collectedFootnotes = []; // Clear for next page
-                }
-
-                this.elements.push('<page-break />');
+                this.writePageBreak();
 
                 // Runs after the break continue in a new paragraph on the next page.
                 // It is the same Word paragraph, so it must not start another list
@@ -168,7 +170,7 @@ class UdfGenerator {
             }
         }
 
-        // If paragraph is empty, add placeholder (unless it only held a page break)
+        // If paragraph is empty, add placeholder (unless it ends with a page break)
         if (paraContent.length === 0) {
             if (afterPageBreak) return;
             paraContent.push('\u200B'); // Zero-width space
@@ -178,6 +180,18 @@ class UdfGenerator {
 
         this.content += paraContent.join('');
         this.elements.push(this.buildParagraphElement(paraProps, paraElements));
+    }
+
+    /**
+     * Write a manual page break, after the footnotes collected on the page it ends
+     */
+    writePageBreak() {
+        if (this.collectedFootnotes.length > 0) {
+            this.appendNotesSection(this.collectedFootnotes);
+            this.collectedFootnotes = []; // Clear for next page
+        }
+
+        this.elements.push('<page-break />');
     }
 
     /**
@@ -309,6 +323,12 @@ class UdfGenerator {
             attrs += ` LineSpacing="${decimal(extraLineSpacing)}"`;
         }
 
+        // Tab stops as position:alignment:leader, positions in points from the left margin
+        if (paragraph.tabStops && paragraph.tabStops.length > 0) {
+            const stops = paragraph.tabStops.map(stop => `${stop.position.toFixed(1)}:${stop.alignment}:${stop.leader}`);
+            attrs += ` TabSet="${stops.join(',')}"`;
+        }
+
         // Handle numbering/bullets
         if (paragraph.numbering) {
             attrs += this.buildListAttrs(paragraph.numbering);
@@ -408,7 +428,7 @@ class UdfGenerator {
             columnSpans = Array(columnCount).fill(equalWidth).join(',');
         }
 
-        const merges = this.verticalMerges(table);
+        const merges = verticalMerges(table);
         const rowElements = [];
 
         for (let i = 0; i < table.rows.length; i++) {
@@ -452,50 +472,6 @@ class UdfGenerator {
 
         const tableElement = `<table tableName="Table" columnCount="${columnCount}" columnSpans="${columnSpans}" border="${table.border}">${rowElements.join('')}</table>`;
         this.elements.push(tableElement);
-    }
-
-    /**
-     * Work out which cells belong to a vertical merge. A w:vMerge continuation cell
-     * joins the cell above it that starts in the same grid column (counting gridSpan),
-     * if that cell is part of a merge too.
-     * @param {Object} table - Parsed table
-     * @returns {Array<Array<{joinsAbove: boolean, joinsBelow: boolean, first: Object}>>}
-     *   Per row and cell: whether it continues the cell above, whether the cell below
-     *   continues it, and the merge's first cell (the cell itself outside a merge)
-     */
-    verticalMerges(table) {
-        const merges = [];
-        let above = new Map(); // grid column -> index of the cell starting there in the row above
-
-        for (let i = 0; i < table.rows.length; i++) {
-            const cells = table.rows[i].cells;
-            const row = [];
-            const starts = new Map();
-            let column = 0;
-
-            for (let j = 0; j < cells.length; j++) {
-                const cell = cells[j];
-                const merge = { joinsAbove: false, joinsBelow: false, first: cell };
-
-                const k = above.get(column);
-                const upper = k === undefined ? null : table.rows[i - 1].cells[k];
-                if (cell.vMergeContinue && upper && (upper.vMergeStart || upper.vMergeContinue)) {
-                    const upperMerge = merges[i - 1][k];
-                    upperMerge.joinsBelow = true;
-                    merge.joinsAbove = true;
-                    merge.first = upperMerge.first;
-                }
-
-                row.push(merge);
-                starts.set(column, j);
-                column += Math.max(1, cell.colspan || 1);
-            }
-
-            merges.push(row);
-            above = starts;
-        }
-
-        return merges;
     }
 
     /**
@@ -546,7 +522,7 @@ class UdfGenerator {
                 }
             }
 
-            // Empty paragraph
+            // Empty paragraph: still written, as every paragraph of a cell is (see paragraphIsWritten)
             if (paraElements.length === 0) {
                 this.content += ' ';
                 paraElements.push(`<content startOffset="${this.currentOffset}" length="1" family="Times New Roman" size="12" />`);

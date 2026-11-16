@@ -45,6 +45,22 @@ const ENDNOTE_FORMATS = ['decimal', 'lowerRoman', 'upperRoman', 'lowerLetter', '
 const DEFAULT_ENDNOTE_FORMAT = 'lowerRoman';
 
 // Signature of an OLE compound file: a Word 97-2003 .doc, or a password-protected .docx
+// UDF TabSet alignment codes for Word's w:tab w:val (left, center, right, decimal).
+// A num stop is a left stop; a bar stop draws a line and positions no text, so it isn't listed.
+const TAB_ALIGNMENTS = { left: 0, start: 0, num: 0, center: 1, right: 2, end: 2, decimal: 3 };
+
+// UDF TabSet leader codes for Word's w:tab w:leader; anything else (none, underscore, heavy) is no leader
+const TAB_LEADERS = { dot: 1, middleDot: 1, hyphen: 2 };
+
+// Word leaders that are drawn, but have no UDF code, so they become no leader
+const LOST_TAB_LEADERS = ['underscore', 'heavy'];
+
+// Decimal places of a point that tell two tab stop positions apart (see tabStopKey)
+const TAB_POSITION_PRECISION = 6;
+
+// Line rules (w:spacing w:lineRule) lineSpacing() can't express, so their paragraphs get single spacing
+const LOST_LINE_RULES = ['exact', 'atLeast'];
+
 const COMPOUND_FILE_SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 // Name of the stream an encrypted OOXML package keeps its encryption parameters in (MS-OFFCRYPTO 2.3.4)
@@ -76,7 +92,8 @@ const PARSE_FAILURES = {
 
 // Codes of the conversion findings parse() reports, in the order it lists them: content the
 // conversion drops or simplifies, so the user can fix it in Word before filing
-const FINDING_CODES = ['headersFooters', 'comments', 'nestedTables', 'missingImage', 'unsupportedImage'];
+const FINDING_CODES = ['headersFooters', 'comments', 'nestedTables', 'missingImage', 'unsupportedImage',
+    'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
 
 // How many location hints a finding keeps, and how long each may be
 const MAX_FINDING_EXAMPLES = 3;
@@ -131,6 +148,18 @@ function shortExample(text) {
  */
 function paragraphText(paragraph) {
     return paragraph.runs.filter(run => run.type === 'text').map(run => run.text).join('');
+}
+
+/**
+ * The identity of a tab stop position: stops are at the same position when their keys are
+ * equal. A length converts to slightly different numbers of points depending on its unit
+ * (432 twips is 21.6, 0.3in is 21.599999999999998), so positions are compared to a millionth
+ * of a point. That is far finer than a twip (0.05 points), the closest two stops Word keeps.
+ * @param {number} position - Points, as measureToPoints gives them
+ * @returns {string}
+ */
+function tabStopKey(position) {
+    return position.toFixed(TAB_POSITION_PRECISION);
 }
 
 /**
@@ -276,7 +305,9 @@ class DocxParser {
         this.numbering = {};
         this.styles = this.emptyStyles();
         this.findings = {};
+        this.inDiscardedCell = false;
         this.documentParagraphs = null;
+        this.endnotesMoved = false;
     }
 
     /**
@@ -295,7 +326,9 @@ class DocxParser {
             this.numbering = {};
             this.styles = this.emptyStyles();
             this.findings = {};
+            this.inDiscardedCell = false;
             this.documentParagraphs = null;
+            this.endnotesMoved = false;
 
             // A compound file is not a ZIP: name why it can't be read instead of a generic failure
             await this.rejectCompoundFile(file);
@@ -341,6 +374,10 @@ class DocxParser {
             // Header and footer text and comments are never converted; note them
             await this.detectHeadersFooters();
             await this.detectComments();
+
+            // Whether converting moves endnotes Word places per section or renumbers;
+            // each converted endnote reference then gets a finding
+            this.endnotesMoved = await this.endnotesAreMoved();
 
             // Extract document elements
             const elements = await this.extractElements();
@@ -447,11 +484,13 @@ class DocxParser {
     }
 
     /**
-     * Record one occurrence of a conversion finding
+     * Record one occurrence of a conversion finding. Nothing is recorded while parsing a
+     * cell the generator writes empty (see parseTable): its content is never converted.
      * @param {string} code - A FINDING_CODES value
      * @param {string} [example] - A short location hint; blank and repeated ones aren't kept
      */
     addFinding(code, example = '') {
+        if (this.inDiscardedCell) return;
         const finding = this.findings[code] || (this.findings[code] = { code, count: 0, examples: [] });
         finding.count++;
         if (example && finding.examples.length < MAX_FINDING_EXAMPLES && !finding.examples.includes(example)) {
@@ -624,6 +663,45 @@ class DocxParser {
         const format = numFmt(body && childElements(body, 'sectPr').pop()) ?? numFmt(await this.settingsRoot());
         if (format === null) return DEFAULT_ENDNOTE_FORMAT;
         return ENDNOTE_FORMATS.includes(format) ? format : 'decimal';
+    }
+
+    /**
+     * Whether the converted endnotes end up somewhere other than Word puts them, or numbered
+     * differently. The generator writes every endnote at the end of the document, numbered from
+     * the start. That changes a document with more than one section that places endnotes at the
+     * end of each section (w:endnotePr/w:pos "sectEnd") or restarts their numbering at each
+     * section (w:numRestart "eachSect"), and any document that restarts them at each page.
+     * The restart is each section's own: w:numRestart is read from its w:sectPr, then from the
+     * settings part. The placement is the document's: w:pos is read from the settings part
+     * only, because a w:pos in a section's w:endnotePr is ignored (ECMA-376 Part 1, 17.11.22).
+     * @returns {Promise<boolean>} false for Word's default: at the end of the document, numbered continuously
+     */
+    async endnotesAreMoved() {
+        const body = this.document.getElementsByTagNameNS(WORD_NS, 'body')[0];
+        if (!body) return false;
+
+        // A section break is a w:sectPr in a body paragraph's w:pPr; the last section's
+        // w:sectPr is the body's own, and the section still exists without one
+        const breaks = Array.from(body.getElementsByTagNameNS(WORD_NS, 'sectPr')).filter(sectPr => {
+            const pPr = sectPr.parentElement;
+            return pPr && pPr.namespaceURI === WORD_NS && pPr.localName === 'pPr' &&
+                pPr.parentElement && pPr.parentElement.namespaceURI === WORD_NS && pPr.parentElement.localName === 'p';
+        });
+        const sections = [...breaks, childElements(body, 'sectPr').pop() || null];
+
+        const value = (parent, name) => {
+            const endnotePr = parent && childElement(parent, 'endnotePr');
+            const property = endnotePr && childElement(endnotePr, name);
+            return property && property.hasAttribute('w:val') ? property.getAttribute('w:val') : null;
+        };
+        const settings = await this.settingsRoot();
+        const manySections = sections.length > 1;
+        if (manySections && value(settings, 'pos') === 'sectEnd') return true;
+
+        return sections.some(sectPr => {
+            const restart = value(sectPr, 'numRestart') ?? value(settings, 'numRestart') ?? 'continuous';
+            return restart === 'eachPage' || (manySections && restart === 'eachSect');
+        });
     }
 
     /**
@@ -846,9 +924,16 @@ class DocxParser {
                 chain.unshift(definitions.get(id));
             }
 
+            const paragraph = Object.assign({}, ...chain.map(style => style.paragraph));
+            // Tab stops add to and clear the inherited ones instead of replacing them, so the
+            // chain's tab operations are all kept, outermost style first
+            const tabs = chain.flatMap(style => style.paragraph.tabs || []);
+            if (tabs.length > 0) paragraph.tabs = tabs;
+            else delete paragraph.tabs;
+
             resolved.set(styleId, {
                 run: Object.assign({}, ...chain.map(style => style.run)),
-                paragraph: Object.assign({}, ...chain.map(style => style.paragraph)),
+                paragraph,
                 numPr: Object.assign({}, ...chain.map(style => style.numPr))
             });
         }
@@ -942,7 +1027,94 @@ class DocxParser {
             if (spacing.getAttribute('w:lineRule')) props.lineRule = spacing.getAttribute('w:lineRule');
         }
 
+        const tabs = this.readTabs(childElement(pPr, 'tabs'));
+        if (tabs.length > 0) props.tabs = tabs;
+
         return props;
+    }
+
+    /**
+     * Read the tab stop operations of a w:tabs: each w:tab adds a stop, or with
+     * w:val="clear" removes the inherited stop at its position (see resolveTabStops).
+     * A bar stop is kept as { position, bar: true }, which converts to no stop, and a stop
+     * whose leader has no UDF code is marked lostLeader, for lostTabStops. Stops with an
+     * unreadable or negative position, or an unknown w:val, are left out.
+     * @param {Element|null} tabs - The w:tabs element
+     * @returns {Array<{position: number, clear?: true, bar?: true, alignment?: number, leader?: number,
+     *   lostLeader?: true}>} Positions in points, not rounded: a stop is replaced or cleared
+     *   only at its own position (see tabStopKey), and two stops a twip apart round to the same tenth
+     */
+    readTabs(tabs) {
+        const operations = [];
+        for (const tab of tabs ? childElements(tabs, 'tab') : []) {
+            const position = this.measureToPoints(tab.getAttribute('w:pos'));
+            if (position === null || !Number.isFinite(position) || position < 0) continue;
+
+            const val = tab.getAttribute('w:val');
+            if (val === 'clear') {
+                operations.push({ position, clear: true });
+            } else if (val === 'bar') {
+                operations.push({ position, bar: true });
+            } else if (Object.hasOwn(TAB_ALIGNMENTS, val)) {
+                const leader = tab.getAttribute('w:leader');
+                const operation = {
+                    position,
+                    alignment: TAB_ALIGNMENTS[val],
+                    leader: Object.hasOwn(TAB_LEADERS, leader) ? TAB_LEADERS[leader] : 0
+                };
+                if (LOST_TAB_LEADERS.includes(leader)) operation.lostLeader = true;
+                operations.push(operation);
+            }
+        }
+        return operations;
+    }
+
+    /**
+     * Apply tab stop operations in order: a stop replaces any stop at its position,
+     * and a clear removes it. Bar stops replace inherited stops but position no text
+     * and are not converted. Positions are compared by tabStopKey, whatever unit they were
+     * written in, and rounded to a tenth of a point only in the result. Stops that are left
+     * less than a tenth apart can round to the same position, which TabSet gives no meaning
+     * to: only the first of them in position order, the one a tab reaches first, is kept.
+     * @param {Array<Object>} operations - See readTabs, outermost layer first
+     * @returns {Array<{position: number, alignment: number, leader: number}>} Sorted by position,
+     *   positions in points, to a tenth, each position once
+     */
+    resolveTabStops(operations) {
+        const stops = new Map();
+        for (const { position, clear, bar, alignment, leader } of operations) {
+            const key = tabStopKey(position);
+            if (clear || bar) stops.delete(key);
+            else stops.set(key, { position, alignment, leader });
+        }
+
+        const resolved = [];
+        let lastTenths = null;
+        for (const stop of [...stops.values()].sort((a, b) => a.position - b.position)) {
+            const tenths = Math.round(stop.position * 10);
+            if (tenths === lastTenths) continue;
+            resolved.push({ ...stop, position: tenths / 10 });
+            lastTenths = tenths;
+        }
+        return resolved;
+    }
+
+    /**
+     * Whether the tab stops a paragraph ends up with include one the conversion loses: a bar
+     * stop, or a stop with an underscore or heavy leader. Layers apply as in Word: a later stop
+     * at the same position replaces it, and a clear removes it. Positions are compared as in
+     * resolveTabStops, by tabStopKey.
+     * @param {Array<Object>} operations - See readTabs, outermost layer first
+     * @returns {boolean}
+     */
+    hasLostTabStops(operations) {
+        const lost = new Set();
+        for (const { position, clear, bar, lostLeader } of operations) {
+            const key = tabStopKey(position);
+            if (!clear && (bar || lostLeader)) lost.add(key);
+            else lost.delete(key);
+        }
+        return lost.size > 0;
     }
 
     /**
@@ -1034,9 +1206,10 @@ class DocxParser {
     /**
      * Parse the block-level content (paragraphs and tables) of a body, cell or text box
      * @param {Element} container - The containing element
+     * @param {boolean} [inCell] - Whether the content ends up in a table cell, where a table is nested
      * @returns {Array<Object>} Parsed paragraphs and tables in document order
      */
-    parseBlocks(container) {
+    parseBlocks(container, inCell = false) {
         const elements = [];
 
         for (const child of this.contentChildren(container)) {
@@ -1044,15 +1217,15 @@ class DocxParser {
 
             if (localName === 'p') {
                 const runs = this.paragraphRuns(child);
-                elements.push(this.parseParagraph(child, runs));
+                elements.push(this.parseParagraph(child, runs, inCell));
                 // Text boxes anchored in the paragraph follow it as their own blocks
                 for (const run of runs) {
                     for (const textBox of this.findTextBoxes(run)) {
-                        elements.push(...this.parseBlocks(textBox));
+                        elements.push(...this.parseBlocks(textBox, inCell));
                     }
                 }
             } else if (localName === 'tbl') {
-                elements.push(this.parseTable(child));
+                elements.push(this.parseTable(child, inCell));
             }
         }
 
@@ -1133,9 +1306,10 @@ class DocxParser {
      * Parse a paragraph element
      * @param {Element} para - The paragraph element
      * @param {Array<Element>} [runs] - The paragraph's runs, if already collected
+     * @param {boolean} [inCell] - Whether the paragraph ends up in a table cell
      * @returns {Object} Parsed paragraph
      */
-    parseParagraph(para, runs = this.paragraphRuns(para)) {
+    parseParagraph(para, runs = this.paragraphRuns(para), inCell = false) {
         const paragraph = {
             type: 'paragraph',
             alignment: 'left',
@@ -1146,8 +1320,15 @@ class DocxParser {
         // Alignment, indents and spacing: document defaults, the paragraph style chain, then the paragraph's own w:pPr
         const pPr = childElement(para, 'pPr');
         const style = this.paragraphStyle(pPr);
-        Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, this.readParagraphProperties(pPr));
+        const own = this.readParagraphProperties(pPr);
+        Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, own);
         paragraph.lineSpacing = this.lineSpacing(paragraph);
+
+        // Tab stops: each layer adds to or clears the stops of the layers under it
+        delete paragraph.tabs;
+        const tabOperations = [this.styles.defaults.paragraph, style.paragraph, own].flatMap(layer => layer.tabs || []);
+        const tabStops = this.resolveTabStops(tabOperations);
+        if (tabStops.length > 0) paragraph.tabStops = tabStops;
 
         // Numbering: the paragraph style chain, then the paragraph's own w:numPr, each value
         // on its own. numId 0 switches numbering off, and a missing w:ilvl means level 0.
@@ -1166,6 +1347,17 @@ class DocxParser {
         // Get runs (text with formatting)
         for (const run of runs) {
             paragraph.runs.push(...this.parseRun(run, style.run));
+        }
+
+        // Line heights and tab stops the conversion loses, with the paragraph's text as the hint.
+        // A paragraph the generator doesn't write as one has no line height or stops to lose.
+        if (paragraphIsWritten(paragraph, inCell)) {
+            if (LOST_LINE_RULES.includes(paragraph.lineRule)) {
+                this.addFinding('lineSpacing', shortExample(paragraphText(paragraph)));
+            }
+            if (this.hasLostTabStops(tabOperations)) {
+                this.addFinding('tabStops', shortExample(paragraphText(paragraph)));
+            }
         }
 
         return paragraph;
@@ -1212,6 +1404,9 @@ class DocxParser {
                         id: id,
                         content: notes[id] || `[Empty ${kind}]`
                     });
+                    // Footnotes always leave their page; endnotes only when Word places or numbers them per section
+                    if (kind === 'footnote') this.addFinding('notesMoved', shortExample(notes[id]));
+                    else if (this.endnotesMoved) this.addFinding('endnotesMoved', shortExample(notes[id]));
                 }
             } else if (localName !== 'rPr') {
                 // w:drawing, or a drawing wrapped in mc:AlternateContent
@@ -1326,11 +1521,14 @@ class DocxParser {
     }
 
     /**
-     * Parse a table element
+     * Parse a table element. In a table of the document itself, the generator writes a cell
+     * that continues the vertical merge above it empty, so nothing in such a cell is recorded
+     * as a finding. A nested table is flattened to paragraphs instead, those cells included.
      * @param {Element} tbl - The table element
+     * @param {boolean} [nested] - Whether the table is in a cell of another table
      * @returns {Object} Parsed table
      */
-    parseTable(tbl) {
+    parseTable(tbl, nested = false) {
         const table = {
             type: 'table',
             rows: [],
@@ -1372,40 +1570,34 @@ class DocxParser {
             }
         }
 
-        // Get rows (only this table's own, not those of nested tables)
-        for (const row of this.contentChildren(tbl)) {
-            if (row.localName === 'tr') {
-                table.rows.push(this.parseTableRow(row));
-            }
+        // Get rows and cells (only this table's own, not those of nested tables). The cells'
+        // properties come first: they decide which cells continue a vertical merge.
+        const cellElements = [];
+        for (const tr of this.contentChildren(tbl)) {
+            if (tr.localName !== 'tr') continue;
+            const tcs = this.contentChildren(tr).filter(tc => tc.localName === 'tc');
+            cellElements.push(tcs);
+            table.rows.push({ type: 'row', cells: tcs.map(tc => this.parseTableCell(tc)) });
         }
+
+        const merges = verticalMerges(table);
+        table.rows.forEach((row, i) => row.cells.forEach((cell, j) => {
+            const discarded = !nested && merges[i][j].joinsAbove;
+            if (discarded) this.inDiscardedCell = true;
+            try {
+                cell.paragraphs = this.parseCellParagraphs(cellElements[i][j]);
+            } finally {
+                if (discarded) this.inDiscardedCell = false;
+            }
+        }));
 
         return table;
     }
 
     /**
-     * Parse a table row
-     * @param {Element} tr - The table row element
-     * @returns {Object} Parsed row
-     */
-    parseTableRow(tr) {
-        const row = {
-            type: 'row',
-            cells: []
-        };
-
-        for (const cell of this.contentChildren(tr)) {
-            if (cell.localName === 'tc') {
-                row.cells.push(this.parseTableCell(cell));
-            }
-        }
-
-        return row;
-    }
-
-    /**
-     * Parse a table cell
+     * Parse a table cell's properties. Its paragraphs are added by parseTable.
      * @param {Element} tc - The table cell element
-     * @returns {Object} Parsed cell
+     * @returns {Object} Parsed cell, without content
      */
     parseTableCell(tc) {
         const cell = {
@@ -1453,17 +1645,23 @@ class DocxParser {
             }
         }
 
-        // Get paragraphs in cell. Nested tables can't be represented yet, so
-        // their paragraphs are flattened into this cell in reading order.
-        const blocks = this.parseBlocks(tc);
+        return cell;
+    }
+
+    /**
+     * Parse the paragraphs of a table cell. Nested tables can't be represented yet, so
+     * their paragraphs are flattened into the cell in reading order.
+     * @param {Element} tc - The table cell element
+     * @returns {Array<Object>} Parsed paragraphs
+     */
+    parseCellParagraphs(tc) {
+        const blocks = this.parseBlocks(tc, true);
         for (const block of blocks) {
             if (block.type !== 'table') continue;
             const firstText = this.flattenToParagraphs([block]).map(paragraphText).find(text => text.trim() !== '');
             this.addFinding('nestedTables', shortExample(firstText || ''));
         }
-        cell.paragraphs = this.flattenToParagraphs(blocks);
-
-        return cell;
+        return this.flattenToParagraphs(blocks);
     }
 
     /**
