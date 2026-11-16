@@ -285,10 +285,35 @@ test('endnotes at the end of the document with continuous numbering give no find
 test('a two-section document with endnotes at section end gives endnotesMoved per endnote reference', async () => {
     const body = sectionBreak() + p(r('Bir') + endnoteRef(1)) + p(r('İki') + endnoteRef(2));
     const expected = [{ code: 'endnotesMoved', count: 2, examples: ['Birinci son not', 'İkinci son not'] }];
-    assert.deepEqual(await findingsOf(body, { endnotes: ENDNOTES, settings: endnotePr(pos('sectEnd')) }), expected,
-        'from the settings part');
-    assert.deepEqual(await findingsOf(body, { endnotes: ENDNOTES, sectPr: endnotePr(pos('sectEnd')) }), expected,
-        'from the body\'s w:sectPr');
+    assert.deepEqual(await findingsOf(body, { endnotes: ENDNOTES, settings: endnotePr(pos('sectEnd')) }), expected);
+});
+
+test('endnote placement is the document\'s: a w:pos in a section\'s w:endnotePr is ignored', async () => {
+    // ECMA-376 Part 1, 17.11.22: "If this element is present at the section level, then it shall be ignored"
+    const expected = [{ code: 'endnotesMoved', count: 2, examples: ['Birinci son not', 'İkinci son not'] }];
+    const refs = p(r('Bir') + endnoteRef(1)) + p(r('İki') + endnoteRef(2));
+
+    // Every section says docEnd, but the settings part places endnotes at section end: they are moved
+    assert.deepEqual(await findingsOf(sectionBreak(endnotePr(pos('docEnd'))) + refs, {
+        endnotes: ENDNOTES,
+        settings: endnotePr(pos('sectEnd')),
+        sectPr: endnotePr(pos('docEnd'))
+    }), expected, 'a section-level docEnd does not hide the document\'s sectEnd');
+
+    // Only the sections say sectEnd: Word keeps the endnotes at the end of the document, as the conversion does
+    assert.deepEqual(await findingsOf(sectionBreak(endnotePr(pos('sectEnd'))) + refs, {
+        endnotes: ENDNOTES,
+        sectPr: endnotePr(pos('sectEnd'))
+    }), [], 'a section-level sectEnd, no settings part');
+    assert.deepEqual(await findingsOf(sectionBreak(endnotePr(pos('sectEnd'))) + refs, {
+        endnotes: ENDNOTES,
+        settings: endnotePr(pos('docEnd')),
+        sectPr: endnotePr(pos('sectEnd'))
+    }), [], 'a section-level sectEnd over the document\'s docEnd');
+
+    // The numbering restart next to an ignored w:pos is still the section's own
+    assert.deepEqual(await findingsOf(sectionBreak(endnotePr(pos('sectEnd') + numRestart('eachSect'))) + refs,
+        { endnotes: ENDNOTES }), expected, 'w:numRestart beside an ignored w:pos');
 });
 
 test('section-end endnotes in a document with one section give no finding', async () => {

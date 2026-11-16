@@ -656,7 +656,9 @@ class DocxParser {
      * the start. That changes a document with more than one section that places endnotes at the
      * end of each section (w:endnotePr/w:pos "sectEnd") or restarts their numbering at each
      * section (w:numRestart "eachSect"), and any document that restarts them at each page.
-     * Each section's w:endnotePr is read from its w:sectPr, then from the settings part.
+     * The restart is each section's own: w:numRestart is read from its w:sectPr, then from the
+     * settings part. The placement is the document's: w:pos is read from the settings part
+     * only, because a w:pos in a section's w:endnotePr is ignored (ECMA-376 Part 1, 17.11.22).
      * @returns {Promise<boolean>} false for Word's default: at the end of the document, numbered continuously
      */
     async endnotesAreMoved() {
@@ -678,12 +680,12 @@ class DocxParser {
             return property && property.hasAttribute('w:val') ? property.getAttribute('w:val') : null;
         };
         const settings = await this.settingsRoot();
-        const effective = (sectPr, name, fallback) => value(sectPr, name) ?? value(settings, name) ?? fallback;
+        const manySections = sections.length > 1;
+        if (manySections && value(settings, 'pos') === 'sectEnd') return true;
 
         return sections.some(sectPr => {
-            const restart = effective(sectPr, 'numRestart', 'continuous');
-            if (restart === 'eachPage') return true;
-            return sections.length > 1 && (effective(sectPr, 'pos', 'docEnd') === 'sectEnd' || restart === 'eachSect');
+            const restart = value(sectPr, 'numRestart') ?? value(settings, 'numRestart') ?? 'continuous';
+            return restart === 'eachPage' || (manySections && restart === 'eachSect');
         });
     }
 
