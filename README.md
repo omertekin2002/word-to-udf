@@ -53,6 +53,13 @@ bun install
 bun run test
 ```
 
+`bun run test` runs `tests/*.test.js` and needs no browser. A separate smoke test, `tests/browser/smoke.test.js`, serves the site on `127.0.0.1` and drives a whole conversion through the real page in headless Chromium with [Playwright](https://playwright.dev): the page loading with no CSP violations or failed requests, choosing a file, converting, downloading the `.udf`, the conversion notes, a damaged file, the TR | EN toggle and "convert another". Download Chromium once, then run it:
+
+```bash
+bunx playwright install chromium
+bun run test:browser
+```
+
 The site itself still has no build step; `package.json` exists only for the tests.
 
 `tests/petitions.test.js` converts whole synthetic petitions built in `tests/fixtures/petitions.js`. Known conversion gaps show up as `todo` tests: they are listed in the output but don't fail the run. The fixtures use invented placeholder content only (`Ad Soyad`, `00000000000`, `2026/0000`); never add real names, ID numbers, case numbers or addresses to them.
