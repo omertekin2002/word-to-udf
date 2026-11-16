@@ -96,6 +96,45 @@ test('stops the paragraph adds merge with the inherited ones in position order',
     assert.equal(tabSetOf(doc, content, 'Merged'), '18.0:2:0,36.0:0:0,72.0:0:0,144.0:1:0');
 });
 
+test('bar stops replace inherited text stops from defaults and styles without restoring them', async () => {
+    const { doc, content, parsed } = await convertBody(
+        p(run('Default replaced'), tabs(tab('bar', 720))) +
+        styled('Base', run('Style replaced'), tabs(tab('bar', 1440))) +
+        styled('BarDefault', run('Style bar')) +
+        styled('BarChild', run('Child bar')), {
+            styles: '<w:docDefaults><w:pPrDefault><w:pPr>' + tabs(tab('right', 720, 'dot')) +
+                '</w:pPr></w:pPrDefault></w:docDefaults>' +
+                paragraphStyle('Base', { pPr: tabs(tab('center', 1440)) }) +
+                paragraphStyle('BarDefault', { pPr: tabs(tab('bar', 720)) }) +
+                paragraphStyle('BarChild', { basedOn: 'Base', pPr: tabs(tab('bar', 1440)) })
+        });
+
+    assert.equal(tabSetOf(doc, content, 'Default replaced'), null);
+    assert.equal(tabSetOf(doc, content, 'Style replaced'), '36.0:2:1');
+    assert.equal(tabSetOf(doc, content, 'Style bar'), null);
+    assert.equal(tabSetOf(doc, content, 'Child bar'), '36.0:2:1');
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.findings)), [
+        { code: 'tabStops', count: 4, examples: ['Default replaced', 'Style replaced', 'Style bar'] }
+    ]);
+});
+
+test('a later normal stop replaces an inherited bar, while a clear removes it', async () => {
+    const { doc, content, parsed } = await convertBody(
+        styled('Bar', run('Normal override'), tabs(tab('center', 720, 'hyphen'))) +
+        styled('Bar', run('Clear override'), tabs(tab('clear', 720))) +
+        styled('Normal', run('Child normal')), {
+            styles: '<w:docDefaults><w:pPrDefault><w:pPr>' + tabs(tab('right', 720, 'dot')) +
+                '</w:pPr></w:pPrDefault></w:docDefaults>' +
+                paragraphStyle('Bar', { pPr: tabs(tab('bar', 720)) }) +
+                paragraphStyle('Normal', { basedOn: 'Bar', pPr: tabs(tab('left', 720)) })
+        });
+
+    assert.equal(tabSetOf(doc, content, 'Normal override'), '36.0:1:2');
+    assert.equal(tabSetOf(doc, content, 'Clear override'), null);
+    assert.equal(tabSetOf(doc, content, 'Child normal'), '36.0:0:0');
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.findings)), []);
+});
+
 test('bar stops and stops with an unreadable or negative position are left out', async () => {
     const { doc, content } = await convertBody(
         p(run('Mixed'), tabs(tab('bar', 720), tab('left', 'abc'), tab('left', -360), tab('left', 1440),

@@ -1050,15 +1050,15 @@ class DocxParser {
 
     /**
      * Apply tab stop operations in order: a stop replaces any stop at its position,
-     * and a clear removes it. Bar stops position no text and are not converted.
+     * and a clear removes it. Bar stops replace inherited stops but position no text
+     * and are not converted.
      * @param {Array<Object>} operations - See readTabs, outermost layer first
      * @returns {Array<{position: number, alignment: number, leader: number}>} Sorted by position
      */
     resolveTabStops(operations) {
         const stops = new Map();
         for (const { position, clear, bar, alignment, leader } of operations) {
-            if (bar) continue;
-            if (clear) stops.delete(position);
+            if (clear || bar) stops.delete(position);
             else stops.set(position, { position, alignment, leader });
         }
         return [...stops.values()].sort((a, b) => a.position - b.position);
