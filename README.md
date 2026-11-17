@@ -10,6 +10,7 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 - 📊 **Tables**: Handles table structure with cells and borders
 - 🖼️ **Images**: Embeds images as base64
 - 📐 **Page Setup**: Keeps the page margins, orientation and header/footer offsets
+- 🗂️ **Headers and footers**: Keeps the text of the last section's main header and footer, such as an office name or a file reference (page numbers aren't converted yet)
 - ↕️ **Spacing**: Keeps the space before and after paragraphs and their line spacing
 - ⇥ **Tab stops**: Keeps a paragraph's custom tab stops (left, center, right and decimal, with dot or dash leaders), so lines like `DAVACI : Ad Soyad` stay aligned
 - 🔢 **Lists**: Keeps numbered and bulleted lists, including lists that come from a paragraph style (such as numbered headings)
@@ -86,6 +87,15 @@ The `<pageFormat>` element takes its values from the document's final section pr
 - A value the document doesn't set, or sets to something unreadable, keeps the converter's previous default (left 15 mm, right 10 mm, top and bottom 5 mm, portrait).
 - Only the last section's setup is used; per-section page setup isn't supported.
 
+### Headers and footers
+The default header and footer (`w:headerReference` / `w:footerReference` with `w:type="default"`) of the document's final section, the one the page setup comes from, are converted. A section with no default header or footer of its own uses the previous section's, as in Word.
+- Their top-level paragraphs, including those in content controls, are read like body paragraphs: styles, fonts, emphasis, alignment, indents, spacing, tab stops, tabs and line breaks resolve the same way.
+- They are written as `<header>`, the first child of `<elements>`, and `<footer>`, the last one, each holding `<paragraph>` elements. Their text goes in the shared content: header text first, then the body, footnotes and endnotes, then footer text, as the UDF documentation describes.
+- No `pageNumber-*` attributes are written: the `pageNumber-spec` format isn't documented well enough to produce.
+- Fields (`w:fldSimple`, `w:fldChar`, such as `PAGE` and `NUMPAGES`) are left out together with their displayed result, which would otherwise be frozen as static text. Pictures, text boxes and tables in a header or footer are left out too, and so are page breaks.
+- A header or footer with no non-whitespace text left writes no element.
+- Not converted, and reported as a `headersFooters` conversion note: first-page (`w:type="first"`) and even-page (`w:type="even"`) headers and footers with text; an earlier section's header or footer with text that differs from the final section's; and fields, pictures, text boxes and tables in the converted header or footer. The UDF format documents a single header and footer.
+
 ### Paragraph spacing
 Paragraph spacing (`w:spacing`) is read from the document defaults, the paragraph style and its `w:basedOn` chain, and the paragraph itself, each attribute on its own: a style can set the space before while the paragraph sets only the space after.
 - `w:before` and `w:after` become `SpaceAbove` and `SpaceBelow`, in points.
@@ -121,7 +131,7 @@ A paragraph's list comes from `w:numPr`, read from the paragraph style and its `
 
 | Code | Reported when | Examples |
 | --- | --- | --- |
-| `headersFooters` | A section (`w:sectPr`) references a header or footer part with non-whitespace text. Reported once for the document. | none |
+| `headersFooters` | Header or footer content is not converted (see [Headers and footers](#headers-and-footers)): a section references a first-page or even-page header or footer with non-whitespace text, or a header or footer with text other than the final section's default one; or the converted default header or footer holds a field, picture, text box or table, which is left out. Reported once for the document. | none |
 | `comments` | The comments part has comments with text; `count` is the number of such comments. | none |
 | `nestedTables` | A table inside a table cell is flattened into that cell. | The start of the nested table's first non-empty paragraph |
 | `missingImage` | A picture's relationship or media part is missing, so it is skipped. | The text of the nearest paragraph |
@@ -148,7 +158,7 @@ The notes only report: the converted `.udf` is the same with or without them.
 - Embedded OLE objects are not supported
 - Password-protected documents and `.doc` files are not converted: remove the password, or save the file as `.docx`, in Word first
 - Track changes / comments are not preserved (inserted text is kept, deleted text is dropped)
-- Headers/footers not yet implemented
+- Only the final section's default header and footer are converted, as plain paragraphs: page numbers and other fields, pictures, text boxes and tables in them, first-page and even-page headers and footers, and other sections' headers and footers are left out and listed in the conversion notes
 - Footnote and endnote text is converted as plain text, without its formatting; a tab or line break inside a note becomes a space. All endnotes go at the end of the document, even when Word places them at the end of each section, and they are always numbered from the start. Footnotes and such endnotes are listed in the conversion notes
 - Exact and at-least line heights, automatic paragraph spacing and contextual spacing are not converted (see Paragraph spacing); exact and at-least line heights are listed in the conversion notes
 - Bar tab stops and underscore or heavy tab leaders are not converted (see Tab stops), and are listed in the conversion notes

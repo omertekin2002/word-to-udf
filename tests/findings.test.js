@@ -55,7 +55,7 @@ test('a clean document has no findings', async () => {
     assert.deepEqual(await findingsOf(p(r('Metin'))), []);
 });
 
-test('a header and a footer with text give exactly one headersFooters finding, without a location', async () => {
+test('a default header and footer with plain text are converted and give no finding', async () => {
     const findings = await findingsOf(p(r('Gövde')), {
         sectPr: headerRefs,
         parts: [
@@ -63,15 +63,56 @@ test('a header and a footer with text give exactly one headersFooters finding, w
             header('footer1.xml', 'rIdFooter1', p(r('Alt bilgi')), 'footer')
         ]
     });
+    assert.deepEqual(findings, []);
+});
+
+test('first-page and even-page headers and footers with text give exactly one headersFooters finding, without a location', async () => {
+    const findings = await findingsOf(p(r('Gövde')), {
+        sectPr: '<w:headerReference w:type="first" r:id="rIdHeader1"/><w:footerReference w:type="even" r:id="rIdFooter1"/>',
+        parts: [
+            header('header1.xml', 'rIdHeader1', p(r('İlk sayfa üst bilgisi'))),
+            header('footer1.xml', 'rIdFooter1', p(r('Çift sayfa alt bilgisi')), 'footer')
+        ]
+    });
     assert.deepEqual(findings, [{ code: 'headersFooters', count: 1, examples: [] }]);
 });
 
-test('only a footer with text is enough, also when a section break in the body references it', async () => {
+test('an earlier section\'s footer with text gives the finding when the final section has a different one', async () => {
     const sectionBreak = `<w:p><w:pPr><w:sectPr><w:footerReference w:type="default" r:id="rIdFooter1"/></w:sectPr></w:pPr>${r('Bölüm 1')}</w:p>`;
     const findings = await findingsOf(sectionBreak + p(r('Bölüm 2')), {
-        parts: [header('footer1.xml', 'rIdFooter1', p('<w:r><w:t>1</w:t></w:r>'), 'footer')]
+        sectPr: '<w:footerReference w:type="default" r:id="rIdFooter2"/>',
+        parts: [
+            header('footer1.xml', 'rIdFooter1', p(r('Birinci bölüm')), 'footer'),
+            header('footer2.xml', 'rIdFooter2', p(r('Son bölüm')), 'footer')
+        ]
     });
     assert.deepEqual(findings, [{ code: 'headersFooters', count: 1, examples: [] }]);
+});
+
+test('an earlier section\'s footer the final section inherits is converted, without a finding', async () => {
+    const sectionBreak = `<w:p><w:pPr><w:sectPr><w:footerReference w:type="default" r:id="rIdFooter1"/></w:sectPr></w:pPr>${r('Bölüm 1')}</w:p>`;
+    const findings = await findingsOf(sectionBreak + p(r('Bölüm 2')), {
+        parts: [header('footer1.xml', 'rIdFooter1', p(r('Ortak alt bilgi')), 'footer')]
+    });
+    assert.deepEqual(findings, []);
+});
+
+test('a page number field, a table or a picture in the converted header or footer gives the finding', async () => {
+    const pageField = '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r>' +
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>';
+    const cases = {
+        'PAGE field': ['footer', p(r('Sayfa ') + pageField)],
+        'NUMPAGES simple field': ['footer', p(r('Toplam ') + '<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>3</w:t></w:r></w:fldSimple>')],
+        table: ['header', tbl([[p(r('Hücre')), p('')]]) + p(r('Üst bilgi'))],
+        picture: ['header', p(r('Üst bilgi') + picture('rIdLogo'))]
+    };
+    for (const [name, [kind, inner]] of Object.entries(cases)) {
+        const findings = await findingsOf(p(r('Gövde')), {
+            sectPr: headerRefs,
+            parts: [kind === 'header' ? header('header1.xml', 'rIdHeader1', inner) : header('footer1.xml', 'rIdFooter1', inner, 'footer')]
+        });
+        assert.deepEqual(findings, [{ code: 'headersFooters', count: 1, examples: [] }], name);
+    }
 });
 
 test('empty or whitespace-only header and footer parts give no finding', async () => {
@@ -187,7 +228,7 @@ test('findings come in a fixed order, each code once', async () => {
     const body = tbl([[p(r('Dış')) + tbl([[p(r('İç'))]])]]) + p(r('Resim') + picture('rId_yok')) +
         p(picture('rId_image1') + picture('rId_image2'));
     const findings = await findingsOf(body, {
-        sectPr: headerRefs,
+        sectPr: '<w:headerReference w:type="first" r:id="rIdHeader1"/><w:footerReference w:type="default" r:id="rIdFooter1"/>',
         media: { 'image1.emf': IMAGES.emf, 'image2.gif': IMAGES.gif },
         parts: [header('header1.xml', 'rIdHeader1', p(r('Üst'))), header('footer1.xml', 'rIdFooter1', p(''), 'footer'),
             comments(['Yorum'])]
