@@ -195,6 +195,19 @@ test('a field spanning paragraphs and nested fields are left out up to their mat
     assert.deepEqual(texts(headerEl, content), ['Önce ', ' Sonra']);
 });
 
+test('text sharing a run with a field boundary is kept; only the field is left out', async () => {
+    const footer = p('<w:r><w:t xml:space="preserve">Önce </w:t><w:fldChar w:fldCharType="begin"/></w:r>' +
+        '<w:r><w:instrText> PAGE </w:instrText><w:fldChar w:fldCharType="separate"/><w:t>4</w:t></w:r>' +
+        `<w:r><w:fldChar w:fldCharType="end"/><w:t xml:space="preserve"> ${FOOTER_TEXT}</w:t></w:r>`);
+    const { doc, content, parsed } = await convertBody(p(r('Gövde')), {
+        sectPr: reference('footer'),
+        parts: [part('footer', footer)]
+    });
+    assert.deepEqual(texts(topLevel(doc).at(-1), content), ['Önce ', ` ${FOOTER_TEXT}`]);
+    assert.ok(!content.includes('4'));
+    assert.deepEqual(plain(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
+});
+
 test('a footer holding only a page number field writes no footer, and is noted', async () => {
     const { doc, xml, parsed } = await convertBody(p(r('Gövde')), {
         sectPr: reference('footer'),

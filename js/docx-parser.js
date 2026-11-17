@@ -656,19 +656,23 @@ class DocxParser {
             for (const name of HEADER_FOOTER_DRAWINGS) remove(Array.from(para.getElementsByTagNameNS(WORD_NS, name)));
         }
 
-        // Complex fields: every run from a w:fldChar begin to its matching end, the field
-        // instructions and result included. A field can span paragraphs.
+        // Complex fields: everything from a w:fldChar begin to its matching end, the field
+        // instructions and result included, run content in document order. Text in the same
+        // run before the begin or after the end is kept. A field can span paragraphs.
         let depth = 0;
         for (const para of paragraphs) {
             for (const run of this.paragraphRuns(para)) {
-                const fldChars = childElements(run, 'fldChar');
-                const inField = depth > 0 || fldChars.length > 0;
-                for (const fldChar of fldChars) {
-                    const type = fldChar.getAttribute('w:fldCharType');
-                    if (type === 'begin') depth++;
-                    else if (type === 'end' && depth > 0) depth--;
+                for (const child of Array.from(run.children)) {
+                    const isFldChar = child.namespaceURI === WORD_NS && child.localName === 'fldChar';
+                    if (isFldChar) {
+                        const type = child.getAttribute('w:fldCharType');
+                        if (type === 'begin') depth++;
+                        else if (type === 'end' && depth > 0) depth--;
+                        remove([child]);
+                    } else if (depth > 0 && !(child.namespaceURI === WORD_NS && child.localName === 'rPr')) {
+                        remove([child]);
+                    }
                 }
-                if (inField) remove([run]);
             }
         }
 
