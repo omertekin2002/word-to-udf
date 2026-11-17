@@ -65,6 +65,12 @@ class UdfGenerator {
         this.endnoteFormat = document.endnoteFormat || 'lowerRoman';
         this.pageSetup = document.pageSetup || {};
 
+        // Header text comes first in the content, before the body (UDF: <header> is the first element)
+        if (document.header) {
+            this.elements.push(this.headerFooterElement('header', document.header));
+        }
+        const headerLength = this.content.length;
+
         // Process all document elements
         for (const element of document.elements) {
             if (element.type === 'paragraph') {
@@ -84,10 +90,16 @@ class UdfGenerator {
             this.appendNotesSection(this.collectedEndnotes);
         }
 
-        // Ensure we have at least one paragraph
-        if (this.content.length === 0) {
-            this.content = '\u200B'; // Zero-width space
-            this.elements.push('<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0"><content startOffset="0" length="1" family="Times New Roman" size="12" /></paragraph>');
+        // Ensure the body has at least one paragraph
+        if (this.content.length === headerLength) {
+            this.content += '\u200B'; // Zero-width space
+            this.elements.push(`<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0"><content startOffset="${this.currentOffset}" length="1" family="Times New Roman" size="12" /></paragraph>`);
+            this.currentOffset += 1;
+        }
+
+        // Footer text comes last, after the body and the notes (UDF: <footer> is the last element)
+        if (document.footer) {
+            this.elements.push(this.headerFooterElement('footer', document.footer));
         }
 
         // Generate final XML
@@ -180,6 +192,24 @@ class UdfGenerator {
 
         this.content += paraContent.join('');
         this.elements.push(this.buildParagraphElement(paraProps, paraElements));
+    }
+
+    /**
+     * Write header or footer paragraphs, with their text added to the content at the current
+     * offset, as body paragraphs are
+     * @param {'header'|'footer'} tag - The element to write
+     * @param {Array<Object>} paragraphs - Parsed paragraphs, holding only text, tabs and line breaks
+     * @returns {string} The <header> or <footer> element
+     */
+    headerFooterElement(tag, paragraphs) {
+        const bodyElements = this.elements;
+        this.elements = [];
+        try {
+            for (const paragraph of paragraphs) this.processParagraph(paragraph);
+            return `<${tag}>${this.elements.join('')}</${tag}>`;
+        } finally {
+            this.elements = bodyElements;
+        }
     }
 
     /**

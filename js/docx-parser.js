@@ -61,6 +61,13 @@ const TAB_POSITION_PRECISION = 6;
 // Line rules (w:spacing w:lineRule) lineSpacing() can't express, so their paragraphs get single spacing
 const LOST_LINE_RULES = ['exact', 'atLeast'];
 
+// Header and footer content the conversion leaves out: pictures and text boxes (w:drawing, VML
+// w:pict, w:object), and fields (w:fldSimple, w:fldChar), whose displayed result would be stale
+const HEADER_FOOTER_DRAWINGS = ['drawing', 'pict', 'object'];
+
+// Run items a header or footer paragraph keeps: page breaks and note references have no place there
+const HEADER_FOOTER_RUN_TYPES = ['text', 'tab', 'break'];
+
 const COMPOUND_FILE_SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 // Name of the stream an encrypted OOXML package keeps its encryption parameters in (MS-OFFCRYPTO 2.3.4)
@@ -371,8 +378,9 @@ class DocxParser {
                 throw parseFailure('corrupt');
             }
 
-            // Header and footer text and comments are never converted; note them
-            await this.detectHeadersFooters();
+            // The final section's default header and footer are converted; other header and
+            // footer text, and comments, are not, and are noted
+            const headersFooters = await this.parseHeadersFooters();
             await this.detectComments();
 
             // Whether converting moves endnotes Word places per section or renumbers;
@@ -384,6 +392,8 @@ class DocxParser {
 
             return {
                 elements: elements,
+                header: headersFooters.header,
+                footer: headersFooters.footer,
                 images: this.images,
                 footnotes: this.footnotes,
                 endnotes: this.endnotes,
@@ -528,23 +538,157 @@ class DocxParser {
     }
 
     /**
-     * Note header and footer text, which is not converted: once for the document, when any
-     * w:sectPr references a header or footer part with text in it
+     * The sections of the body, in order: the w:sectPr of each section break (a w:sectPr in a
+     * body paragraph's w:pPr), then the body's own final w:sectPr, which describes the last
+     * section. The last section exists without one, so it is null then.
+     * @returns {Array<Element|null>} Empty without a w:body
      */
-    async detectHeadersFooters() {
-        const paths = new Set();
-        for (const sectPr of this.document.getElementsByTagNameNS(WORD_NS, 'sectPr')) {
-            for (const reference of [...childElements(sectPr, 'headerReference'), ...childElements(sectPr, 'footerReference')]) {
-                const rel = this.relationships[reference.getAttributeNS(RELATIONSHIPS_NS, 'id')];
-                if (rel && rel.path) paths.add(rel.path);
+    bodySections() {
+        const body = this.document.getElementsByTagNameNS(WORD_NS, 'body')[0];
+        if (!body) return [];
+        const breaks = Array.from(body.getElementsByTagNameNS(WORD_NS, 'sectPr')).filter(sectPr => {
+            const pPr = sectPr.parentElement;
+            return pPr && pPr.namespaceURI === WORD_NS && pPr.localName === 'pPr' &&
+                pPr.parentElement && pPr.parentElement.namespaceURI === WORD_NS && pPr.parentElement.localName === 'p';
+        });
+        return [...breaks, childElements(body, 'sectPr').pop() || null];
+    }
+
+    /**
+     * The header and footer references of a section
+     * @param {Element|null} sectPr - The section's w:sectPr
+     * @returns {Array<{kind: 'header'|'footer', type: string, path: string|null}>} type is
+     *   default, first or even; path is null when the relationship is missing or external
+     */
+    headerFooterReferences(sectPr) {
+        if (!sectPr) return [];
+        return ['header', 'footer'].flatMap(kind => childElements(sectPr, `${kind}Reference`).map(reference => {
+            const rel = this.relationships[reference.getAttributeNS(RELATIONSHIPS_NS, 'id')];
+            return { kind, type: reference.getAttribute('w:type') || 'default', path: (rel && rel.path) || null };
+        }));
+    }
+
+    /**
+     * Parse the default header and footer of the document's final section, the section the
+     * page setup comes from. A section without its own default header or footer uses the
+     * previous section's (ECMA-376 Part 1, 17.10.5). Header and footer content that isn't
+     * converted is noted once for the document (headersFooters): text in a first-page,
+     * even-page or other section's header or footer, and fields, pictures, text boxes and
+     * tables in the converted ones.
+     * @returns {Promise<{header: Array<Object>|null, footer: Array<Object>|null}>} Parsed
+     *   paragraphs, or null when there is no text to write
+     */
+    async parseHeadersFooters() {
+        const sections = this.bodySections();
+        const converted = { header: null, footer: null };
+        for (const kind of ['header', 'footer']) {
+            for (let i = sections.length - 1; i >= 0; i--) {
+                const reference = this.headerFooterReferences(sections[i])
+                    .find(ref => ref.kind === kind && ref.type === 'default');
+                if (reference) {
+                    converted[kind] = reference.path;
+                    break;
+                }
             }
         }
-        for (const path of paths) {
-            if (await this.partHasText(path)) {
-                this.addFinding('headersFooters');
-                return;
+
+        const result = { header: null, footer: null };
+        let lost = false;
+        for (const kind of ['header', 'footer']) {
+            if (!converted[kind]) continue;
+            const { paragraphs, dropped } = await this.parseHeaderFooterPart(converted[kind], kind);
+            result[kind] = paragraphs;
+            lost = lost || dropped;
+        }
+
+        const checked = new Set();
+        for (const { kind, path } of sections.flatMap(sectPr => this.headerFooterReferences(sectPr))) {
+            if (lost) break;
+            if (!path || path === converted[kind] || checked.has(path)) continue;
+            checked.add(path);
+            lost = await this.partHasText(path);
+        }
+
+        if (lost) this.addFinding('headersFooters');
+        return result;
+    }
+
+    /**
+     * Parse the top-level paragraphs of a header or footer part like body paragraphs. Fields,
+     * pictures, text boxes and tables are left out: a field's displayed result is dropped, not
+     * kept as static text.
+     * @param {string} path - The part's name
+     * @param {'header'|'footer'} kind - Which part it is: its root is w:hdr or w:ftr
+     * @returns {Promise<{paragraphs: Array<Object>|null, dropped: boolean}>} paragraphs is null
+     *   when the part is missing, unreadable or has no non-whitespace text left; dropped says
+     *   whether any content was left out
+     */
+    async parseHeaderFooterPart(path, kind) {
+        const file = this.zip.file(path);
+        if (!file) return { paragraphs: null, dropped: false };
+        let root;
+        try {
+            root = parseXml(await readXmlPart(file)).documentElement;
+        } catch (error) {
+            console.warn(`Could not read ${path}:`, error);
+            return { paragraphs: null, dropped: false };
+        }
+        if (!root || root.namespaceURI !== WORD_NS || root.localName !== (kind === 'header' ? 'hdr' : 'ftr')) {
+            return { paragraphs: null, dropped: false };
+        }
+
+        let dropped = false;
+        const blocks = this.contentChildren(root);
+        const hasContent = element => HEADER_FOOTER_DRAWINGS.some(name => element.getElementsByTagNameNS(WORD_NS, name).length > 0) ||
+            Array.from(element.getElementsByTagNameNS(WORD_NS, 't')).some(t => (t.textContent || '').trim() !== '');
+        if (blocks.some(block => block.localName === 'tbl' && hasContent(block))) dropped = true;
+        const paragraphs = blocks.filter(block => block.localName === 'p');
+
+        // Simple fields, with the result runs inside them, and pictures and text boxes
+        const remove = elements => {
+            for (const element of elements) {
+                dropped = true;
+                element.remove();
+            }
+        };
+        for (const para of paragraphs) {
+            remove(Array.from(para.getElementsByTagNameNS(WORD_NS, 'fldSimple')));
+            for (const name of HEADER_FOOTER_DRAWINGS) remove(Array.from(para.getElementsByTagNameNS(WORD_NS, name)));
+        }
+
+        // Complex fields: everything from a w:fldChar begin to its matching end, the field
+        // instructions and result included, run content in document order. Text in the same
+        // run before the begin or after the end is kept. A field can span paragraphs.
+        let depth = 0;
+        for (const para of paragraphs) {
+            for (const run of this.paragraphRuns(para)) {
+                for (const child of Array.from(run.children)) {
+                    const isFldChar = child.namespaceURI === WORD_NS && child.localName === 'fldChar';
+                    if (isFldChar) {
+                        const type = child.getAttribute('w:fldCharType');
+                        if (type === 'begin') depth++;
+                        else if (type === 'end' && depth > 0) depth--;
+                        remove([child]);
+                    } else if (depth > 0 && !(child.namespaceURI === WORD_NS && child.localName === 'rPr')) {
+                        remove([child]);
+                    }
+                }
             }
         }
+
+        const hasText = paragraphs.some(para => this.paragraphRuns(para)
+            .some(run => childElements(run, 't').some(t => (t.textContent || '').trim() !== '')));
+        if (!hasText) return { paragraphs: null, dropped };
+
+        // Every paragraph is written, as in a table cell (see paragraphIsWritten)
+        return {
+            paragraphs: paragraphs.map(para => {
+                const paragraph = this.parseParagraph(para, this.paragraphRuns(para), true);
+                paragraph.runs = paragraph.runs.filter(run => HEADER_FOOTER_RUN_TYPES.includes(run.type));
+                return paragraph;
+            }),
+            dropped
+        };
     }
 
     /**
@@ -677,17 +821,8 @@ class DocxParser {
      * @returns {Promise<boolean>} false for Word's default: at the end of the document, numbered continuously
      */
     async endnotesAreMoved() {
-        const body = this.document.getElementsByTagNameNS(WORD_NS, 'body')[0];
-        if (!body) return false;
-
-        // A section break is a w:sectPr in a body paragraph's w:pPr; the last section's
-        // w:sectPr is the body's own, and the section still exists without one
-        const breaks = Array.from(body.getElementsByTagNameNS(WORD_NS, 'sectPr')).filter(sectPr => {
-            const pPr = sectPr.parentElement;
-            return pPr && pPr.namespaceURI === WORD_NS && pPr.localName === 'pPr' &&
-                pPr.parentElement && pPr.parentElement.namespaceURI === WORD_NS && pPr.parentElement.localName === 'p';
-        });
-        const sections = [...breaks, childElements(body, 'sectPr').pop() || null];
+        const sections = this.bodySections();
+        if (sections.length === 0) return false;
 
         const value = (parent, name) => {
             const endnotePr = parent && childElement(parent, 'endnotePr');
