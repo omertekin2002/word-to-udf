@@ -14,7 +14,7 @@ const path = require('node:path');
 const JSZip = require('jszip');
 const { JSDOM } = require('jsdom');
 const { chromium } = require('playwright');
-const { buildDocx } = require('../helpers');
+const { buildDocx, declareSize } = require('../helpers');
 const { petitions } = require('../fixtures/petitions');
 
 const ROOT = path.resolve(__dirname, '..', '..');
@@ -243,6 +243,25 @@ test('a .docx with a malformed word/document.xml is refused as damaged', async t
     assert.equal(await page.locator('#downloadSection').isVisible(), false);
     assert.equal(await page.locator('#convertBtn').isVisible(), true);
     // app.js logs the underlying parse failure
+    assertClean(problems, { allowConsoleErrors: [/^Conversion error:/, /^Error parsing DOCX:/] });
+});
+
+test('a .docx whose part declares more than the size limit is refused, and the next file converts', async t => {
+    const { page, problems } = await openPage(t);
+
+    // word/document.xml claims to decompress to 200 MiB, past the 100 MiB per-part limit
+    const oversized = declareSize(await plainDocx(), 'word/document.xml', 200 * 1024 * 1024);
+    await chooseFile(page, 'buyuk.docx', oversized);
+    await page.locator('#convertBtn').click();
+
+    await page.locator('#errorMessage').waitFor({ state: 'visible' });
+    const expected = await page.evaluate(() => I18N_STRINGS.tr['error.tooLarge']);
+    assert.ok(expected, 'the dictionary has an error.tooLarge message');
+    assert.equal(await page.locator('#errorText').textContent(), expected);
+    assert.equal(await page.locator('#downloadSection').isVisible(), false);
+
+    await convertFile(page, 'dilekce.docx', await plainDocx());
+    assert.equal(await page.locator('#errorMessage').isVisible(), false);
     assertClean(problems, { allowConsoleErrors: [/^Conversion error:/, /^Error parsing DOCX:/] });
 });
 

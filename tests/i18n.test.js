@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const JSZip = require('jszip');
 const { JSDOM, VirtualConsole } = require('jsdom');
-const { buildDocx, compoundFile } = require('./helpers');
+const { buildDocx, compoundFile, declareSize } = require('./helpers');
 
 const ROOT = path.resolve(__dirname, '..');
 const HTML = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
@@ -252,11 +252,17 @@ async function strictDocx() {
     return zip.generateAsync({ type: 'nodebuffer' });
 }
 
+// A .docx whose word/document.xml declares it decompresses to 200 MiB, past the per-part limit
+async function oversizedDocx() {
+    return declareSize(await buildDocx('<w:p><w:r><w:t>Dilekçe metni</w:t></w:r></w:p>'), 'word/document.xml', 200 * 1024 * 1024);
+}
+
 const NAMED_FAILURES = [
     ['a damaged .docx', 'error.corrupt', truncatedDocx],
     ['a password-protected .docx', 'error.encrypted', async () => compoundFile(['EncryptionInfo', 'EncryptedPackage'])],
     ['a .doc renamed to .docx', 'error.legacyDoc', async () => compoundFile(['WordDocument', '1Table'])],
-    ['a Strict Open XML .docx', 'error.strict', strictDocx]
+    ['a Strict Open XML .docx', 'error.strict', strictDocx],
+    ['a .docx too large to convert', 'error.tooLarge', oversizedDocx]
 ];
 
 for (const [what, key, build] of NAMED_FAILURES) {

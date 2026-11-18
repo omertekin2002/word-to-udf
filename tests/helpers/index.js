@@ -193,6 +193,34 @@ function compoundFile(children, { trailer = Buffer.alloc(0) } = {}) {
 }
 
 /**
+ * Change the uncompressed size a ZIP archive declares for one entry, in both its local
+ * file header and its central directory record, leaving the data as it is: a damaged
+ * or lying size field. Assumes no ZIP64 fields, as JSZip writes small archives.
+ * @param {Buffer} archive
+ * @param {string} name - The entry's name
+ * @param {number} size - The new declared size, at most 0xFFFFFFFF
+ * @returns {Buffer} A patched copy
+ */
+function declareSize(archive, name, size) {
+    const bytes = Buffer.from(archive);
+    const target = Buffer.from(name);
+    // [signature, offset of the uncompressed size, of the name length, of the name]
+    const records = [[0x04034b50, 22, 26, 30], [0x02014b50, 24, 28, 46]];
+    let patched = 0;
+    for (let offset = 0; offset + 46 <= bytes.length; offset++) {
+        for (const [signature, sizeAt, nameLengthAt, nameAt] of records) {
+            if (bytes.readUInt32LE(offset) !== signature) continue;
+            const nameLength = bytes.readUInt16LE(offset + nameLengthAt);
+            if (nameLength !== target.length || !bytes.subarray(offset + nameAt, offset + nameAt + nameLength).equals(target)) continue;
+            bytes.writeUInt32LE(size, offset + sizeAt);
+            patched++;
+        }
+    }
+    assert.equal(patched, 2, `expected a local header and a central directory record for ${name}`);
+    return bytes;
+}
+
+/**
  * Run a .docx through DocxParser and UdfGenerator and unpack the resulting .udf.
  * @param {Buffer} docx
  * @returns {Promise<{parsed: Object, xml: string, doc: Document, content: string}>}
@@ -242,4 +270,4 @@ function textOf(el, content) {
     return content.slice(start, start + Number(el.getAttribute('length')));
 }
 
-module.exports = { loadConverter, buildDocx, compoundFile, convert, convertBody, assertOffsetsInBounds, textOf };
+module.exports = { loadConverter, buildDocx, compoundFile, declareSize, convert, convertBody, assertOffsetsInBounds, textOf };

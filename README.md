@@ -28,6 +28,8 @@ After a successful conversion, the page lists any [conversion notes](#conversion
 
 Password-protected `.docx` files and Word 97–2003 `.doc` files (even renamed to `.docx`) are refused with a message saying how to fix them, and so is a `.docx` whose main document part is damaged: none of them is turned into an empty `.udf`.
 
+A `.docx` is also refused, with a message to save it again in Word or compress or remove large pictures, when one of its parts would decompress to more than 100 MiB, or all the parts a conversion reads to more than 300 MiB together (`MAX_PART_BYTES` and `MAX_TOTAL_BYTES` in `js/docx-parser.js`). Each part's declared size is checked before it is decompressed, and decompression stops as soon as a part produces more than it declares or the limits allow, so a zip bomb or a damaged size field gets an error message instead of running the tab out of memory. A petition is far below both limits. Only the pictures the document shows are read: an image part it relates to but doesn't use (left over from a deleted picture, say) is never decompressed.
+
 ## Local Development
 
 To run locally, start a simple HTTP server:
@@ -156,6 +158,7 @@ The notes only report: the converted `.udf` is the same with or without them.
 
 - Nested tables are flattened: their text goes into the containing cell, in reading order
 - Embedded OLE objects are not supported
+- Documents whose parts decompress to more than 100 MiB each, or 300 MiB together, are refused (see [Usage](#usage))
 - Password-protected documents and `.doc` files are not converted: remove the password, or save the file as `.docx`, in Word first
 - Track changes / comments are not preserved (inserted text is kept, deleted text is dropped)
 - Only the final section's default header and footer are converted, as plain paragraphs: page numbers and other fields, pictures, text boxes and tables in them, first-page and even-page headers and footers, and other sections' headers and footers are left out and listed in the conversion notes

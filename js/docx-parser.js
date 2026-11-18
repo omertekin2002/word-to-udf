@@ -94,8 +94,15 @@ const PARSE_FAILURES = {
     corrupt: 'The Word document is damaged: its main document part is missing or not well-formed.',
     encrypted: 'The Word document is password-protected.',
     legacyDoc: 'The file is a Word 97-2003 document (.doc), not a .docx.',
-    strict: 'The Word document is saved as Strict Open XML, which is not supported.'
+    strict: 'The Word document is saved as Strict Open XML, which is not supported.',
+    tooLarge: 'The Word document is too large to convert: its parts decompress past the size limit.'
 };
+
+// Most bytes one part of the .docx may decompress to, and all the parts one parse reads
+// together. A petition is far below both: they only stop a zip bomb, or a damaged size
+// field, from running the tab out of memory.
+const MAX_PART_BYTES = 100 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 
 // Codes of the conversion findings parse() reports, in the order it lists them: content the
 // conversion drops or simplifies, so the user can fix it in Word before filing
@@ -218,13 +225,94 @@ async function readBytes(file, length) {
 }
 
 /**
- * Read an XML part as text. A package part may be UTF-8 or UTF-16 (ECMA-376 Part 2), told
- * apart by its byte order mark or, without one, by how the leading "<" is encoded
- * @param {JSZipObject} file - The part
- * @returns {Promise<string>}
+ * A parse failure that a part read raises: an optional part's reader must not swallow it,
+ * since it says the whole package can't be read safely
+ * @param {string} code - 'tooLarge', or 'corrupt' for a part longer than its declared size
+ * @returns {Error}
  */
-async function readXmlPart(file) {
-    const bytes = await file.async('uint8array');
+function partReadFailure(code) {
+    const error = parseFailure(code);
+    error.fatal = true;
+    return error;
+}
+
+/**
+ * Rethrow a failure no optional part's reader may swallow (see partReadFailure)
+ * @param {*} error - What a part's reader caught
+ */
+function rethrowFatal(error) {
+    if (error && error.fatal) throw error;
+}
+
+/**
+ * Uncompressed size a ZIP entry declares in its central directory record, which JSZip
+ * 3.10.1 keeps on the entry's compressed data. Read defensively: it's not public API.
+ * JSZip reads the 32-bit field as a signed integer, so a size of 2 GiB or more comes back
+ * negative and is turned back into the unsigned value.
+ * @param {JSZipObject} file - The part
+ * @returns {number|null} null when the entry doesn't say
+ */
+function declaredSize(file) {
+    const size = file && file._data && file._data.uncompressedSize;
+    return Number.isInteger(size) && size >= -0x80000000 && size <= 0xFFFFFFFF ? size >>> 0 : null;
+}
+
+/**
+ * Decompress a part through JSZip's stream API, stopping as soon as it produces more bytes
+ * than it declares ('corrupt') or than the limit allows ('tooLarge'), so a size field that
+ * lies can't make it allocate past the limit
+ * @param {JSZipObject} file - The part
+ * @param {number} limit - Most bytes the part may decompress to
+ * @param {number|null} declared - Its declared uncompressed size, if known
+ * @returns {Promise<Uint8Array>}
+ */
+function inflatePart(file, limit, declared) {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        let length = 0;
+        let settled = false;
+        let stream;
+        const fail = error => {
+            if (settled) return;
+            settled = true;
+            if (stream) stream.pause();
+            reject(error);
+        };
+        try {
+            stream = file.internalStream('uint8array');
+        } catch (error) {
+            fail(error);
+            return;
+        }
+        stream.on('data', chunk => {
+            // A paused stream still delivers what the chunk being decompressed produces
+            if (settled) return;
+            length += chunk.length;
+            if (declared !== null && length > declared) return fail(partReadFailure('corrupt'));
+            if (length > limit) return fail(partReadFailure('tooLarge'));
+            chunks.push(chunk);
+        }).on('error', fail).on('end', () => {
+            if (settled) return;
+            settled = true;
+            const bytes = new Uint8Array(length);
+            let offset = 0;
+            for (const chunk of chunks) {
+                bytes.set(chunk, offset);
+                offset += chunk.length;
+            }
+            resolve(bytes);
+        });
+        stream.resume();
+    });
+}
+
+/**
+ * Decode an XML part's bytes as text. A package part may be UTF-8 or UTF-16 (ECMA-376
+ * Part 2), told apart by its byte order mark or, without one, by how the leading "<" is encoded
+ * @param {Uint8Array} bytes - The part
+ * @returns {string}
+ */
+function decodeXmlPart(bytes) {
     let encoding = 'utf-8';
     if ((bytes[0] === 0xFF && bytes[1] === 0xFE) || (bytes[0] === 0x3C && bytes[1] === 0x00)) {
         encoding = 'utf-16le';
@@ -315,6 +403,10 @@ class DocxParser {
         this.inDiscardedCell = false;
         this.documentParagraphs = null;
         this.endnotesMoved = false;
+        // Decompression limits, in bytes; tests lower them instead of building huge files
+        this.limits = { part: MAX_PART_BYTES, total: MAX_TOTAL_BYTES };
+        this.partBytes = new Map();
+        this.bytesRead = 0;
     }
 
     /**
@@ -336,6 +428,8 @@ class DocxParser {
             this.inDiscardedCell = false;
             this.documentParagraphs = null;
             this.endnotesMoved = false;
+            this.partBytes = new Map();
+            this.bytesRead = 0;
 
             // A compound file is not a ZIP: name why it can't be read instead of a generic failure
             await this.rejectCompoundFile(file);
@@ -346,9 +440,6 @@ class DocxParser {
 
             // Parse relationships to find media files
             await this.parseRelationships();
-
-            // Extract images
-            await this.extractImages();
 
             // Parse footnotes and endnotes
             this.footnotes = await this.parseNotes('footnote');
@@ -365,7 +456,7 @@ class DocxParser {
             // parsererror inside), and would convert to a blank UDF
             const documentFile = this.zip.file(this.documentPath);
             if (!documentFile) throw parseFailure('corrupt');
-            this.document = parseXml(await readXmlPart(documentFile));
+            this.document = parseXml(await this.readXmlPart(documentFile));
             const root = this.document.documentElement;
             if (!root || this.document.getElementsByTagName('parsererror').length > 0) {
                 throw parseFailure('corrupt');
@@ -387,7 +478,8 @@ class DocxParser {
             // each converted endnote reference then gets a finding
             this.endnotesMoved = await this.endnotesAreMoved();
 
-            // Extract document elements
+            // Decode the pictures the document shows, then extract document elements
+            await this.extractImages();
             const elements = await this.extractElements();
 
             return {
@@ -432,7 +524,7 @@ class DocxParser {
     async findMainDocument() {
         const relsFile = this.zip.file('_rels/.rels');
         if (relsFile) {
-            const relsDoc = parseXml(await readXmlPart(relsFile));
+            const relsDoc = parseXml(await this.readXmlPart(relsFile));
             for (const rel of relsDoc.getElementsByTagName('Relationship')) {
                 if (!OFFICE_DOCUMENT_RELATIONSHIPS.includes(rel.getAttribute('Type'))) continue;
                 // Targets in _rels/.rels are relative to the package root
@@ -452,7 +544,7 @@ class DocxParser {
         const relsFile = this.zip.file(this.documentPath.replace(/[^/]*$/, name => `_rels/${name}.rels`));
         if (!relsFile) return;
 
-        const relsXml = await readXmlPart(relsFile);
+        const relsXml = await this.readXmlPart(relsFile);
         const relsDoc = parseXml(relsXml);
         const relationships = relsDoc.getElementsByTagName('Relationship');
 
@@ -479,17 +571,52 @@ class DocxParser {
     }
 
     /**
-     * Extract the images the main document part relates to, keyed by part name
+     * Read a part's bytes within the decompression limits: refused ('tooLarge') before
+     * decompressing when its declared size passes the per-part limit or what is left of the
+     * total for this parse, and stopped early when it produces more than either allows. A
+     * part read again counts toward the total once.
+     * @param {JSZipObject} file - The part
+     * @returns {Promise<Uint8Array>}
+     */
+    async readPart(file) {
+        const counted = this.partBytes.get(file.name) || 0;
+        const limit = Math.min(this.limits.part, this.limits.total - (this.bytesRead - counted));
+        const declared = declaredSize(file);
+        if (declared !== null && declared > limit) throw partReadFailure('tooLarge');
+        const bytes = await inflatePart(file, limit, declared);
+        this.bytesRead += bytes.length - counted;
+        this.partBytes.set(file.name, bytes.length);
+        return bytes;
+    }
+
+    /**
+     * Read an XML part as text, within the decompression limits
+     * @param {JSZipObject} file - The part
+     * @returns {Promise<string>}
+     */
+    async readXmlPart(file) {
+        return decodeXmlPart(await this.readPart(file));
+    }
+
+    /**
+     * Decode the images the main document part shows, keyed by part name: those an a:blip
+     * embeds, text-box pictures included. An image part nothing shows (left over from a
+     * deleted picture, an unused fallback) is never decompressed.
      */
     async extractImages() {
-        for (const { type, path } of Object.values(this.relationships)) {
+        const embeds = new Set(Array.from(this.document.getElementsByTagNameNS(DRAWING_NS, 'blip'))
+            .map(blip => blip.getAttributeNS(RELATIONSHIPS_NS, 'embed'))
+            .filter(Boolean));
+        for (const id of embeds) {
+            if (!Object.prototype.hasOwnProperty.call(this.relationships, id)) continue;
+            const { type, path } = this.relationships[id];
             if (type !== PART_RELATIONSHIP_TYPE + 'image' || !path || this.images[path]) continue;
             const file = this.zip.file(path);
             if (!file) continue;
 
-            const data = await file.async('arraybuffer');
+            const data = await this.readPart(file);
             this.images[path] = arrayBufferToBase64(data);
-            this.imageFormats[path] = imageFormat(new Uint8Array(data));
+            this.imageFormats[path] = imageFormat(data);
         }
     }
 
@@ -529,9 +656,10 @@ class DocxParser {
         const file = path && this.zip.file(path);
         if (!file) return false;
         try {
-            const doc = parseXml(await readXmlPart(file));
+            const doc = parseXml(await this.readXmlPart(file));
             return Array.from(doc.getElementsByTagNameNS(WORD_NS, 't')).some(t => (t.textContent || '').trim() !== '');
         } catch (error) {
+            rethrowFatal(error);
             console.warn(`Could not read ${path}:`, error);
             return false;
         }
@@ -628,8 +756,9 @@ class DocxParser {
         if (!file) return { paragraphs: null, dropped: false };
         let root;
         try {
-            root = parseXml(await readXmlPart(file)).documentElement;
+            root = parseXml(await this.readXmlPart(file)).documentElement;
         } catch (error) {
+            rethrowFatal(error);
             console.warn(`Could not read ${path}:`, error);
             return { paragraphs: null, dropped: false };
         }
@@ -699,13 +828,14 @@ class DocxParser {
         const commentsFile = this.zip.file(this.relatedPart('comments', 'word/comments.xml'));
         if (!commentsFile) return;
         try {
-            const commentsDoc = parseXml(await readXmlPart(commentsFile));
+            const commentsDoc = parseXml(await this.readXmlPart(commentsFile));
             for (const comment of commentsDoc.getElementsByTagNameNS(WORD_NS, 'comment')) {
                 const hasText = Array.from(comment.getElementsByTagNameNS(WORD_NS, 't'))
                     .some(t => (t.textContent || '').trim() !== '');
                 if (hasText) this.addFinding('comments');
             }
         } catch (error) {
+            rethrowFatal(error);
             console.warn('Could not read comments:', error);
         }
     }
@@ -750,7 +880,7 @@ class DocxParser {
         if (!notesFile) return notes;
 
         try {
-            const notesDoc = parseXml(await readXmlPart(notesFile));
+            const notesDoc = parseXml(await this.readXmlPart(notesFile));
 
             for (const note of notesDoc.getElementsByTagNameNS(WORD_NS, type)) {
                 const id = note.getAttribute('w:id');
@@ -761,6 +891,7 @@ class DocxParser {
                 notes[id] = this.noteText(note);
             }
         } catch (error) {
+            rethrowFatal(error);
             console.warn(`Could not parse ${type}s:`, error);
         }
         return notes;
@@ -848,7 +979,7 @@ class DocxParser {
         if (!numberingFile) return;
 
         try {
-            const numberingDoc = parseXml(await readXmlPart(numberingFile));
+            const numberingDoc = parseXml(await this.readXmlPart(numberingFile));
             const root = numberingDoc.documentElement;
 
             const abstractLevels = {};
@@ -873,6 +1004,7 @@ class DocxParser {
                 this.numbering[num.getAttribute('w:numId')] = levels;
             }
         } catch (error) {
+            rethrowFatal(error);
             console.warn('Could not parse numbering:', error);
         }
     }
@@ -949,7 +1081,7 @@ class DocxParser {
         const settingsFile = this.zip.file(this.relatedPart('settings', 'word/settings.xml'));
         if (!settingsFile) return null;
 
-        const root = parseXml(await readXmlPart(settingsFile)).documentElement;
+        const root = parseXml(await this.readXmlPart(settingsFile)).documentElement;
         return root && root.namespaceURI === WORD_NS && root.localName === 'settings' ? root : null;
     }
 
@@ -1002,7 +1134,7 @@ class DocxParser {
         if (!stylesFile) return;
 
         try {
-            const root = parseXml(await readXmlPart(stylesFile)).documentElement;
+            const root = parseXml(await this.readXmlPart(stylesFile)).documentElement;
             // A malformed part parses to a parsererror document instead of throwing
             if (root.namespaceURI !== WORD_NS || root.localName !== 'styles') {
                 throw new Error('The styles part is not a well-formed w:styles part');
@@ -1037,6 +1169,7 @@ class DocxParser {
                 }
             }
         } catch (error) {
+            rethrowFatal(error);
             this.styles = this.emptyStyles();
             console.warn('Could not parse styles:', error);
         }
