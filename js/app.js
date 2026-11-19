@@ -180,11 +180,17 @@ class WordToUdfApp {
         let failureKey = 'error.parse';
 
         try {
-            // Show progress
+            // Show progress. The status region is revealed empty and filled a frame later:
+            // screen readers announce changes to a live region, not what a region shows
+            // when it first appears
             this.convertBtn.classList.add('hidden');
+            delete this.progressText.dataset.i18n;
+            this.progressText.textContent = '';
             this.progressContainer.classList.remove('hidden');
             this.hideError();
             this.clearNotes();
+            await nextFrame();
+            if (isStale()) return;
 
             // The parser and generator keep state across their awaits, and a cancelled run
             // can't be stopped, so each run gets its own: a discarded run never touches the next

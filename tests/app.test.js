@@ -201,16 +201,26 @@ test('each conversion gets its own parser and generator, so a discarded run cann
     const parsers = [];
     const generators = [];
     const { createParser, createGenerator } = window.app;
-    window.app.createParser = () => { const parser = createParser.call(window.app); parsers.push(parser); return parser; };
+    let parseStarted;
+    const aParsing = new Promise(resolve => { parseStarted = resolve; });
+    window.app.createParser = () => {
+        const parser = createParser.call(window.app);
+        const parse = parser.parse.bind(parser);
+        parser.parse = file => { const result = parse(file); parseStarted(); return result; };
+        parsers.push(parser);
+        return parser;
+    };
     window.app.createGenerator = () => { const generator = createGenerator.call(window.app); generators.push(generator); return generator; };
     const downloads = captureDownloads(page);
 
     // A's real parse is still running when B's starts: both run at once
     const bigA = await buildDocx(Array.from({ length: 300 }, (_, i) => `<w:p><w:r><w:t>Dilekçe A ${i}</w:t></w:r></w:p>`).join(''));
     window.app.processFile(fileOf('a.docx', bigA));
+    const docxB = await docxWith('Dilekçe B');
     const conversionA = window.app.handleConvert();
+    await aParsing;
     document.getElementById('removeFile').click();
-    window.app.processFile(fileOf('b.docx', await docxWith('Dilekçe B')));
+    window.app.processFile(fileOf('b.docx', docxB));
     const conversionB = window.app.handleConvert();
     await Promise.all([conversionA, conversionB]);
 
@@ -257,6 +267,28 @@ test('the progress bar and stage text are exposed to assistive technology, in bo
     assert.equal(bar.getAttribute('aria-label'), strings.tr['progress.label']);
     document.querySelector('[data-set-lang="en"]').click();
     assert.equal(bar.getAttribute('aria-label'), strings.en['progress.label']);
+});
+
+test('the status region is shown empty and gets the first stage a frame later, so it is announced', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document, strings } = page;
+    const parser = stubParser(page);
+    const text = document.getElementById('progressText');
+
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe metni')));
+    const conversion = window.app.handleConvert();
+    assert.ok(visible(document.getElementById('progressContainer')));
+    assert.equal(text.textContent, '', 'empty when it appears');
+
+    // A language change in that frame leaves it empty too
+    document.querySelector('[data-set-lang="en"]').click();
+    assert.equal(text.textContent, '');
+
+    const call = await parser.called(1);
+    assert.equal(text.textContent, strings.en['progress.parsing'], 'filled before the parse starts');
+    call.resolve(await parser.real(call.file));
+    await conversion;
+    assert.ok(visible(document.getElementById('downloadSection')));
 });
 
 test('each real step shows its stage, and aria-valuenow follows the bar', async () => {
