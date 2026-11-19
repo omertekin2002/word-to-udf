@@ -61,10 +61,6 @@ class WordToUdfApp {
         // number is no longer current belongs to a file that was removed or replaced
         this.conversionRun = 0;
 
-        // Modules
-        this.parser = new DocxParser();
-        this.generator = new UdfGenerator();
-
         // Initialize
         this.init();
     }
@@ -190,17 +186,22 @@ class WordToUdfApp {
             this.hideError();
             this.clearNotes();
 
+            // The parser and generator keep state across their awaits, and a cancelled run
+            // can't be stopped, so each run gets its own: a discarded run never touches the next
+            const parser = this.createParser();
+            const generator = this.createGenerator();
+
             // Read the Word document, once the browser has painted that it is doing so
             await this.showStage('progress.parsing');
             if (isStale()) return;
-            const document = await this.parser.parse(file);
+            const document = await parser.parse(file);
             if (isStale()) return;
 
             // Build the UDF
             failureKey = 'error.generic';
             await this.showStage('progress.converting');
             if (isStale()) return;
-            const blob = await this.generator.generate(document);
+            const blob = await generator.generate(document);
             if (isStale()) return;
 
             this.convertedBlob = blob;
@@ -232,6 +233,14 @@ class WordToUdfApp {
             const focused = window.document.activeElement;
             if (!focused || focused === window.document.body) this.convertBtn.focus();
         }
+    }
+
+    createParser() {
+        return new DocxParser();
+    }
+
+    createGenerator() {
+        return new UdfGenerator();
     }
 
     /**

@@ -310,9 +310,13 @@ test('removing the file mid-conversion cancels it, and the next file converts un
 
     // Hold the parser's result until the test releases it, so the file can be removed mid-way
     await page.evaluate(() => {
-        const parse = window.app.parser.parse.bind(window.app.parser);
         window.heldParses = [];
-        window.app.parser.parse = file => new Promise(resolve => window.heldParses.push(() => resolve(parse(file))));
+        window.app.createParser = () => {
+            const parser = new DocxParser();
+            const parse = parser.parse.bind(parser);
+            parser.parse = file => new Promise(resolve => window.heldParses.push(() => resolve(parse(file))));
+            return parser;
+        };
     });
     await chooseFile(page, 'a.docx', await buildDocx('<w:p><w:r><w:t>Dilekçe A</w:t></w:r></w:p>'));
     await page.locator('#convertBtn').click();

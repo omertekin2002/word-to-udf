@@ -11,21 +11,22 @@ const ROOT = path.resolve(__dirname, '..');
 const docxWith = text => buildDocx(`<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`);
 
 /**
- * Replace the app's parser with one whose results the test hands over by hand.
+ * Replace the app's parsers with ones whose results the test hands over by hand.
  * Each parse(file) call is recorded with resolve/reject for its promise, and
- * `real(file)` runs the real parser.
+ * `real(file)` runs a real parser of its own.
  */
-function stubParser(app) {
-    const realParse = app.parser.parse.bind(app.parser);
+function stubParser({ window, run }) {
     const calls = [];
     let notify = null;
-    app.parser.parse = file => new Promise((resolve, reject) => {
-        calls.push({ file, resolve, reject });
-        if (notify) notify();
+    window.app.createParser = () => ({
+        parse: file => new Promise((resolve, reject) => {
+            calls.push({ file, resolve, reject });
+            if (notify) notify();
+        })
     });
     return {
         calls,
-        real: realParse,
+        real: file => run('new DocxParser()').parse(file),
         // Resolves once the parser has been called `count` times in all
         async called(count) {
             while (calls.length < count) await new Promise(resolve => { notify = resolve; });
@@ -76,7 +77,7 @@ test('app.js waits on no artificial delays, and utils.js no longer has sleep()',
 test('removing the file mid-conversion cancels it: a result that arrives later is dropped', async () => {
     const page = await loadPage({ app: true });
     const { window, document } = page;
-    const parser = stubParser(window.app);
+    const parser = stubParser(page);
     const docx = await docxWith('Dilekçe A');
 
     window.app.processFile(fileOf('a.docx', docx));
@@ -106,7 +107,7 @@ test('removing the file mid-conversion cancels it: a result that arrives later i
 test('a parse that fails after its file was removed shows no error', async () => {
     const page = await loadPage({ app: true });
     const { window, document } = page;
-    const parser = stubParser(window.app);
+    const parser = stubParser(page);
 
     window.app.processFile(fileOf('a.docx', await docxWith('Dilekçe A')));
     const conversion = window.app.handleConvert();
@@ -128,7 +129,7 @@ test('a parse that fails after its file was removed shows no error', async () =>
 test('removing file A mid-conversion and choosing B: A never shows, and B converts to B.udf with B\'s text', async () => {
     const page = await loadPage({ app: true });
     const { window, document } = page;
-    const parser = stubParser(window.app);
+    const parser = stubParser(page);
     const downloads = captureDownloads(page);
 
     window.app.processFile(fileOf('a.docx', await docxWith('Dilekçe A')));
@@ -167,7 +168,7 @@ test('removing file A mid-conversion and choosing B: A never shows, and B conver
 test('a result for a removed file that arrives while the next file converts is dropped too', async () => {
     const page = await loadPage({ app: true });
     const { window, document } = page;
-    const parser = stubParser(window.app);
+    const parser = stubParser(page);
     const downloads = captureDownloads(page);
 
     window.app.processFile(fileOf('a.docx', await docxWith('Dilekçe A')));
@@ -194,10 +195,40 @@ test('a result for a removed file that arrives while the next file converts is d
     assert.match(await udfText(downloads[0].blob), /Dilekçe B/);
 });
 
+test('each conversion gets its own parser and generator, so a discarded run cannot touch the next one', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document } = page;
+    const parsers = [];
+    const generators = [];
+    const { createParser, createGenerator } = window.app;
+    window.app.createParser = () => { const parser = createParser.call(window.app); parsers.push(parser); return parser; };
+    window.app.createGenerator = () => { const generator = createGenerator.call(window.app); generators.push(generator); return generator; };
+    const downloads = captureDownloads(page);
+
+    // A's real parse is still running when B's starts: both run at once
+    const bigA = await buildDocx(Array.from({ length: 300 }, (_, i) => `<w:p><w:r><w:t>Dilekçe A ${i}</w:t></w:r></w:p>`).join(''));
+    window.app.processFile(fileOf('a.docx', bigA));
+    const conversionA = window.app.handleConvert();
+    document.getElementById('removeFile').click();
+    window.app.processFile(fileOf('b.docx', await docxWith('Dilekçe B')));
+    const conversionB = window.app.handleConvert();
+    await Promise.all([conversionA, conversionB]);
+
+    assert.equal(new Set(parsers).size, 2);
+    assert.equal(new Set(generators).size, 2);
+    assert.ok(visible(document.getElementById('downloadSection')));
+    document.getElementById('downloadBtn').click();
+    assert.equal(downloads.length, 1);
+    assert.equal(downloads[0].filename, 'b.udf');
+    const xml = await udfText(downloads[0].blob);
+    assert.match(xml, /Dilekçe B/);
+    assert.doesNotMatch(xml, /Dilekçe A/);
+});
+
 test('"convert another" also drops a conversion still running', async () => {
     const page = await loadPage({ app: true });
     const { window, document } = page;
-    const parser = stubParser(window.app);
+    const parser = stubParser(page);
 
     window.app.processFile(fileOf('a.docx', await docxWith('Dilekçe A')));
     const conversion = window.app.handleConvert();
@@ -237,11 +268,19 @@ test('each real step shows its stage, and aria-valuenow follows the bar', async 
     const seen = [];
     const snapshot = step => seen.push({ step, text: text.textContent, now: bar.getAttribute('aria-valuenow'), width: fill.style.width });
 
-    const { parser, generator } = window.app;
-    const parse = parser.parse.bind(parser);
-    const generate = generator.generate.bind(generator);
-    parser.parse = file => { snapshot('parse'); return parse(file); };
-    generator.generate = doc => { snapshot('generate'); return generate(doc); };
+    const { createParser, createGenerator } = window.app;
+    window.app.createParser = () => {
+        const parser = createParser.call(window.app);
+        const parse = parser.parse.bind(parser);
+        parser.parse = file => { snapshot('parse'); return parse(file); };
+        return parser;
+    };
+    window.app.createGenerator = () => {
+        const generator = createGenerator.call(window.app);
+        const generate = generator.generate.bind(generator);
+        generator.generate = doc => { snapshot('generate'); return generate(doc); };
+        return generator;
+    };
 
     window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe metni')));
     await window.app.handleConvert();
