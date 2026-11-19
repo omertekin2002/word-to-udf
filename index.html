@@ -78,7 +78,7 @@
         <div class="rail-box">
           <h3 class="rail-title tint-salmon" data-i18n="notYet.title">HENÜZ YOK</h3>
           <ul class="spec-list">
-            <li data-i18n="notYet.headers">Üst ve alt bilgiler</li>
+            <li data-i18n="notYet.headers">Sayfa numaraları, ilk sayfa üst bilgileri</li>
             <li data-i18n="notYet.trackChanges">Değişiklik izleme, açıklamalar</li>
             <li data-i18n="notYet.ole">Gömülü OLE nesneleri</li>
           </ul>
@@ -114,10 +114,11 @@
               </div>
 
               <div class="progress-container hidden" id="progressContainer">
-                <div class="progress-bar">
+                <div class="progress-bar" id="progressBar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+                  aria-label="Dönüştürme ilerlemesi" data-i18n-attr="aria-label:progress.label">
                   <div class="progress-fill" id="progressFill"></div>
                 </div>
-                <p class="progress-text" id="progressText" data-i18n="progress.converting">UDF biçimine dönüştürülüyor...</p>
+                <p class="progress-text" id="progressText" role="status" data-i18n="progress.parsing">Word belgesi okunuyor...</p>
               </div>
 
               <button class="btn btn-primary convert-btn" id="convertBtn" disabled data-i18n="convert.button">UDF’YE DÖNÜŞTÜR &rarr;</button>

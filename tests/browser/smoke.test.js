@@ -14,14 +14,14 @@ const path = require('node:path');
 const JSZip = require('jszip');
 const { JSDOM } = require('jsdom');
 const { chromium } = require('playwright');
-const { buildDocx } = require('../helpers');
+const { buildDocx, declareSize } = require('../helpers');
 const { petitions } = require('../fixtures/petitions');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const { DOMParser } = new JSDOM('').window;
 const DOCX_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
-// Long enough for the page's progress delays, short enough that a broken step fails fast
+// Long enough for a conversion on a slow CI machine, short enough that a broken step fails fast
 const STEP_TIMEOUT = 15000;
 
 const CONTENT_TYPES = {
@@ -170,6 +170,14 @@ test('a whole petition converts and downloads as a .udf holding its text', async
     await page.locator('#downloadSection').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#errorMessage').isVisible(), false);
 
+    // Keyboard and screen-reader users land on the result; the bar is a labelled progressbar at 100
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'downloadBtn');
+    const bar = page.getByRole('progressbar', { includeHidden: true });
+    assert.equal(await bar.count(), 1);
+    assert.equal(await bar.getAttribute('aria-valuenow'), '100');
+    assert.equal(await bar.getAttribute('aria-label'), await page.evaluate(() => t('progress.label')));
+    assert.equal(await page.locator('#progressText').getAttribute('role'), 'status');
+
     const [download] = await Promise.all([
         page.waitForEvent('download'),
         page.locator('#downloadBtn').click()
@@ -188,13 +196,19 @@ test('a whole petition converts and downloads as a .udf holding its text', async
     assertClean(problems);
 });
 
-test('a header with text shows one conversion note; a file with no findings shows none', async t => {
+test('a header is written into the .udf; a page number in the footer shows one conversion note; a file with no findings shows none', async t => {
     const { page, problems } = await openPage(t);
 
+    const pageField = '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r>' +
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>';
     const withHeader = await buildDocx('<w:p><w:r><w:t>Dilekçe metni</w:t></w:r></w:p>', {
-        sectPr: '<w:headerReference w:type="default" r:id="rIdHeader1"/>',
-        parts: [{ name: 'header1.xml', root: 'hdr', type: 'header', id: 'rIdHeader1',
-            inner: '<w:p><w:r><w:t>Üst bilgi</w:t></w:r></w:p>' }]
+        sectPr: '<w:headerReference w:type="default" r:id="rIdHeader1"/><w:footerReference w:type="default" r:id="rIdFooter1"/>',
+        parts: [
+            { name: 'header1.xml', root: 'hdr', type: 'header', id: 'rIdHeader1',
+                inner: '<w:p><w:r><w:t>Ad Soyad Hukuk Bürosu</w:t></w:r></w:p>' },
+            { name: 'footer1.xml', root: 'ftr', type: 'footer', id: 'rIdFooter1',
+                inner: `<w:p><w:r><w:t xml:space="preserve">Dosya No: 2026/0000 — Sayfa </w:t></w:r>${pageField}</w:p>` }
+        ]
     });
     await convertFile(page, 'ust-bilgi.docx', withHeader);
     await page.locator('#conversionNotes').waitFor({ state: 'visible' });
@@ -203,6 +217,15 @@ test('a header with text shows one conversion note; a file with no findings show
     assert.equal(await notes.first().getAttribute('data-code'), 'headersFooters');
     assert.equal(await notes.first().locator('.conversion-note-text').textContent(),
         await page.evaluate(() => t('notes.headersFooters')));
+
+    // Converted by Chromium's own XML parser: header first, footer last, the field's result left out
+    const xml = await page.evaluate(async () =>
+        (await JSZip.loadAsync(await window.app.convertedBlob.arrayBuffer())).file('content.xml').async('string'));
+    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    assert.equal(doc.getElementsByTagName('parsererror').length, 0, 'content.xml must be well-formed');
+    assert.equal(doc.querySelector('template > content').textContent,
+        'Ad Soyad Hukuk Bürosu' + 'Dilekçe metni' + 'Dosya No: 2026/0000 — Sayfa ');
+    assert.deepEqual([...doc.querySelector('elements').children].map(el => el.localName), ['header', 'paragraph', 'footer']);
 
     await page.locator('#convertAnother').click();
     await convertFile(page, 'duz.docx', await plainDocx());
@@ -228,6 +251,25 @@ test('a .docx with a malformed word/document.xml is refused as damaged', async t
     assert.equal(await page.locator('#downloadSection').isVisible(), false);
     assert.equal(await page.locator('#convertBtn').isVisible(), true);
     // app.js logs the underlying parse failure
+    assertClean(problems, { allowConsoleErrors: [/^Conversion error:/, /^Error parsing DOCX:/] });
+});
+
+test('a .docx whose part declares more than the size limit is refused, and the next file converts', async t => {
+    const { page, problems } = await openPage(t);
+
+    // word/document.xml claims to decompress to 200 MiB, past the 100 MiB per-part limit
+    const oversized = declareSize(await plainDocx(), 'word/document.xml', 200 * 1024 * 1024);
+    await chooseFile(page, 'buyuk.docx', oversized);
+    await page.locator('#convertBtn').click();
+
+    await page.locator('#errorMessage').waitFor({ state: 'visible' });
+    const expected = await page.evaluate(() => I18N_STRINGS.tr['error.tooLarge']);
+    assert.ok(expected, 'the dictionary has an error.tooLarge message');
+    assert.equal(await page.locator('#errorText').textContent(), expected);
+    assert.equal(await page.locator('#downloadSection').isVisible(), false);
+
+    await convertFile(page, 'dilekce.docx', await plainDocx());
+    assert.equal(await page.locator('#errorMessage').isVisible(), false);
     assertClean(problems, { allowConsoleErrors: [/^Conversion error:/, /^Error parsing DOCX:/] });
 });
 
@@ -260,5 +302,53 @@ test('"convert another" brings back the upload zone with no file selected', asyn
     assert.equal(await page.locator('#convertBtn').isVisible(), true);
     assert.equal(await page.locator('#convertBtn').isDisabled(), true);
     assert.equal(await page.locator('#fileInput').evaluate(input => input.files.length), 0);
+    assertClean(problems);
+});
+
+test('removing the file mid-conversion cancels it, and the next file converts under its own name', async t => {
+    const { page, problems } = await openPage(t);
+
+    // Hold the parser's result until the test releases it, so the file can be removed mid-way
+    await page.evaluate(() => {
+        window.heldParses = [];
+        window.app.createParser = () => {
+            const parser = new DocxParser();
+            const parse = parser.parse.bind(parser);
+            parser.parse = file => new Promise(resolve => window.heldParses.push(() => resolve(parse(file))));
+            return parser;
+        };
+    });
+    await chooseFile(page, 'a.docx', await buildDocx('<w:p><w:r><w:t>Dilekçe A</w:t></w:r></w:p>'));
+    await page.locator('#convertBtn').click();
+    await page.waitForFunction(() => window.heldParses.length === 1);
+    assert.equal(await page.locator('#progressContainer').isVisible(), true);
+    assert.equal(await page.locator('#progressText').textContent(), await page.evaluate(() => t('progress.parsing')));
+
+    await page.locator('#removeFile').click();
+    await page.locator('#uploadZone').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#progressContainer').isVisible(), false);
+    assert.equal(await page.locator('#convertBtn').isVisible(), true);
+    assert.equal(await page.locator('#convertBtn').isDisabled(), true);
+
+    await chooseFile(page, 'b.docx', await buildDocx('<w:p><w:r><w:t>Dilekçe B</w:t></w:r></w:p>'));
+    await page.evaluate(() => window.heldParses[0]());
+    // Give A's discarded result time to arrive: it must not show
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 200)));
+    assert.equal(await page.locator('#downloadSection').isVisible(), false);
+    assert.equal(await page.locator('#fileName').textContent(), 'b.docx');
+
+    await page.locator('#convertBtn').click();
+    await page.waitForFunction(() => window.heldParses.length === 2);
+    await page.evaluate(() => window.heldParses[1]());
+    await page.locator('#downloadSection').waitFor({ state: 'visible' });
+
+    const [download] = await Promise.all([
+        page.waitForEvent('download'),
+        page.locator('#downloadBtn').click()
+    ]);
+    assert.equal(download.suggestedFilename(), 'b.udf');
+    const xml = await (await JSZip.loadAsync(await fs.readFile(await download.path()))).file('content.xml').async('string');
+    assert.match(xml, /Dilekçe B/);
+    assert.doesNotMatch(xml, /Dilekçe A/);
     assertClean(problems);
 });

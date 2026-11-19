@@ -98,13 +98,32 @@ function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).substr(2);
 }
 
+// How long nextFrame() waits for an animation frame before going on without one
+const NEXT_FRAME_FALLBACK_MS = 100;
+
 /**
- * Sleep for specified milliseconds
- * @param {number} ms - Milliseconds to sleep
- * @returns {Promise} Promise that resolves after delay
+ * Wait until the browser has had a chance to paint what was just put on screen.
+ * Runs after the next animation frame; falls back to a timer where there are no
+ * animation frames (jsdom) or they are paused (a hidden tab), so it never stalls.
+ * @returns {Promise<void>}
  */
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function nextFrame() {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = () => {
+      if (!done) {
+        done = true;
+        resolve();
+      }
+    };
+    if (typeof requestAnimationFrame === 'function') {
+      // Animation frame callbacks run just before the paint, so continue on the task after it
+      requestAnimationFrame(() => setTimeout(finish, 0));
+      setTimeout(finish, NEXT_FRAME_FALLBACK_MS);
+    } else {
+      setTimeout(finish, 0);
+    }
+  });
 }
 
 /**
