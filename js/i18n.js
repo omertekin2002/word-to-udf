@@ -14,7 +14,7 @@ const I18N_STRINGS = {
     tr: {
         'meta.title': 'Word’den UDF’ye Dönüştürücü | UYAP Belge Dönüştürücü',
         'meta.description': 'Word belgelerini (.docx) çevrimiçi olarak UYAP UDF biçimine dönüştürün. Ücretsiz, hızlı ve güvenli: dosyalarınız tarayıcınızdan hiç çıkmaz.',
-        'banner.tagline': '.DOCX’TEN UYAP UDF’YE. ÇEVRİMİÇİ.',
+        'banner.tagline': '.DOCX’TEN UYAP UDF’YE.',
         'lang.label': 'Dil',
         'nav.quickLinks': 'Hızlı bağlantılar',
         'nav.source': 'KAYNAK',
@@ -85,7 +85,7 @@ const I18N_STRINGS = {
     en: {
         'meta.title': 'Word to UDF Converter | UYAP Document Converter',
         'meta.description': 'Convert Word documents (.docx) to UYAP UDF format online. Free, fast, and secure - your files never leave your browser.',
-        'banner.tagline': 'CONVERT .DOCX TO UYAP UDF. ONLINE.',
+        'banner.tagline': 'CONVERT .DOCX TO UYAP UDF.',
         'lang.label': 'Language',
         'nav.quickLinks': 'Quick links',
         'nav.source': 'SOURCE',
