@@ -21,7 +21,7 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const { DOMParser } = new JSDOM('').window;
 const DOCX_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
-// Long enough for the page's progress delays, short enough that a broken step fails fast
+// Long enough for a conversion on a slow CI machine, short enough that a broken step fails fast
 const STEP_TIMEOUT = 15000;
 
 const CONTENT_TYPES = {
@@ -170,6 +170,14 @@ test('a whole petition converts and downloads as a .udf holding its text', async
     await page.locator('#downloadSection').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#errorMessage').isVisible(), false);
 
+    // Keyboard and screen-reader users land on the result; the bar is a labelled progressbar at 100
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'downloadBtn');
+    const bar = page.getByRole('progressbar', { includeHidden: true });
+    assert.equal(await bar.count(), 1);
+    assert.equal(await bar.getAttribute('aria-valuenow'), '100');
+    assert.equal(await bar.getAttribute('aria-label'), await page.evaluate(() => t('progress.label')));
+    assert.equal(await page.locator('#progressText').getAttribute('role'), 'status');
+
     const [download] = await Promise.all([
         page.waitForEvent('download'),
         page.locator('#downloadBtn').click()
@@ -294,5 +302,49 @@ test('"convert another" brings back the upload zone with no file selected', asyn
     assert.equal(await page.locator('#convertBtn').isVisible(), true);
     assert.equal(await page.locator('#convertBtn').isDisabled(), true);
     assert.equal(await page.locator('#fileInput').evaluate(input => input.files.length), 0);
+    assertClean(problems);
+});
+
+test('removing the file mid-conversion cancels it, and the next file converts under its own name', async t => {
+    const { page, problems } = await openPage(t);
+
+    // Hold the parser's result until the test releases it, so the file can be removed mid-way
+    await page.evaluate(() => {
+        const parse = window.app.parser.parse.bind(window.app.parser);
+        window.heldParses = [];
+        window.app.parser.parse = file => new Promise(resolve => window.heldParses.push(() => resolve(parse(file))));
+    });
+    await chooseFile(page, 'a.docx', await buildDocx('<w:p><w:r><w:t>Dilekçe A</w:t></w:r></w:p>'));
+    await page.locator('#convertBtn').click();
+    await page.waitForFunction(() => window.heldParses.length === 1);
+    assert.equal(await page.locator('#progressContainer').isVisible(), true);
+    assert.equal(await page.locator('#progressText').textContent(), await page.evaluate(() => t('progress.parsing')));
+
+    await page.locator('#removeFile').click();
+    await page.locator('#uploadZone').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#progressContainer').isVisible(), false);
+    assert.equal(await page.locator('#convertBtn').isVisible(), true);
+    assert.equal(await page.locator('#convertBtn').isDisabled(), true);
+
+    await chooseFile(page, 'b.docx', await buildDocx('<w:p><w:r><w:t>Dilekçe B</w:t></w:r></w:p>'));
+    await page.evaluate(() => window.heldParses[0]());
+    // Give A's discarded result time to arrive: it must not show
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 200)));
+    assert.equal(await page.locator('#downloadSection').isVisible(), false);
+    assert.equal(await page.locator('#fileName').textContent(), 'b.docx');
+
+    await page.locator('#convertBtn').click();
+    await page.waitForFunction(() => window.heldParses.length === 2);
+    await page.evaluate(() => window.heldParses[1]());
+    await page.locator('#downloadSection').waitFor({ state: 'visible' });
+
+    const [download] = await Promise.all([
+        page.waitForEvent('download'),
+        page.locator('#downloadBtn').click()
+    ]);
+    assert.equal(download.suggestedFilename(), 'b.udf');
+    const xml = await (await JSZip.loadAsync(await fs.readFile(await download.path()))).file('content.xml').async('string');
+    assert.match(xml, /Dilekçe B/);
+    assert.doesNotMatch(xml, /Dilekçe A/);
     assertClean(problems);
 });

@@ -25,6 +25,9 @@ const FINDING_KEYS = {
     tabStops: 'notes.tabStops'
 };
 
+// The conversion's real steps, in order; the bar fills one share per step
+const PROGRESS_STAGES = ['progress.parsing', 'progress.converting', 'progress.complete'];
+
 // Findings whose examples are document text, shown in quotes; the others are format names
 const QUOTED_EXAMPLE_CODES = ['nestedTables', 'missingImage', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
 
@@ -39,6 +42,7 @@ class WordToUdfApp {
         this.removeFile = document.getElementById('removeFile');
         this.convertBtn = document.getElementById('convertBtn');
         this.progressContainer = document.getElementById('progressContainer');
+        this.progressBar = document.getElementById('progressBar');
         this.progressFill = document.getElementById('progressFill');
         this.progressText = document.getElementById('progressText');
         this.downloadSection = document.getElementById('downloadSection');
@@ -53,6 +57,9 @@ class WordToUdfApp {
         this.selectedFile = null;
         this.convertedBlob = null;
         this.outputFilename = 'document.udf';
+        // Bumped by every new conversion and every change of file; a conversion whose
+        // number is no longer current belongs to a file that was removed or replaced
+        this.conversionRun = 0;
 
         // Modules
         this.parser = new DocxParser();
@@ -126,6 +133,7 @@ class WordToUdfApp {
             return;
         }
 
+        this.cancelConversion();
         this.selectedFile = file;
         this.outputFilename = toUdfFilename(file.name);
 
@@ -138,17 +146,37 @@ class WordToUdfApp {
         this.hideError();
     }
 
+    /**
+     * Remove the selected file. During a conversion this cancels it: the parser can't stop
+     * mid-way, so its result is discarded when it arrives.
+     */
     handleRemoveFile() {
+        this.cancelConversion();
         this.selectedFile = null;
         this.fileInput.value = '';
         this.fileInfo.classList.add('hidden');
+        this.progressContainer.classList.add('hidden');
+        this.resetProgress();
         this.uploadZone.classList.remove('hidden');
+        this.convertBtn.classList.remove('hidden');
         this.convertBtn.disabled = true;
         this.hideError();
     }
 
+    /** Make any conversion still running stale, so nothing it produces is shown */
+    cancelConversion() {
+        this.conversionRun++;
+    }
+
     async handleConvert() {
-        if (!this.selectedFile) return;
+        const file = this.selectedFile;
+        if (!file) return;
+
+        // Tie this run to its file: the name is taken now, and once the file is removed or
+        // replaced (or "convert another" is pressed) the run drops whatever it produces
+        const run = ++this.conversionRun;
+        const isStale = () => run !== this.conversionRun;
+        const outputFilename = toUdfFilename(file.name);
 
         // The parser reports any failure with an English message (and an error.code for the
         // failures it can name); show the translated message for the step that failed and
@@ -162,32 +190,34 @@ class WordToUdfApp {
             this.hideError();
             this.clearNotes();
 
-            // Update progress: Parsing
-            this.updateProgress(20, 'progress.parsing');
-            await sleep(300);
+            // Read the Word document, once the browser has painted that it is doing so
+            await this.showStage('progress.parsing');
+            if (isStale()) return;
+            const document = await this.parser.parse(file);
+            if (isStale()) return;
 
-            // Parse DOCX
-            const document = await this.parser.parse(this.selectedFile);
-
-            // Update progress: Converting
+            // Build the UDF
             failureKey = 'error.generic';
-            this.updateProgress(60, 'progress.converting');
-            await sleep(300);
+            await this.showStage('progress.converting');
+            if (isStale()) return;
+            const blob = await this.generator.generate(document);
+            if (isStale()) return;
 
-            // Generate UDF
-            this.convertedBlob = await this.generator.generate(document);
+            this.convertedBlob = blob;
+            this.outputFilename = outputFilename;
+            this.updateProgress('progress.complete');
 
-            // Update progress: Complete
-            this.updateProgress(100, 'progress.complete');
-            await sleep(500);
-
-            // Show download section, with notes on what the conversion dropped or simplified
+            // Show download section, with notes on what the conversion dropped or simplified,
+            // and take keyboard and screen-reader users to the result
             this.progressContainer.classList.add('hidden');
             this.fileInfo.classList.add('hidden');
             this.showNotes(document.findings || []);
             this.downloadSection.classList.remove('hidden');
+            this.downloadBtn.focus();
 
         } catch (error) {
+            // A conversion of a file that is gone has nothing to report
+            if (isStale()) return;
             console.error('Conversion error:', error);
             // Damaged, password-protected, .doc, Strict Open XML and too-large files get a message saying what to do
             if (failureKey === 'error.parse' && error &&
@@ -197,12 +227,39 @@ class WordToUdfApp {
             this.progressContainer.classList.add('hidden');
             this.convertBtn.classList.remove('hidden');
             this.showError(failureKey);
+            // The role="alert" message announces itself; put focus back on the convert button,
+            // which lost it when it was hidden, unless the user has moved it elsewhere
+            const focused = window.document.activeElement;
+            if (!focused || focused === window.document.body) this.convertBtn.focus();
         }
     }
 
-    updateProgress(percent, messageKey) {
-        this.progressFill.style.width = `${percent}%`;
+    /**
+     * Show a stage and give the browser a frame to paint it before the work starts
+     * @param {string} messageKey - One of PROGRESS_STAGES
+     */
+    async showStage(messageKey) {
+        this.updateProgress(messageKey);
+        await nextFrame();
+    }
+
+    /**
+     * Fill the bar to a stage's share and show its text
+     * @param {string} messageKey - One of PROGRESS_STAGES
+     */
+    updateProgress(messageKey) {
+        const stage = PROGRESS_STAGES.indexOf(messageKey) + 1;
+        this.setProgressValue(Math.round(stage / PROGRESS_STAGES.length * 100));
         setTranslatedText(this.progressText, messageKey);
+    }
+
+    resetProgress() {
+        this.setProgressValue(0);
+    }
+
+    setProgressValue(percent) {
+        this.progressFill.style.width = `${percent}%`;
+        this.progressBar.setAttribute('aria-valuenow', String(percent));
     }
 
     handleDownload() {
@@ -212,19 +269,11 @@ class WordToUdfApp {
     }
 
     handleConvertAnother() {
-        // Reset state
-        this.selectedFile = null;
+        // Drop the result, then reset the file, progress and buttons as removing the file does
         this.convertedBlob = null;
-        this.fileInput.value = '';
-
-        // Reset UI
         this.downloadSection.classList.add('hidden');
-        this.uploadZone.classList.remove('hidden');
-        this.convertBtn.classList.remove('hidden');
-        this.convertBtn.disabled = true;
-        this.progressFill.style.width = '0%';
         this.clearNotes();
-        this.hideError();
+        this.handleRemoveFile();
     }
 
     /**

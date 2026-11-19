@@ -24,6 +24,8 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 3. Click "UDF’YE DÖNÜŞTÜR" ("Convert to UDF" in English)
 4. Download the converted `.udf` file
 
+While a conversion runs, the page says which step it is on (reading the Word document, then building the UDF) and announces it to screen readers; when it finishes, focus moves to the download button. Removing the file (KALDIR / REMOVE) during a conversion cancels it: its result is discarded and the page goes back to the empty upload state.
+
 After a successful conversion, the page lists any [conversion notes](#conversion-notes): parts of the document the converter dropped or simplified, with what to change in Word.
 
 Password-protected `.docx` files and Word 97–2003 `.doc` files (even renamed to `.docx`) are refused with a message saying how to fix them, and so is a `.docx` whose main document part is damaged: none of them is turned into an empty `.udf`.
