@@ -100,6 +100,12 @@ The default header and footer (`w:headerReference` / `w:footerReference` with `w
 - A header or footer with no non-whitespace text left writes no element.
 - Not converted, and reported as a `headersFooters` conversion note: first-page (`w:type="first"`) and even-page (`w:type="even"`) headers and footers with text; an earlier section's header or footer with text that differs from the final section's; and fields, pictures, text boxes and tables in the converted header or footer. The UDF format documents a single header and footer.
 
+### Run text
+A run's text is written as Word shows it:
+- Hidden text (`w:vanish`) is left out, together with any tabs, breaks, pictures and note references in the hidden run, and reported as a `hiddenText` conversion note. Like bold and italic, it resolves through `w:docDefaults`, the paragraph style chain, the character style chain and the run itself, so `<w:vanish w:val="0"/>` on a run shows text a style hides. The paragraph itself is still written, even when all of its text is hidden.
+- All Caps (`w:caps`) and Small Caps (`w:smallCaps`) text is written in capitals, resolved the same way. Text whose language (`w:lang w:val`) is Turkish, or not set, is upper-cased the Turkish way (`i` becomes `İ`, `ı` becomes `I`); text in another language uses the general rules. Small capitals are written full size: the UDF has no small-caps attribute.
+- A non-breaking hyphen (`w:noBreakHyphen`) becomes a hyphen-minus (`-`). An optional hyphen (`w:softHyphen`) is left out, as Word only shows it at a line break.
+
 ### Paragraph spacing
 Paragraph spacing (`w:spacing`) is read from the document defaults, the paragraph style and its `w:basedOn` chain, and the paragraph itself, each attribute on its own: a style can set the space before while the paragraph sets only the space after.
 - `w:before` and `w:after` become `SpaceAbove` and `SpaceBelow`, in points.
@@ -139,6 +145,7 @@ A paragraph's list comes from `w:numPr`, read from the paragraph style and its `
 | --- | --- | --- |
 | `headersFooters` | Header or footer content is not converted (see [Headers and footers](#headers-and-footers)): a section references a first-page or even-page header or footer with non-whitespace text, or a header or footer with text other than the final section's default one; or the converted default header or footer holds a field, picture, text box or table, which is left out. Reported once for the document. | none |
 | `comments` | The comments part has comments with text; `count` is the number of such comments. | none |
+| `hiddenText` | Text formatted as hidden (`w:vanish`, see [Run text](#run-text)) is left out. Counted per paragraph, header and footer paragraphs and table cells included. | The start of the paragraph's hidden text |
 | `nestedTables` | A table inside a table cell is flattened into that cell. | The start of the nested table's first non-empty paragraph |
 | `missingImage` | A picture's relationship or media part is missing, so it is skipped. | The text of the nearest paragraph |
 | `unsupportedImage` | A picture's data is not PNG or JPEG, judged by its leading bytes, not its file extension. It is still embedded as-is. | The format: `EMF`, `WMF`, `GIF`, `TIFF`, `SVG` or `unknown` |
@@ -169,6 +176,7 @@ The notes only report: the converted `.udf` is the same with or without them.
 - Footnote and endnote text is converted as plain text, without its formatting; a tab or line break inside a note becomes a space. All endnotes go at the end of the document, even when Word places them at the end of each section, and they are always numbered from the start. Footnotes and such endnotes are listed in the conversion notes
 - Exact and at-least line heights, automatic paragraph spacing and contextual spacing are not converted (see Paragraph spacing); exact and at-least line heights are listed in the conversion notes
 - Bar tab stops and underscore or heavy tab leaders are not converted (see Tab stops), and are listed in the conversion notes
+- Hidden text is left out (see Run text) and listed in the conversion notes; Small Caps text is written in full-size capitals
 
 ## License
 

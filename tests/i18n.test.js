@@ -273,7 +273,7 @@ for (const lang of ['tr', 'en']) {
 test('every finding code the parser reports has a TR and an EN message, and app.js maps it', async () => {
     const { strings, run } = await loadPage({ app: true });
     const codes = run('FINDING_CODES');
-    assert.deepEqual([...codes], ['headersFooters', 'comments', 'nestedTables', 'missingImage', 'unsupportedImage',
+    assert.deepEqual([...codes], ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
         'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops']);
     const keys = run('FINDING_KEYS');
     assert.deepEqual(Object.keys(keys).sort(), [...codes].sort());
@@ -370,12 +370,13 @@ test('a clean conversion keeps the notes hidden, and "Convert another file" clea
     assert.equal(noteItems(document).length, 0);
 });
 
-test('moved notes, lost line heights and lost tab stops are listed in both languages', async () => {
+test('hidden text, moved notes, lost line heights and lost tab stops are listed in both languages', async () => {
     const { window, document, strings } = await loadPage({ app: true });
     const p = (inner, pPr = '') => `<w:p>${pPr ? `<w:pPr>${pPr}</w:pPr>` : ''}${inner}</w:p>`;
     const r = text => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
     const docx = await buildDocx(
         p(r('Birinci bölüm'), '<w:sectPr/>') +
+        p(r('Görünen ') + '<w:r><w:rPr><w:vanish/></w:rPr><w:t>Gizli not</w:t></w:r>') +
         p(r('Dipnotlu') + '<w:r><w:footnoteReference w:id="1"/></w:r>') +
         p(r('Son notlu') + '<w:r><w:endnoteReference w:id="1"/></w:r>') +
         p(r('Tam satır'), '<w:spacing w:line="360" w:lineRule="exact"/>') +
@@ -388,6 +389,7 @@ test('moved notes, lost line heights and lost tab stops are listed in both langu
     await window.app.handleConvert();
 
     const expected = lang => [
+        { code: 'hiddenText', text: strings[lang]['notes.hiddenText'], count: null, examples: ['“Gizli not”'] },
         { code: 'notesMoved', text: strings[lang]['notes.notesMoved'], count: null, examples: ['“Dipnot metni”'] },
         { code: 'endnotesMoved', text: strings[lang]['notes.endnotesMoved'], count: null, examples: ['“Son not metni”'] },
         { code: 'lineSpacing', text: strings[lang]['notes.lineSpacing'], count: null, examples: ['“Tam satır”'] },
