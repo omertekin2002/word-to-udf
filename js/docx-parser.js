@@ -1998,7 +1998,8 @@ class DocxParser {
      * edges between cells from insideH and insideV; an edge the table style's cell borders
      * set overrides that, and an edge the cell's own w:tcBorders sets overrides both. An edge two cells share then has a line when either cell's edge does,
      * and is set on both. Cells above and below each other share an edge where their grid
-     * columns (w:gridSpan included) overlap.
+     * columns (w:gridSpan included) overlap; such a line is set on a cell only when it runs
+     * along that cell's whole edge, so it doesn't reach past a narrower cell along a wider one.
      * @param {Object} table - Parsed table, its rows' cells without borders yet
      * @param {Object<string,boolean>} edges - The table's edges (see tableBorders)
      * @param {Array<Array<Element>>} cellElements - The w:tc element of each cell, row by row
@@ -2037,7 +2038,8 @@ class DocxParser {
             rows[i + 1].cells.forEach((below, k) => {
                 const [belowStart, belowEnd] = columns[i + 1][k];
                 if (belowStart < end && start < belowEnd && (own[i][j].bottom || own[i + 1][k].top)) {
-                    cell.borders.bottom = below.borders.top = true;
+                    if (belowStart <= start && end <= belowEnd) cell.borders.bottom = true;
+                    if (start <= belowStart && belowEnd <= end) below.borders.top = true;
                 }
             });
         }));

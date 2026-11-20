@@ -146,14 +146,31 @@ test('a cell edge is set on both cells that share it', async () => {
     assert.deepEqual(attributes(doc, 'border'), [[null, null], [null, 'borderNone']]);
 });
 
-test('a shared edge under a wide cell reaches only the cells below that set it', async () => {
-    const { doc } = await convertBody(table([
-        [['Wide', '<w:gridSpan w:val="2"/>']],
+test("a line along part of a wide cell's edge stays on the narrower cell that sets it", async () => {
+    const WIDE = '<w:gridSpan w:val="2"/>';
+
+    // Under the wide cell: only A2 draws the line, so the wide cell's bottom isn't set
+    const below = await convertBody(table([
+        [['Wide', WIDE]],
         [['A2', tcBorders(edges('single', 'top'))], ['B2']]
     ]), { styles: STYLES });
+    assert.deepEqual(attributes(below.doc, 'borderSpec'), [[null], ['1', null]]);
+    assert.deepEqual(attributes(below.doc, 'border'), [['borderNone'], [null, 'borderNone']]);
 
-    assert.deepEqual(attributes(doc, 'borderSpec'), [['4'], ['1', null]]);
-    assert.deepEqual(attributes(doc, 'border'), [[null], [null, 'borderNone']]);
+    // Above the wide cell: only A1 draws the line, so the wide cell's top isn't set
+    const above = await convertBody(table([
+        [['A1', tcBorders(edges('single', 'bottom'))], ['B1']],
+        [['Wide', WIDE]]
+    ]), { styles: STYLES });
+    assert.deepEqual(attributes(above.doc, 'borderSpec'), [['4', null], [null]]);
+    assert.deepEqual(attributes(above.doc, 'border'), [[null, 'borderNone'], ['borderNone']]);
+
+    // A line along the wide cell's whole edge is still set on the cells above it
+    const whole = await convertBody(table([
+        [['A1'], ['B1']],
+        [['Wide', WIDE + tcBorders(edges('single', 'top'))]]
+    ]), { styles: STYLES });
+    assert.deepEqual(attributes(whole.doc, 'borderSpec'), [['4', '4'], ['1']]);
 });
 
 test('start and end are read like left and right, in w:tblBorders and w:tcBorders', async () => {
