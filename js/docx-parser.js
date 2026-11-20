@@ -312,35 +312,59 @@ function hiddenRunContent(run) {
 }
 
 /**
- * Points of a length in a VML shape's style, e.g. "120pt" or "1.5in"
- * @param {string} value - The length; a number without a unit is in pixels
- * @returns {number|null} Rounded points, or null for an unreadable, unknown-unit, non-finite
- *   or non-positive length
+ * A length in a VML element's style attribute, e.g. "width:120pt"
+ * @param {Element} element - A VML element
+ * @param {string} name - 'width' or 'height'
+ * @returns {{value: number, unit: string}|null} The number and its lower-case unit ('' for a
+ *   bare number), or null when the style doesn't give the length or gives it unreadably
  */
-function vmlLengthToPoints(value) {
-    const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)([a-z]*)$/i.exec(value.trim());
-    if (!match) return null;
-    const unit = match[2].toLowerCase() || 'px';
-    if (!Object.prototype.hasOwnProperty.call(VML_POINTS_PER_UNIT, unit)) return null;
-    const points = Math.round(parseFloat(match[1]) * VML_POINTS_PER_UNIT[unit]);
-    return Number.isFinite(points) && points > 0 ? points : null;
+function vmlStyleLength(element, name) {
+    for (const declaration of ((element && element.getAttribute('style')) || '').split(';')) {
+        const colon = declaration.indexOf(':');
+        if (colon < 0 || declaration.slice(0, colon).trim().toLowerCase() !== name) continue;
+        const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)([a-z]*)$/i.exec(declaration.slice(colon + 1).trim());
+        return match ? { value: parseFloat(match[1]), unit: match[2].toLowerCase() } : null;
+    }
+    return null;
 }
 
 /**
- * Size of a VML shape from the width and height in its style attribute
+ * Points of a VML length. A bare number in a shape inside a v:group is in the group's
+ * coordinate system (coordsize, 1000 by default), which the group's own width or height
+ * spans; elsewhere it is in pixels.
+ * @param {Element} element - The VML element the length belongs to
+ * @param {string} name - 'width' or 'height'
+ * @param {{value: number, unit: string}} length
+ * @returns {number|null} Points, or null for an unknown unit or a group whose size is unreadable
+ */
+function vmlLengthToPoints(element, name, { value, unit }) {
+    const group = element.parentElement;
+    if (!unit && group && group.namespaceURI === VML_NS && group.localName === 'group') {
+        const groupLength = vmlStyleLength(group, name);
+        const coordinates = (group.getAttribute('coordsize') || '').split(',').map(part => parseFloat(part));
+        const span = coordinates[name === 'width' ? 0 : 1];
+        const coordinateSize = Number.isFinite(span) ? span : 1000;
+        if (!groupLength || !(coordinateSize > 0)) return null;
+        return vmlLengthToPoints(group, name, { value: value * groupLength.value / coordinateSize, unit: groupLength.unit });
+    }
+    const key = unit || 'px';
+    return Object.prototype.hasOwnProperty.call(VML_POINTS_PER_UNIT, key) ? value * VML_POINTS_PER_UNIT[key] : null;
+}
+
+/**
+ * Size of a VML shape from the width and height in its style attribute, scaled through any
+ * v:group holding it
  * @param {Element} shape - The v:shape (or other VML element) that owns a v:imagedata
- * @returns {{width: number, height: number}} Points; DEFAULT_IMAGE_SIZE for a side the style
- *   doesn't give or gives unreadably
+ * @returns {{width: number, height: number}} Rounded points; DEFAULT_IMAGE_SIZE for a side
+ *   that is missing, unreadable, non-finite or not positive
  */
 function vmlShapeSize(shape) {
     const size = { width: DEFAULT_IMAGE_SIZE, height: DEFAULT_IMAGE_SIZE };
-    for (const declaration of ((shape && shape.getAttribute('style')) || '').split(';')) {
-        const colon = declaration.indexOf(':');
-        if (colon < 0) continue;
-        const name = declaration.slice(0, colon).trim().toLowerCase();
-        if (name !== 'width' && name !== 'height') continue;
-        const points = vmlLengthToPoints(declaration.slice(colon + 1));
-        if (points !== null) size[name] = points;
+    for (const name of ['width', 'height']) {
+        const length = vmlStyleLength(shape, name);
+        const points = length && vmlLengthToPoints(shape, name, length);
+        const rounded = points === null ? NaN : Math.round(points);
+        if (Number.isFinite(rounded) && rounded > 0) size[name] = rounded;
     }
     return size;
 }

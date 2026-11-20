@@ -105,6 +105,28 @@ test('a VML picture whose size is missing, unreadable, zero, negative or infinit
     assert.deepEqual(images(doc).map(image => [image.width, image.height]), [['50', '100']]);
 });
 
+test('a VML picture in a group is sized through the group\'s coordinate system', async () => {
+    const shape = (rId, style) => `<v:shape style="${style}"><v:imagedata r:id="${rId}"/></v:shape>`;
+    const group = `<w:r><w:pict><v:group style="width:144pt;height:72pt" coordsize="21600,21600">` +
+        `${shape('rId_image1', 'position:absolute;width:21600;height:21600')}` +
+        // A nested group, with the default 1000×1000 coordinates, filling the left half
+        `<v:group style="position:absolute;width:10800;height:21600">${shape('rId_image2', 'width:500;height:250')}</v:group>` +
+        '</v:group></w:pict></w:r>';
+    const { parsed } = await convertBody(p(group), { media: { 'image1.png': PNG, 'image2.png': PNG2 } });
+    const [image] = plain(parsed.elements[0].runs);
+    assert.deepEqual([image.width, image.height], [144, 72]);
+
+    // The nested group's picture, on its own: 500/1000 of 10800/21600 of 144pt, 250/1000 of 72pt
+    const nested = group.replace(shape('rId_image1', 'position:absolute;width:21600;height:21600'), '');
+    const second = plain((await convertBody(p(nested), { media: { 'image2.png': PNG2 } })).parsed.elements[0].runs);
+    assert.deepEqual(second.map(run => [run.width, run.height]), [[36, 18]]);
+
+    // A group without a readable size leaves the picture at the default
+    const unsized = `<w:r><w:pict><v:group coordsize="100,100">${shape('rId_image1', 'width:50;height:50')}</v:group></w:pict></w:r>`;
+    const third = plain((await convertBody(p(unsized), { media: { 'image1.png': PNG } })).parsed.elements[0].runs);
+    assert.deepEqual(third.map(run => [run.width, run.height]), [[100, 100]]);
+});
+
 test('an OLE object is shown by its preview picture: an EMF preview embeds and gives unsupportedImage', async () => {
     const { doc, parsed } = await convertBody(p(r('Tablo: ') + oleObject('rId_image1')), { media: { 'image1.emf': EMF } });
     assert.deepEqual(images(doc), [{ data: EMF.toString('base64'), width: '200', height: '80' }]);

@@ -8,7 +8,7 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 - 📄 **DOCX Support**: Converts standard Word documents
 - 📋 **Formatting**: Preserves bold, italic, fonts, and alignment
 - 📊 **Tables**: Handles table structure with cells and borders
-- 🖼️ **Images**: Embeds images as base64, including legacy VML pictures (`w:pict`) and the preview pictures of embedded OLE objects (`w:object`), such as an Excel table or an Equation Editor formula. Charts, SmartArt and shapes without a text box aren't converted; they are listed in the conversion notes
+- 🖼️ **Images**: Embeds images as base64, including legacy VML pictures (`w:pict`, sized from the shape's style and any `v:group` holding it) and the preview pictures of embedded OLE objects (`w:object`), such as an Excel table or an Equation Editor formula. Charts, SmartArt and shapes without a text box aren't converted; they are listed in the conversion notes
 - 📐 **Page Setup**: Keeps the page margins, orientation and header/footer offsets
 - 🗂️ **Headers and footers**: Keeps the text of the last section's main header and footer, such as an office name or a file reference (page numbers aren't converted yet)
 - ↕️ **Spacing**: Keeps the space before and after paragraphs and their line spacing
