@@ -2076,9 +2076,10 @@ class DocxParser {
         }
 
         // Get embedded image reference. Pictures inside a text box belong to the
-        // text box's own paragraphs, which are parsed separately.
+        // text box's own paragraphs, which are parsed separately; one in an
+        // mc:AlternateContent branch that isn't read isn't shown (or extracted).
         const blips = Array.from(drawing.getElementsByTagNameNS(DRAWING_NS, 'blip'))
-            .filter(blip => !this.isInTextBox(blip, drawing));
+            .filter(blip => !this.isInTextBox(blip, drawing) && this.isInReadBranch(blip));
         if (blips.length > 0) {
             this.embedPicture(image, blips[0].getAttributeNS(RELATIONSHIPS_NS, 'embed'), drawing);
         } else if (drawing.getElementsByTagNameNS(WORD_NS, 'txbxContent').length === 0) {
@@ -2098,7 +2099,7 @@ class DocxParser {
      */
     parseVmlPicture(element) {
         const imageData = Array.from(element.getElementsByTagNameNS(VML_NS, 'imagedata'))
-            .find(el => el.getAttributeNS(RELATIONSHIPS_NS, 'id') && !this.isInTextBox(el, element));
+            .find(el => el.getAttributeNS(RELATIONSHIPS_NS, 'id') && !this.isInTextBox(el, element) && this.isInReadBranch(el));
         if (imageData) {
             const image = { type: 'image', ...vmlShapeSize(imageData.parentElement), data: null };
             this.embedPicture(image, imageData.getAttributeNS(RELATIONSHIPS_NS, 'id'), element);
@@ -2106,7 +2107,7 @@ class DocxParser {
         }
 
         const drawing = Array.from(element.getElementsByTagNameNS(WORD_NS, 'drawing'))
-            .find(el => !this.isInTextBox(el, element));
+            .find(el => !this.isInTextBox(el, element) && this.isInReadBranch(el));
         if (drawing) return this.parseDrawing(drawing);
 
         // A shape, line or object with no picture; a text box's paragraphs are kept on their own

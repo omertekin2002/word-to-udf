@@ -154,6 +154,25 @@ test('alternate content with a DrawingML picture and a VML fallback writes the c
     assert.deepEqual(plain(result.parsed.findings), []);
 });
 
+test('alternate content inside a drawing or VML picture embeds the branch that is read, not the first picture', async () => {
+    const cx1 = 'xmlns:cx1="http://schemas.microsoft.com/office/drawing/2015/9/8/chartex"';
+    const blip = rId => `<pic:pic><pic:blipFill><a:blip r:embed="${rId}"/></pic:blipFill></pic:pic>`;
+    const inDrawing = '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><a:graphic>' +
+        '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+        `<mc:AlternateContent ${cx1}><mc:Choice Requires="cx1">${blip('rId_image1')}</mc:Choice>` +
+        `<mc:Fallback>${blip('rId_image2')}</mc:Fallback></mc:AlternateContent>` +
+        '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+    const inPict = `<w:r><w:pict><mc:AlternateContent ${cx1}><mc:Choice Requires="cx1">${vmlShape('rId_image1')}</mc:Choice>` +
+        `<mc:Fallback>${vmlShape('rId_image2', 'width:10pt;height:20pt')}</mc:Fallback></mc:AlternateContent></w:pict></w:r>`;
+    const { doc, parsed } = await convertBody(p(inDrawing) + p(inPict), { media: { 'image1.png': PNG, 'image2.png': PNG2 } });
+    assert.deepEqual(images(doc), [
+        { data: PNG2.toString('base64'), width: '72', height: '36' },
+        { data: PNG2.toString('base64'), width: '10', height: '20' }
+    ]);
+    assert.deepEqual(Object.keys(plain(parsed.images)), ['word/media/image2.png']);
+    assert.deepEqual(plain(parsed.findings), []);
+});
+
 test('a chart, a SmartArt diagram and a shape with no text box give unconvertedDrawing and write no image', async () => {
     const { doc, xml, content, parsed } = await convertBody(
         p(r('Grafik 1: Dava sayıları') + chart) + p(r('Şema') + smartArt) + p(plainShape) + p(r('Sonraki paragraf')));
