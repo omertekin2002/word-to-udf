@@ -1065,7 +1065,8 @@ class DocxParser {
             const style = this.paragraphStyle(childElement(para, 'pPr'));
             const hidden = { found: false, text: '' };
             for (const run of para.getElementsByTagNameNS(WORD_NS, 'r')) {
-                if (this.parseRunFormatting(run, style.run).hidden) {
+                const formatting = this.parseRunFormatting(run, style.run);
+                if (formatting.hidden) {
                     const { shows, text: hiddenText } = hiddenRunContent(run);
                     if (shows) {
                         hidden.found = true;
@@ -1077,7 +1078,7 @@ class DocxParser {
                     if (child.localName === 't') {
                         text += child.textContent || '';
                     } else if (child.localName === 'sym' && child.parentNode === run) {
-                        const symbol = symbolText(child);
+                        const symbol = symbolText(child, formatting.fontFamily);
                         text += symbol.text;
                         findings.push(['symbols', symbol.example]);
                     } else if (NOTE_WHITESPACE_ELEMENTS.includes(child.localName) && child.parentNode === run) {

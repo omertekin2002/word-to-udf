@@ -220,3 +220,18 @@ test('a hidden run in a referenced note writes nothing, its symbols included, an
         { code: 'symbols', count: 1, examples: ['Wingdings F0A8 → □'] }
     ]);
 });
+
+test('a w:sym without w:font in a footnote or endnote uses the run\'s font, as in the body', async () => {
+    const wingdingsRun = sym(null, 'F0FE', '<w:rFonts w:ascii="Wingdings" w:hAnsi="Wingdings"/>');
+    const { content, parsed } = await convertBody(
+        p(r('Dipnotlu') + '<w:r><w:footnoteReference w:id="1"/></w:r>') +
+        p(r('Son notlu') + '<w:r><w:endnoteReference w:id="1"/></w:r>'), {
+            footnotes: { 1: p(wingdingsRun + r(' dipnotta')) },
+            endnotes: { 1: p(wingdingsRun + r(' son notta')) }
+        });
+
+    assert.ok(content.includes('☑ dipnotta'));
+    assert.ok(content.includes('☑ son notta'));
+    assert.deepEqual(findingsOf(parsed).find(finding => finding.code === 'symbols'),
+        { code: 'symbols', count: 2, examples: ['Wingdings F0FE → ☑'] });
+});
