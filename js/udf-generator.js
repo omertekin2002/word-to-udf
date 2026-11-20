@@ -23,7 +23,9 @@ const VERTICAL_ALIGN = new Map([
 
 // <cell borderSpec> edge bits
 const BORDER_TOP = 1;
+const BORDER_RIGHT = 2;
 const BORDER_BOTTOM = 4;
+const BORDER_LEFT = 8;
 const BORDER_ALL = 15; // top, right, bottom and left
 
 // Line that sets the footnote and endnote sections off from the text above them
@@ -459,6 +461,14 @@ class UdfGenerator {
         }
 
         const merges = verticalMerges(table);
+        // The edges each cell draws; the cells of a vertical merge are joined by dropping the edges between them
+        const specs = table.rows.map((row, i) => row.cells.map((cell, j) => {
+            const merge = merges[i][j];
+            return this.cellEdges(cell, table)
+                & ~(merge.joinsAbove ? BORDER_TOP : 0)
+                & ~(merge.joinsBelow ? BORDER_BOTTOM : 0);
+        }));
+        const border = specs.some(row => row.some(spec => spec !== 0)) ? 'borderCell' : 'borderNone';
         const rowElements = [];
 
         for (let i = 0; i < table.rows.length; i++) {
@@ -488,9 +498,11 @@ class UdfGenerator {
                 if (align) {
                     cellAttrs += ` align="${align}"`;
                 }
-                // Join the cells of a merge by dropping the edges between them
-                if (table.border !== 'borderNone' && (merge.joinsAbove || merge.joinsBelow)) {
-                    const spec = BORDER_ALL & ~(merge.joinsAbove ? BORDER_TOP : 0) & ~(merge.joinsBelow ? BORDER_BOTTOM : 0);
+                // A cell with all four edges takes the table's border; one with none has no border
+                const spec = specs[i][j];
+                if (border === 'borderCell' && spec === 0) {
+                    cellAttrs += ' border="borderNone"';
+                } else if (border === 'borderCell' && spec !== BORDER_ALL) {
                     cellAttrs += ` borderSpec="${spec}"`;
                 }
 
@@ -500,8 +512,22 @@ class UdfGenerator {
             rowElements.push(`<row rowName="row${i + 1}" rowType="dataRow">${cellElements.join('')}</row>`);
         }
 
-        const tableElement = `<table tableName="Table" columnCount="${columnCount}" columnSpans="${columnSpans}" border="${table.border}">${rowElements.join('')}</table>`;
+        const tableElement = `<table tableName="Table" columnCount="${columnCount}" columnSpans="${columnSpans}" border="${border}">${rowElements.join('')}</table>`;
         this.elements.push(tableElement);
+    }
+
+    /**
+     * The <cell borderSpec> bits of the edges a parsed cell draws. A cell without parsed
+     * edges draws all four, unless its table has no border.
+     * @param {Object} cell - Parsed cell
+     * @param {Object} table - Its parsed table
+     * @returns {number} Edge bits (0 to 15)
+     */
+    cellEdges(cell, table) {
+        const edges = cell.borders;
+        if (!edges) return table.border === 'borderNone' ? 0 : BORDER_ALL;
+        return (edges.top ? BORDER_TOP : 0) | (edges.right ? BORDER_RIGHT : 0) |
+            (edges.bottom ? BORDER_BOTTOM : 0) | (edges.left ? BORDER_LEFT : 0);
     }
 
     /**

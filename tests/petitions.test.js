@@ -359,3 +359,23 @@ test('ekli tablo dilekçesi: shaded cells carry fillColor', async () => {
         assert.equal(cell.getAttribute('vAlign'), null);
     }
 });
+
+test('cevap dilekçesi: the borderless signature table draws only the line under the name', async () => {
+    const { doc, content } = await converted(cevap);
+    const tables = doc.querySelectorAll('elements table');
+    assert.equal(tables.length, 1);
+    assert.equal(tables[0].getAttribute('border'), 'borderCell');
+
+    const underlined = elementWithText(doc, content, cevap.signature.underlined).closest('cell');
+    assert.equal(underlined.getAttribute('borderSpec'), '4', 'only the bottom edge');
+    assert.equal(underlined.getAttribute('border'), null);
+    const others = [...tables[0].querySelectorAll('cell')].filter(cell => cell !== underlined);
+    assert.equal(others.length, 3);
+    for (const cell of others) {
+        assert.equal(cell.getAttribute('border'), 'borderNone');
+        assert.equal(cell.getAttribute('borderSpec'), null);
+    }
+    for (const text of cevap.signature.texts) {
+        assert.equal(paragraphOf(doc, content, text).getAttribute('Alignment'), '1', text);
+    }
+});
