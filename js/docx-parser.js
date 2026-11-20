@@ -22,13 +22,20 @@ const DEFAULT_RUN_FORMATTING = {
     italic: false,
     underline: false,
     strike: false,
+    hidden: false,
+    caps: false,
+    smallCaps: false,
     fontFamily: 'Times New Roman',
     fontSize: 12
 };
 
 // On/off properties that toggle, rather than override, between the paragraph and
 // character style levels (ECMA-376 Part 1, 17.7.3)
-const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike'];
+const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike', 'hidden', 'caps', 'smallCaps'];
+
+// Run children that show something, so a hidden run (w:vanish) holding one leaves content out.
+// w:t counts only when it has text; a drawing may also be wrapped in mc:AlternateContent.
+const HIDDEN_CONTENT_ELEMENTS = ['tab', 'br', 'cr', 'noBreakHyphen', 'footnoteReference', 'endnoteReference', 'drawing'];
 
 // Points per unit of an OOXML universal measure (ST_UniversalMeasure, e.g. "2.5cm")
 const POINTS_PER_UNIT = { mm: 72 / 25.4, cm: 72 / 2.54, in: 72, pt: 1, pc: 12, pi: 12 };
@@ -128,7 +135,7 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 
 // Codes of the conversion findings parse() reports, in the order it lists them: content the
 // conversion drops or simplifies, so the user can fix it in Word before filing
-const FINDING_CODES = ['headersFooters', 'comments', 'nestedTables', 'missingImage', 'unsupportedImage',
+const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
     'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
 
 // How many location hints a finding keeps, and how long each may be
@@ -832,14 +839,14 @@ class DocxParser {
         if (!hasText) return { paragraphs: null, dropped };
 
         // Every paragraph is written, as in a table cell (see paragraphIsWritten)
-        return {
-            paragraphs: paragraphs.map(para => {
-                const paragraph = this.parseParagraph(para, this.paragraphRuns(para), true);
-                paragraph.runs = paragraph.runs.filter(run => HEADER_FOOTER_RUN_TYPES.includes(run.type));
-                return paragraph;
-            }),
-            dropped
-        };
+        const parsed = paragraphs.map(para => {
+            const paragraph = this.parseParagraph(para, this.paragraphRuns(para), true);
+            paragraph.runs = paragraph.runs.filter(run => HEADER_FOOTER_RUN_TYPES.includes(run.type));
+            return paragraph;
+        });
+        // A part whose only text is hidden (w:vanish) shows nothing in Word
+        if (!parsed.some(paragraph => paragraphText(paragraph).trim() !== '')) return { paragraphs: null, dropped };
+        return { paragraphs: parsed, dropped };
     }
 
     /**
@@ -1271,10 +1278,16 @@ class DocxParser {
         const props = {};
         if (!rPr) return props;
 
-        for (const [name, key] of [['b', 'bold'], ['i', 'italic'], ['strike', 'strike']]) {
+        const onOff = [['b', 'bold'], ['i', 'italic'], ['strike', 'strike'], ['vanish', 'hidden'],
+            ['caps', 'caps'], ['smallCaps', 'smallCaps']];
+        for (const [name, key] of onOff) {
             const el = childElement(rPr, name);
             if (el) props[key] = this.isOn(el);
         }
+
+        // The language of the run's text (w:lang w:val, e.g. "tr-TR"), which decides how All Caps upper-cases it
+        const lang = childElement(rPr, 'lang');
+        if (lang && lang.getAttribute('w:val')) props.lang = lang.getAttribute('w:val');
 
         const u = childElement(rPr, 'u');
         if (u && u.hasAttribute('w:val')) props.underline = u.getAttribute('w:val') !== 'none';
@@ -1653,10 +1666,12 @@ class DocxParser {
             }
         }
 
-        // Get runs (text with formatting)
+        // Get runs (text with formatting). Hidden runs add nothing; their text is collected for the finding.
+        const hidden = { found: false, text: '' };
         for (const run of runs) {
-            paragraph.runs.push(...this.parseRun(run, style.run));
+            paragraph.runs.push(...this.parseRun(run, style.run, hidden));
         }
+        if (hidden.found) this.addFinding('hiddenText', shortExample(hidden.text));
 
         // Line heights and tab stops the conversion loses, with the paragraph's text as the hint.
         // A paragraph the generator doesn't write as one has no line height or stops to lose.
@@ -1676,25 +1691,52 @@ class DocxParser {
      * Parse a run element (text with formatting)
      * @param {Element} run - The run element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
-     * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image, footnoteRef, endnoteRef)
+     * @param {{found: boolean, text: string}} [hidden] - Set when the run is hidden (w:vanish) and
+     *   holds content: found becomes true and the run's text is appended to text
+     * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image,
+     *   footnoteRef, endnoteRef). Empty for a hidden run: Word neither shows nor prints it.
      */
-    parseRun(run, paragraphRun = {}) {
+    parseRun(run, paragraphRun = {}, hidden = null) {
         const items = [];
-        let formatting = null;
+        // hidden, caps, smallCaps and lang decide how the run's text is written; they aren't text attributes
+        const { hidden: isHidden, caps, smallCaps, lang, ...formatting } = this.parseRunFormatting(run, paragraphRun);
+
+        if (isHidden) {
+            const text = childElements(run, 't').map(t => t.textContent || '').join('');
+            const showsSomething = text !== '' || Array.from(run.children).some(child =>
+                HIDDEN_CONTENT_ELEMENTS.includes(child.localName) ||
+                (child.localName !== 'rPr' && child.getElementsByTagNameNS(WORD_NS, 'drawing').length > 0));
+            if (hidden && showsSomething) {
+                hidden.found = true;
+                hidden.text += text;
+            }
+            return items;
+        }
+
+        // All Caps and Small Caps show the text in capitals (the UDF has no small capitals). Word
+        // upper-cases by the run's language, so Turkish text, or text with no language set, keeps
+        // its dotted capital İ.
+        const turkish = !lang || lang.toLowerCase().startsWith('tr');
+        const shown = text => !(caps || smallCaps) ? text
+            : turkish ? text.toLocaleUpperCase('tr-TR') : text.toUpperCase();
+        const addText = text => {
+            if (!text) return;
+            const last = items[items.length - 1];
+            if (last && last.type === 'text') {
+                last.text += shown(text);
+            } else {
+                items.push({ ...formatting, text: shown(text) });
+            }
+        };
 
         for (const child of run.children) {
             const localName = child.localName;
 
             if (localName === 't') {
-                const text = child.textContent || '';
-                if (!text) continue;
-                const last = items[items.length - 1];
-                if (last && last.type === 'text') {
-                    last.text += text;
-                } else {
-                    if (!formatting) formatting = this.parseRunFormatting(run, paragraphRun);
-                    items.push({ ...formatting, text: text });
-                }
+                addText(child.textContent || '');
+            } else if (localName === 'noBreakHyphen') {
+                // A plain hyphen: whether the UYAP editor's fonts show U+2011 is unknown
+                addText('-');
             } else if (localName === 'tab') {
                 items.push({ type: 'tab' });
             } else if (localName === 'br') {
@@ -1733,8 +1775,9 @@ class DocxParser {
     /**
      * Resolve a run's character formatting in Word's order: built-in defaults, document
      * defaults, the paragraph style chain, the character style chain (w:rStyle), then
-     * the run's own w:rPr. Later layers override earlier ones, except that bold, italic
-     * and strike set by the two style levels toggle: on in both styles is off, and off
+     * the run's own w:rPr. Later layers override earlier ones, except that the on/off
+     * properties in TOGGLE_PROPERTIES (bold, italic, strike, hidden, caps and small caps)
+     * set by the two style levels toggle: on in both styles is off, and off
      * in a style leaves the value unchanged (unless the document defaults turn it on).
      * Direct formatting always sets them outright.
      * @param {Element} run - The run element

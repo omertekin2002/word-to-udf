@@ -16,6 +16,7 @@ const PARSE_FAILURE_KEYS = {
 const FINDING_KEYS = {
     headersFooters: 'notes.headersFooters',
     comments: 'notes.comments',
+    hiddenText: 'notes.hiddenText',
     nestedTables: 'notes.nestedTables',
     missingImage: 'notes.missingImage',
     unsupportedImage: 'notes.unsupportedImage',
@@ -29,7 +30,7 @@ const FINDING_KEYS = {
 const PROGRESS_STAGES = ['progress.parsing', 'progress.converting', 'progress.complete'];
 
 // Findings whose examples are document text, shown in quotes; the others are format names
-const QUOTED_EXAMPLE_CODES = ['nestedTables', 'missingImage', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
+const QUOTED_EXAMPLE_CODES = ['hiddenText', 'nestedTables', 'missingImage', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
 
 class WordToUdfApp {
     constructor() {
