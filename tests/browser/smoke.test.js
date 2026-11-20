@@ -193,6 +193,20 @@ test('a whole petition converts and downloads as a .udf holding its text', async
     for (const text of [...petition.texts, ...petition.footnotes]) {
         assert.ok(content.includes(text), `content.xml is missing ${JSON.stringify(text)}`);
     }
+    for (const line of petition.checkBoxes) {
+        assert.ok(content.includes(line), `content.xml is missing the check box line ${JSON.stringify(line)}`);
+    }
+
+    // The EKLER check boxes get the symbols note, with the conversions as unquoted examples, in both languages
+    const symbolsNote = page.locator('#conversionNotesList > li.conversion-note[data-code="symbols"]');
+    assert.equal(await symbolsNote.count(), 1);
+    const examples = symbolsNote.locator('.conversion-note-examples > li');
+    assert.deepEqual(await examples.allTextContents(), ['Wingdings F0FE → ☑', 'Wingdings F0A8 → □']);
+    for (const lang of ['tr', 'en']) {
+        await page.locator(`[data-set-lang="${lang}"]`).click();
+        assert.equal(await symbolsNote.locator('.conversion-note-text').textContent(),
+            await page.evaluate(() => t('notes.symbols')), lang);
+    }
     assertClean(problems);
 });
 

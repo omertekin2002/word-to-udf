@@ -46,6 +46,12 @@ function recorder() {
             return `<w:r>${rPrXml(rPr)}${inner}</w:r>`;
         },
 
+        /** A run holding a symbol (w:sym) and the Unicode text the UDF should hold for it */
+        sym(font, char, text) {
+            texts.push(text);
+            return `<w:r><w:sym w:font="${font}" w:char="${char}"/></w:r>`;
+        },
+
         /** A footnote reference run; the footnote body is a single paragraph */
         footnote(text) {
             const id = String(footnotes.length + 1);
@@ -190,6 +196,12 @@ function davaDilekcesi() {
         p(rec.run('Banka kayıtları ve faturalar'), list(BULLETS)),
         p(rec.run('Tanık beyanları, bilirkişi incelemesi ve her türlü yasal delil'), list(BULLETS)),
         empty(),
+        // Check boxes as Word's Insert > Symbol writes them: Wingdings ticked (F0FE) and empty (F0A8)
+        p(rec.run(BOLD, 'EKLER'), ''),
+        p(rec.sym('Wingdings', 'F0FE', '☑') + rec.run(' Hizmet sözleşmesi örneği')),
+        p(rec.sym('Wingdings', 'F0FE', '☑') + rec.run(' İhtarname örneği')),
+        p(rec.sym('Wingdings', 'F0A8', '□') + rec.run(' Vekâletname (duruşmada sunulacaktır)')),
+        empty(),
         p(rec.run(BOLD, 'SONUÇ VE İSTEM'), jc('center')),
         p(rec.run('Yukarıda açıklanan nedenlerle; davanın kabulüne, alacağın dava tarihinden itibaren işleyecek ' +
             'yasal faiziyle birlikte davalıdan tahsiline, yargılama giderleri ile vekâlet ücretinin davalıya ' +
@@ -211,6 +223,8 @@ function davaDilekcesi() {
         ...recorded(rec),
         margins,
         heading,
+        // The EKLER check boxes, as the UDF should hold them
+        checkBoxes: ['☑ Hizmet sözleşmesi örneği', '☑ İhtarname örneği', '□ Vekâletname (duruşmada sunulacaktır)'],
         listItems: [
             { text: 'Müvekkil ile davalı arasında 01.01.2026 tarihli hizmet sözleşmesi imzalanmıştır.', kind: 'number', level: 0 },
             { text: 'Davalı, sözleşmeden doğan ödeme yükümlülüğünü yerine getirmemiş; ihtarnameye rağmen borcunu ödememiştir.', kind: 'number', level: 0 },

@@ -35,7 +35,7 @@ const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike', 'hidden', 'caps', 'smallC
 
 // Run children that show something, so a hidden run (w:vanish) holding one leaves content out.
 // w:t counts only when it has text; a drawing may also be wrapped in mc:AlternateContent.
-const HIDDEN_CONTENT_ELEMENTS = ['tab', 'br', 'cr', 'noBreakHyphen', 'footnoteReference', 'endnoteReference', 'drawing'];
+const HIDDEN_CONTENT_ELEMENTS = ['tab', 'ptab', 'br', 'cr', 'noBreakHyphen', 'sym', 'footnoteReference', 'endnoteReference', 'drawing'];
 
 // Points per unit of an OOXML universal measure (ST_UniversalMeasure, e.g. "2.5cm")
 const POINTS_PER_UNIT = { mm: 72 / 25.4, cm: 72 / 2.54, in: 72, pt: 1, pc: 12, pi: 12 };
@@ -44,7 +44,87 @@ const POINTS_PER_UNIT = { mm: 72 / 25.4, cm: 72 / 2.54, in: 72, pt: 1, pc: 12, p
 const SEPARATOR_NOTE_TYPES = ['separator', 'continuationSeparator', 'continuationNotice'];
 
 // Run children of a footnote or endnote that stand for whitespace: a tab or a line break
-const NOTE_WHITESPACE_ELEMENTS = ['tab', 'br', 'cr'];
+const NOTE_WHITESPACE_ELEMENTS = ['tab', 'ptab', 'br', 'cr'];
+
+// Unicode text of the symbols Word writes as w:sym (Insert > Symbol, and check boxes), by
+// lower-case font name and character code. Word writes w:char as hex, usually in the private
+// use range F020-F0FF and sometimes as the plain 0020-00FF; both are looked up by the low byte.
+// A code a table doesn't list has no equivalent and is left out (see symbolText).
+const SYMBOL_FONTS = {
+    // Symbol: every code in Unicode's MAPPINGS/VENDORS/ADOBE/symbol.txt (Adobe Symbol Encoding
+    // to Unicode, table version 1.0, 2011-07-12), except the 29 it maps into the Corporate Use
+    // Subarea (bracket, brace and integral pieces, arrow extenders and the serif and sans-serif
+    // registered, copyright and trade mark signs). Where the file gives a code two values, the
+    // first one listed is used, except 0x6D, written as GREEK SMALL LETTER MU rather than MICRO SIGN.
+    // The angle brackets (0xE1, 0xF1) are escaped: normalizing the file would turn them into U+3008 and U+3009.
+    'symbol': {
+        0x20: ' ', 0x21: '!', 0x22: '∀', 0x23: '#', 0x24: '∃', 0x25: '%', 0x26: '&', 0x27: '∋',
+        0x28: '(', 0x29: ')', 0x2A: '∗', 0x2B: '+', 0x2C: ',', 0x2D: '−', 0x2E: '.', 0x2F: '/',
+        0x30: '0', 0x31: '1', 0x32: '2', 0x33: '3', 0x34: '4', 0x35: '5', 0x36: '6', 0x37: '7',
+        0x38: '8', 0x39: '9', 0x3A: ':', 0x3B: ';', 0x3C: '<', 0x3D: '=', 0x3E: '>', 0x3F: '?',
+        0x40: '≅', 0x41: 'Α', 0x42: 'Β', 0x43: 'Χ', 0x44: 'Δ', 0x45: 'Ε', 0x46: 'Φ', 0x47: 'Γ',
+        0x48: 'Η', 0x49: 'Ι', 0x4A: 'ϑ', 0x4B: 'Κ', 0x4C: 'Λ', 0x4D: 'Μ', 0x4E: 'Ν', 0x4F: 'Ο',
+        0x50: 'Π', 0x51: 'Θ', 0x52: 'Ρ', 0x53: 'Σ', 0x54: 'Τ', 0x55: 'Υ', 0x56: 'ς', 0x57: 'Ω',
+        0x58: 'Ξ', 0x59: 'Ψ', 0x5A: 'Ζ', 0x5B: '[', 0x5C: '∴', 0x5D: ']', 0x5E: '⊥', 0x5F: '_',
+        0x61: 'α', 0x62: 'β', 0x63: 'χ', 0x64: 'δ', 0x65: 'ε', 0x66: 'φ', 0x67: 'γ', 0x68: 'η',
+        0x69: 'ι', 0x6A: 'ϕ', 0x6B: 'κ', 0x6C: 'λ', 0x6D: 'μ', 0x6E: 'ν', 0x6F: 'ο', 0x70: 'π',
+        0x71: 'θ', 0x72: 'ρ', 0x73: 'σ', 0x74: 'τ', 0x75: 'υ', 0x76: 'ϖ', 0x77: 'ω', 0x78: 'ξ',
+        0x79: 'ψ', 0x7A: 'ζ', 0x7B: '{', 0x7C: '|', 0x7D: '}', 0x7E: '∼', 0xA0: '€', 0xA1: 'ϒ',
+        0xA2: '′', 0xA3: '≤', 0xA4: '⁄', 0xA5: '∞', 0xA6: 'ƒ', 0xA7: '♣', 0xA8: '♦', 0xA9: '♥',
+        0xAA: '♠', 0xAB: '↔', 0xAC: '←', 0xAD: '↑', 0xAE: '→', 0xAF: '↓', 0xB0: '°', 0xB1: '±',
+        0xB2: '″', 0xB3: '≥', 0xB4: '×', 0xB5: '∝', 0xB6: '∂', 0xB7: '•', 0xB8: '÷', 0xB9: '≠',
+        0xBA: '≡', 0xBB: '≈', 0xBC: '…', 0xBF: '↵', 0xC0: 'ℵ', 0xC1: 'ℑ', 0xC2: 'ℜ', 0xC3: '℘',
+        0xC4: '⊗', 0xC5: '⊕', 0xC6: '∅', 0xC7: '∩', 0xC8: '∪', 0xC9: '⊃', 0xCA: '⊇', 0xCB: '⊄',
+        0xCC: '⊂', 0xCD: '⊆', 0xCE: '∈', 0xCF: '∉', 0xD0: '∠', 0xD1: '∇', 0xD5: '∏', 0xD6: '√',
+        0xD7: '⋅', 0xD8: '¬', 0xD9: '∧', 0xDA: '∨', 0xDB: '⇔', 0xDC: '⇐', 0xDD: '⇑', 0xDE: '⇒',
+        0xDF: '⇓', 0xE0: '◊', 0xE1: '\u2329', 0xE5: '∑', 0xF1: '\u232A', 0xF2: '∫', 0xF3: '⌠', 0xF5: '⌡'
+    },
+    // Wingdings and Wingdings 2: Unicode document L2/11-052R, "Wingdings and Webdings Symbols"
+    // (Michel Suignard, 2011-02-15; linked from the README), whose glyph IDs w-1nnn (Wingdings) and w-2nnn (Wingdings 2) end in the decimal character code.
+    // A glyph it unifies with an encoded character (its UCS column) maps to that character; a
+    // variant maps to the character its "→" cross-reference names (marked "ref"). Only the
+    // boxes, check and cross marks, bullets and arrows petitions use are listed. The glyphs the
+    // document gives neither for, such as Wingdings 2's empty box (A3, w-2163 BOX 1), are unmapped.
+    'wingdings': {
+        0x6C: '●', // w-1108 BLACK CIRCLE 6, ref U+25CF
+        0x6E: '■', // w-1110 BLACK SQUARE 6, ref U+25A0
+        0x6F: '□', // w-1111 BOX 3, ref U+25A1
+        0x71: '❑', // w-1113 U+2751 LOWER RIGHT SHADOWED WHITE SQUARE
+        0x72: '❒', // w-1114 U+2752 UPPER RIGHT SHADOWED WHITE SQUARE
+        0x75: '◆', // w-1117 BLACK DIAMOND 6, ref U+25C6
+        0x76: '❖', // w-1118 U+2756 BLACK DIAMOND MINUS WHITE X
+        0x77: '⬩', // w-1119 BLACK DIAMOND 4, ref U+2B29
+        0x78: '☒', // w-1120 U+2612 BALLOT BOX WITH X
+        0x9E: '⋅', // w-1158 BLACK CIRCLE 2, ref U+22C5
+        0xA7: '▪', // w-1167 BLACK SQUARE 4, ref U+25AA
+        0xA8: '□', // w-1168 BOX 2, ref U+25A1
+        0xD8: '➢', // w-1216 THREE-D TOP-LIGHTED RIGHTWARDS ARROWHEAD, ref U+27A2
+        0xE8: '➔', // w-1232 WIDE-HEADED RIGHTWARDS ARROW 4, ref U+2794
+        0xEF: '⇦', // w-1239 U+21E6 LEFTWARDS WHITE ARROW
+        0xF0: '⇨', // w-1240 U+21E8 RIGHTWARDS WHITE ARROW
+        0xF1: '⇧', // w-1241 U+21E7 UPWARDS WHITE ARROW
+        0xF2: '⇩', // w-1242 U+21E9 DOWNWARDS WHITE ARROW
+        0xF3: '⬄', // w-1243 U+2B04 LEFT RIGHT WHITE ARROW
+        0xF4: '⇳', // w-1244 U+21F3 UP DOWN WHITE ARROW
+        0xF5: '⬁', // w-1245 U+2B01 NORTH WEST WHITE ARROW
+        0xF6: '⬀', // w-1246 U+2B00 NORTH EAST WHITE ARROW
+        0xF7: '⬃', // w-1247 U+2B03 SOUTH WEST WHITE ARROW
+        0xF8: '⬂', // w-1248 U+2B02 SOUTH EAST WHITE ARROW
+        0xFB: '✗', // w-1251 BALLOT X, ref U+2717
+        0xFC: '✓', // w-1252 U+2713 CHECK MARK
+        0xFD: '☒', // w-1253 BALLOT BOX WITH X, ref U+2612
+        0xFE: '☑' // w-1254 U+2611 BALLOT BOX WITH CHECK
+    },
+    'wingdings 2': {
+        0x4F: '✗', // w-2079 BALLOT X, see w-1251: ref U+2717
+        0x50: '✓', // w-2080 U+2713 CHECK MARK
+        0x51: '☒', // w-2081 BALLOT BOX WITH X, see w-1253: ref U+2612
+        0x52: '☑', // w-2082 U+2611 BALLOT BOX WITH CHECK
+        0x53: '☒', // w-2083 BALLOT BOX WITH LIGHT X, ref U+2612
+        0x54: '☒', // w-2084 U+2612 BALLOT BOX WITH X
+        0x55: '⊗' // w-2085 CIRCLED X, ref U+2297
+    }
+};
 
 // Endnote number formats (w:endnotePr/w:numFmt) the generator can write. Word numbers
 // endnotes in lower-case Roman numerals unless the document says otherwise.
@@ -136,7 +216,7 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 // Codes of the conversion findings parse() reports, in the order it lists them: content the
 // conversion drops or simplifies, so the user can fix it in Word before filing
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
-    'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
+    'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols'];
 
 // How many location hints a finding keeps, and how long each may be
 const MAX_FINDING_EXAMPLES = 3;
@@ -182,6 +262,41 @@ function imageFormat(bytes) {
 function shortExample(text) {
     const collapsed = text.replace(/\s+/g, ' ').trim();
     return collapsed.length > MAX_EXAMPLE_LENGTH ? `${collapsed.slice(0, MAX_EXAMPLE_LENGTH).trimEnd()}…` : collapsed;
+}
+
+/**
+ * Unicode text of a symbol (w:sym), from SYMBOL_FONTS, and its symbols finding example: the
+ * font and code, then an arrow and the text it became. A symbol left out has no arrow.
+ * @param {Element} sym - The w:sym element
+ * @param {string} [runFont] - The run's font, used when w:sym names none
+ * @returns {{text: string, example: string}} text is '' for a symbol with no equivalent: an
+ *   unknown font, or a code its font's table doesn't list
+ */
+function symbolText(sym, runFont = '') {
+    const font = (sym.getAttribute('w:font') || runFont || '').trim();
+    const char = (sym.getAttribute('w:char') || '').trim().toUpperCase();
+    const code = /^[0-9A-F]{1,4}$/.test(char) ? parseInt(char, 16) : -1;
+    const table = SYMBOL_FONTS[font.toLowerCase()];
+    // F0xx is the private use form of the code, 00xx the plain one
+    const highByte = code >> 8;
+    const text = table && code >= 0 && (highByte === 0xF0 || highByte === 0) &&
+        Object.prototype.hasOwnProperty.call(table, code & 0xFF) ? table[code & 0xFF] : '';
+    const label = `${font || '?'} ${char || '?'}`;
+    return { text, example: shortExample(text ? `${label} → ${text}` : label) };
+}
+
+/**
+ * What a hidden run (w:vanish) would show: its text, and whether it holds anything Word would
+ * show, text or one of HIDDEN_CONTENT_ELEMENTS, a drawing included
+ * @param {Element} run - The w:r element
+ * @returns {{shows: boolean, text: string}}
+ */
+function hiddenRunContent(run) {
+    const text = childElements(run, 't').map(t => t.textContent || '').join('');
+    const shows = text !== '' || Array.from(run.children).some(child =>
+        HIDDEN_CONTENT_ELEMENTS.includes(child.localName) ||
+        (child.localName !== 'rPr' && child.getElementsByTagNameNS(WORD_NS, 'drawing').length > 0));
+    return { shows, text };
 }
 
 /**
@@ -426,6 +541,8 @@ class DocxParser {
         this.imageFormats = {};
         this.footnotes = {};
         this.endnotes = {};
+        // The [code, example] findings of each note's text, recorded when a reference to it is converted
+        this.noteFindings = { footnote: {}, endnote: {} };
         this.numbering = {};
         this.styles = this.emptyStyles();
         this.findings = {};
@@ -451,6 +568,7 @@ class DocxParser {
             this.imageFormats = {};
             this.footnotes = {};
             this.endnotes = {};
+            this.noteFindings = { footnote: {}, endnote: {} };
             this.numbering = {};
             this.styles = this.emptyStyles();
             this.findings = {};
@@ -470,15 +588,15 @@ class DocxParser {
             // Parse relationships to find media files
             await this.parseRelationships();
 
-            // Parse footnotes and endnotes
-            this.footnotes = await this.parseNotes('footnote');
-            this.endnotes = await this.parseNotes('endnote');
-
             // Parse list definitions
             await this.parseNumbering();
 
             // Parse style definitions
             await this.parseStyles();
+
+            // Parse footnotes and endnotes, after the styles their runs' hidden formatting resolves through
+            this.footnotes = await this.parseNotes('footnote');
+            this.endnotes = await this.parseNotes('endnote');
 
             // Parse the main document content. A malformed part parses to a parsererror
             // document instead of throwing (or, in Chromium, keeps a partial w:document with a
@@ -835,7 +953,8 @@ class DocxParser {
         }
 
         const hasText = paragraphs.some(para => this.paragraphRuns(para)
-            .some(run => childElements(run, 't').some(t => (t.textContent || '').trim() !== '')));
+            .some(run => childElements(run, 'sym').length > 0 ||
+                childElements(run, 't').some(t => (t.textContent || '').trim() !== '')));
         if (!hasText) return { paragraphs: null, dropped };
 
         // Every paragraph is written, as in a table cell (see paragraphIsWritten)
@@ -900,6 +1019,7 @@ class DocxParser {
     /**
      * Parse the notes of the footnotes part (word/footnotes.xml) or the endnotes part
      * (word/endnotes.xml) into plain text keyed by w:id. Word's separator notes are left out.
+     * The findings of each note's text (its symbols and hidden text) go into noteFindings.
      * @param {'footnote'|'endnote'} type - The note element's local name
      * @returns {Promise<Object<string, string>>}
      */
@@ -917,7 +1037,9 @@ class DocxParser {
                 // gives them ids -1 and 0, and marks them with w:type.
                 if (id === '0' || id === '-1' || SEPARATOR_NOTE_TYPES.includes(note.getAttribute('w:type'))) continue;
 
-                notes[id] = this.noteText(note);
+                const findings = [];
+                notes[id] = this.noteText(note, findings);
+                this.noteFindings[type][id] = findings;
             }
         } catch (error) {
             rethrowFatal(error);
@@ -928,23 +1050,43 @@ class DocxParser {
 
     /**
      * Plain text of a footnote or endnote: the text of its runs in document order, with one
-     * space between paragraphs. A tab (w:tab) or line break (w:br, w:cr) in a run becomes a
-     * space, so the words on either side of it stay apart.
+     * space between paragraphs. A tab (w:tab, w:ptab) or line break (w:br, w:cr) in a run becomes a
+     * space, so the words on either side of it stay apart. A symbol (w:sym) becomes its Unicode
+     * text (see symbolText). A hidden run (w:vanish, resolved through the paragraph and character
+     * styles as in the body) adds nothing.
      * @param {Element} note - The w:footnote or w:endnote element
+     * @param {Array<[string, string]>} [findings] - Receives a [code, example] pair for each symbol
+     *   (symbols) and for each paragraph with hidden content (hiddenText)
      * @returns {string}
      */
-    noteText(note) {
+    noteText(note, findings = []) {
         let text = '';
         for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
+            const style = this.paragraphStyle(childElement(para, 'pPr'));
+            const hidden = { found: false, text: '' };
             for (const run of para.getElementsByTagNameNS(WORD_NS, 'r')) {
+                const formatting = this.parseRunFormatting(run, style.run);
+                if (formatting.hidden) {
+                    const { shows, text: hiddenText } = hiddenRunContent(run);
+                    if (shows) {
+                        hidden.found = true;
+                        hidden.text += hiddenText;
+                    }
+                    continue;
+                }
                 for (const child of run.getElementsByTagNameNS(WORD_NS, '*')) {
                     if (child.localName === 't') {
                         text += child.textContent || '';
+                    } else if (child.localName === 'sym' && child.parentNode === run) {
+                        const symbol = symbolText(child, formatting.fontFamily);
+                        text += symbol.text;
+                        findings.push(['symbols', symbol.example]);
                     } else if (NOTE_WHITESPACE_ELEMENTS.includes(child.localName) && child.parentNode === run) {
                         text += ' ';
                     }
                 }
             }
+            if (hidden.found) findings.push(['hiddenText', shortExample(hidden.text)]);
             text += ' ';
         }
         return text.trim();
@@ -1702,11 +1844,8 @@ class DocxParser {
         const { hidden: isHidden, caps, smallCaps, lang, ...formatting } = this.parseRunFormatting(run, paragraphRun);
 
         if (isHidden) {
-            const text = childElements(run, 't').map(t => t.textContent || '').join('');
-            const showsSomething = text !== '' || Array.from(run.children).some(child =>
-                HIDDEN_CONTENT_ELEMENTS.includes(child.localName) ||
-                (child.localName !== 'rPr' && child.getElementsByTagNameNS(WORD_NS, 'drawing').length > 0));
-            if (hidden && showsSomething) {
+            const { shows, text } = hiddenRunContent(run);
+            if (hidden && shows) {
                 hidden.found = true;
                 hidden.text += text;
             }
@@ -1719,13 +1858,15 @@ class DocxParser {
         const turkish = !lang || lang.toLowerCase().startsWith('tr');
         const shown = text => !(caps || smallCaps) ? text
             : turkish ? text.toLocaleUpperCase('tr-TR') : text.toUpperCase();
-        const addText = text => {
+        // asIs keeps the text as it is: a symbol is a fixed glyph, which All Caps doesn't change
+        const addText = (text, asIs = false) => {
             if (!text) return;
+            const written = asIs ? text : shown(text);
             const last = items[items.length - 1];
             if (last && last.type === 'text') {
-                last.text += shown(text);
+                last.text += written;
             } else {
-                items.push({ ...formatting, text: shown(text) });
+                items.push({ ...formatting, text: written });
             }
         };
 
@@ -1737,7 +1878,13 @@ class DocxParser {
             } else if (localName === 'noBreakHyphen') {
                 // A plain hyphen: whether the UYAP editor's fonts show U+2011 is unknown
                 addText('-');
-            } else if (localName === 'tab') {
+            } else if (localName === 'sym') {
+                // Reported even when it maps: the UYAP editor's fonts may draw it differently
+                const symbol = symbolText(child, formatting.fontFamily);
+                this.addFinding('symbols', symbol.example);
+                addText(symbol.text, true);
+            } else if (localName === 'tab' || localName === 'ptab') {
+                // A positional tab (w:ptab) aligns to a margin Word computes; it is written as a plain tab
                 items.push({ type: 'tab' });
             } else if (localName === 'br') {
                 const breakType = child.getAttribute('w:type');
@@ -1758,6 +1905,8 @@ class DocxParser {
                     // Footnotes always leave their page; endnotes only when Word places or numbers them per section
                     if (kind === 'footnote') this.addFinding('notesMoved', shortExample(notes[id]));
                     else if (this.endnotesMoved) this.addFinding('endnotesMoved', shortExample(notes[id]));
+                    // The note's text is written once per reference, and its findings with it
+                    for (const [code, example] of this.noteFindings[kind][id] || []) this.addFinding(code, example);
                 }
             } else if (localName !== 'rPr') {
                 // w:drawing, or a drawing wrapped in mc:AlternateContent
