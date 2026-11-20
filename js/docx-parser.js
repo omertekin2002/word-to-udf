@@ -22,13 +22,20 @@ const DEFAULT_RUN_FORMATTING = {
     italic: false,
     underline: false,
     strike: false,
+    hidden: false,
+    caps: false,
+    smallCaps: false,
     fontFamily: 'Times New Roman',
     fontSize: 12
 };
 
 // On/off properties that toggle, rather than override, between the paragraph and
 // character style levels (ECMA-376 Part 1, 17.7.3)
-const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike'];
+const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike', 'hidden', 'caps', 'smallCaps'];
+
+// Run children that show something, so a hidden run (w:vanish) holding one leaves content out.
+// w:t counts only when it has text; a drawing may also be wrapped in mc:AlternateContent.
+const HIDDEN_CONTENT_ELEMENTS = ['tab', 'br', 'cr', 'noBreakHyphen', 'footnoteReference', 'endnoteReference', 'drawing'];
 
 // Points per unit of an OOXML universal measure (ST_UniversalMeasure, e.g. "2.5cm")
 const POINTS_PER_UNIT = { mm: 72 / 25.4, cm: 72 / 2.54, in: 72, pt: 1, pc: 12, pi: 12 };
@@ -68,6 +75,28 @@ const HEADER_FOOTER_DRAWINGS = ['drawing', 'pict', 'object'];
 // Run items a header or footer paragraph keeps: page breaks and note references have no place there
 const HEADER_FOOTER_RUN_TYPES = ['text', 'tab', 'break'];
 
+// Table edges a w:tblBorders sets, each under the names Word writes for it (start and end are
+// the newer names of left and right)
+const TABLE_EDGES = {
+    top: ['top'],
+    left: ['left', 'start'],
+    bottom: ['bottom'],
+    right: ['right', 'end'],
+    insideH: ['insideH'],
+    insideV: ['insideV']
+};
+
+// Cell edges a w:tcBorders sets
+const CELL_EDGES = {
+    top: TABLE_EDGES.top,
+    left: TABLE_EDGES.left,
+    bottom: TABLE_EDGES.bottom,
+    right: TABLE_EDGES.right
+};
+
+// Border values (ST_Border) that draw no line
+const NO_BORDER_VALUES = ['none', 'nil'];
+
 const COMPOUND_FILE_SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 // Name of the stream an encrypted OOXML package keeps its encryption parameters in (MS-OFFCRYPTO 2.3.4)
@@ -106,7 +135,7 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 
 // Codes of the conversion findings parse() reports, in the order it lists them: content the
 // conversion drops or simplifies, so the user can fix it in Word before filing
-const FINDING_CODES = ['headersFooters', 'comments', 'nestedTables', 'missingImage', 'unsupportedImage',
+const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
     'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
 
 // How many location hints a finding keeps, and how long each may be
@@ -810,14 +839,14 @@ class DocxParser {
         if (!hasText) return { paragraphs: null, dropped };
 
         // Every paragraph is written, as in a table cell (see paragraphIsWritten)
-        return {
-            paragraphs: paragraphs.map(para => {
-                const paragraph = this.parseParagraph(para, this.paragraphRuns(para), true);
-                paragraph.runs = paragraph.runs.filter(run => HEADER_FOOTER_RUN_TYPES.includes(run.type));
-                return paragraph;
-            }),
-            dropped
-        };
+        const parsed = paragraphs.map(para => {
+            const paragraph = this.parseParagraph(para, this.paragraphRuns(para), true);
+            paragraph.runs = paragraph.runs.filter(run => HEADER_FOOTER_RUN_TYPES.includes(run.type));
+            return paragraph;
+        });
+        // A part whose only text is hidden (w:vanish) shows nothing in Word
+        if (!parsed.some(paragraph => paragraphText(paragraph).trim() !== '')) return { paragraphs: null, dropped };
+        return { paragraphs: parsed, dropped };
     }
 
     /**
@@ -1118,16 +1147,20 @@ class DocxParser {
     emptyStyles() {
         return {
             defaults: { run: {}, paragraph: {} },
-            definitions: { paragraph: new Map(), character: new Map() },
+            definitions: { paragraph: new Map(), character: new Map(), table: new Map() },
             defaultParagraph: null,
-            resolved: { paragraph: new Map(), character: new Map() }
+            defaultTable: null,
+            resolved: { paragraph: new Map(), character: new Map(), table: new Map() },
+            // Whether a styles part was read: without one, table borders aren't known (see tableBorders)
+            loaded: false
         };
     }
 
     /**
-     * Parse the styles part (word/styles.xml): the document defaults (w:docDefaults)
-     * and the paragraph and character styles, each with the properties it sets itself.
-     * w:basedOn chains are resolved on first use (see resolveStyle).
+     * Parse the styles part (word/styles.xml): the document defaults (w:docDefaults),
+     * the paragraph and character styles, each with the properties it sets itself, and
+     * the table styles' borders. w:basedOn chains are resolved on first use (see
+     * resolveStyle and tableBorders).
      */
     async parseStyles() {
         const stylesFile = this.zip.file(this.relatedPart('styles', 'word/styles.xml'));
@@ -1154,9 +1187,23 @@ class DocxParser {
                 const type = style.getAttribute('w:type') || 'paragraph'; // An omitted w:type means paragraph (17.7.4.17)
                 const definitions = this.styles.definitions[type];
                 const id = style.getAttribute('w:styleId');
-                if (!(type === 'paragraph' || type === 'character') || !id || definitions.has(id)) continue;
+                if (!(type === 'paragraph' || type === 'character' || type === 'table') || !id || definitions.has(id)) continue;
 
                 const basedOn = childElement(style, 'basedOn');
+                if (type === 'table') {
+                    const tblPr = childElement(style, 'tblPr');
+                    const tcPr = childElement(style, 'tcPr');
+                    definitions.set(id, {
+                        basedOn: basedOn ? basedOn.getAttribute('w:val') : null,
+                        borders: this.readBorders(tblPr && childElement(tblPr, 'tblBorders'), TABLE_EDGES),
+                        cellBorders: this.readBorders(tcPr && childElement(tcPr, 'tcBorders'), CELL_EDGES)
+                    });
+                    if (this.styles.defaultTable === null && this.isOn(style, 'w:default', false)) {
+                        this.styles.defaultTable = id;
+                    }
+                    continue;
+                }
+
                 definitions.set(id, {
                     basedOn: basedOn ? basedOn.getAttribute('w:val') : null,
                     run: this.readRunProperties(childElement(style, 'rPr')),
@@ -1168,6 +1215,7 @@ class DocxParser {
                     this.styles.defaultParagraph = id;
                 }
             }
+            this.styles.loaded = true;
         } catch (error) {
             rethrowFatal(error);
             this.styles = this.emptyStyles();
@@ -1230,10 +1278,16 @@ class DocxParser {
         const props = {};
         if (!rPr) return props;
 
-        for (const [name, key] of [['b', 'bold'], ['i', 'italic'], ['strike', 'strike']]) {
+        const onOff = [['b', 'bold'], ['i', 'italic'], ['strike', 'strike'], ['vanish', 'hidden'],
+            ['caps', 'caps'], ['smallCaps', 'smallCaps']];
+        for (const [name, key] of onOff) {
             const el = childElement(rPr, name);
             if (el) props[key] = this.isOn(el);
         }
+
+        // The language of the run's text (w:lang w:val, e.g. "tr-TR"), which decides how All Caps upper-cases it
+        const lang = childElement(rPr, 'lang');
+        if (lang && lang.getAttribute('w:val')) props.lang = lang.getAttribute('w:val');
 
         const u = childElement(rPr, 'u');
         if (u && u.hasAttribute('w:val')) props.underline = u.getAttribute('w:val') !== 'none';
@@ -1612,10 +1666,12 @@ class DocxParser {
             }
         }
 
-        // Get runs (text with formatting)
+        // Get runs (text with formatting). Hidden runs add nothing; their text is collected for the finding.
+        const hidden = { found: false, text: '' };
         for (const run of runs) {
-            paragraph.runs.push(...this.parseRun(run, style.run));
+            paragraph.runs.push(...this.parseRun(run, style.run, hidden));
         }
+        if (hidden.found) this.addFinding('hiddenText', shortExample(hidden.text));
 
         // Line heights and tab stops the conversion loses, with the paragraph's text as the hint.
         // A paragraph the generator doesn't write as one has no line height or stops to lose.
@@ -1635,25 +1691,52 @@ class DocxParser {
      * Parse a run element (text with formatting)
      * @param {Element} run - The run element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
-     * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image, footnoteRef, endnoteRef)
+     * @param {{found: boolean, text: string}} [hidden] - Set when the run is hidden (w:vanish) and
+     *   holds content: found becomes true and the run's text is appended to text
+     * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image,
+     *   footnoteRef, endnoteRef). Empty for a hidden run: Word neither shows nor prints it.
      */
-    parseRun(run, paragraphRun = {}) {
+    parseRun(run, paragraphRun = {}, hidden = null) {
         const items = [];
-        let formatting = null;
+        // hidden, caps, smallCaps and lang decide how the run's text is written; they aren't text attributes
+        const { hidden: isHidden, caps, smallCaps, lang, ...formatting } = this.parseRunFormatting(run, paragraphRun);
+
+        if (isHidden) {
+            const text = childElements(run, 't').map(t => t.textContent || '').join('');
+            const showsSomething = text !== '' || Array.from(run.children).some(child =>
+                HIDDEN_CONTENT_ELEMENTS.includes(child.localName) ||
+                (child.localName !== 'rPr' && child.getElementsByTagNameNS(WORD_NS, 'drawing').length > 0));
+            if (hidden && showsSomething) {
+                hidden.found = true;
+                hidden.text += text;
+            }
+            return items;
+        }
+
+        // All Caps and Small Caps show the text in capitals (the UDF has no small capitals). Word
+        // upper-cases by the run's language, so Turkish text, or text with no language set, keeps
+        // its dotted capital İ.
+        const turkish = !lang || lang.toLowerCase().startsWith('tr');
+        const shown = text => !(caps || smallCaps) ? text
+            : turkish ? text.toLocaleUpperCase('tr-TR') : text.toUpperCase();
+        const addText = text => {
+            if (!text) return;
+            const last = items[items.length - 1];
+            if (last && last.type === 'text') {
+                last.text += shown(text);
+            } else {
+                items.push({ ...formatting, text: shown(text) });
+            }
+        };
 
         for (const child of run.children) {
             const localName = child.localName;
 
             if (localName === 't') {
-                const text = child.textContent || '';
-                if (!text) continue;
-                const last = items[items.length - 1];
-                if (last && last.type === 'text') {
-                    last.text += text;
-                } else {
-                    if (!formatting) formatting = this.parseRunFormatting(run, paragraphRun);
-                    items.push({ ...formatting, text: text });
-                }
+                addText(child.textContent || '');
+            } else if (localName === 'noBreakHyphen') {
+                // A plain hyphen: whether the UYAP editor's fonts show U+2011 is unknown
+                addText('-');
             } else if (localName === 'tab') {
                 items.push({ type: 'tab' });
             } else if (localName === 'br') {
@@ -1692,8 +1775,9 @@ class DocxParser {
     /**
      * Resolve a run's character formatting in Word's order: built-in defaults, document
      * defaults, the paragraph style chain, the character style chain (w:rStyle), then
-     * the run's own w:rPr. Later layers override earlier ones, except that bold, italic
-     * and strike set by the two style levels toggle: on in both styles is off, and off
+     * the run's own w:rPr. Later layers override earlier ones, except that the on/off
+     * properties in TOGGLE_PROPERTIES (bold, italic, strike, hidden, caps and small caps)
+     * set by the two style levels toggle: on in both styles is off, and off
      * in a style leaves the value unchanged (unless the document defaults turn it on).
      * Direct formatting always sets them outright.
      * @param {Element} run - The run element
@@ -1814,29 +1898,7 @@ class DocxParser {
             }
         }
 
-        // Get table properties
-        const tblPr = childElement(tbl, 'tblPr');
-        if (tblPr) {
-            const tblBorders = childElement(tblPr, 'tblBorders');
-            if (tblBorders) {
-                // Check if borders are set to none
-                const borders = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'];
-                let allNone = true;
-                for (const borderName of borders) {
-                    const border = childElement(tblBorders, borderName);
-                    if (border) {
-                        const val = border.getAttribute('w:val');
-                        if (val && val !== 'none' && val !== 'nil') {
-                            allNone = false;
-                            break;
-                        }
-                    }
-                }
-                if (allNone) {
-                    table.border = 'borderNone';
-                }
-            }
-        }
+        const edges = this.tableBorders(childElement(tbl, 'tblPr'));
 
         // Get rows and cells (only this table's own, not those of nested tables). The cells'
         // properties come first: they decide which cells continue a vertical merge.
@@ -1846,6 +1908,11 @@ class DocxParser {
             const tcs = this.contentChildren(tr).filter(tc => tc.localName === 'tc');
             cellElements.push(tcs);
             table.rows.push({ type: 'row', cells: tcs.map(tc => this.parseTableCell(tc)) });
+        }
+
+        this.resolveCellBorders(table, edges, cellElements);
+        if (!table.rows.some(row => row.cells.some(cell => Object.values(cell.borders).some(Boolean)))) {
+            table.border = 'borderNone';
         }
 
         const merges = verticalMerges(table);
@@ -1860,6 +1927,122 @@ class DocxParser {
         }));
 
         return table;
+    }
+
+    /**
+     * Read which edges a w:tblBorders or w:tcBorders sets, and whether each draws a line
+     * @param {Element|null} borders - The w:tblBorders or w:tcBorders element
+     * @param {Object<string,Array<string>>} edgeNames - Edge -> the element names that set it
+     * @returns {Object<string,boolean>} Only the edges it sets (an element without w:val sets none)
+     */
+    readBorders(borders, edgeNames) {
+        const set = {};
+        if (!borders) return set;
+        for (const [edge, names] of Object.entries(edgeNames)) {
+            for (const name of names) {
+                const border = childElement(borders, name);
+                if (border && border.hasAttribute('w:val')) {
+                    set[edge] = !NO_BORDER_VALUES.includes(border.getAttribute('w:val'));
+                }
+            }
+        }
+        return set;
+    }
+
+    /**
+     * Which of a table's six edges draw a line: its table style (w:tblStyle, else the default
+     * table style) with its w:basedOn chain, then the table's own w:tblBorders. The nearest
+     * layer that sets an edge wins, and an edge nothing sets has no line. Without a styles
+     * part the style layer is unknown, so every edge has a line unless the table removes it.
+     * The style's cell borders (its w:tcPr/w:tcBorders, through the same chain) are returned
+     * apart: they apply to every cell, over the table's edges. Conditional formatting
+     * (w:tblStylePr) is not read.
+     * @param {Element|null} tblPr - The table's w:tblPr
+     * @returns {{top: boolean, left: boolean, bottom: boolean, right: boolean, insideH: boolean,
+     *   insideV: boolean, cells: Object<string,boolean>}} cells: only the cell edges the style sets
+     */
+    tableBorders(tblPr) {
+        let base;
+        let cells = {};
+        if (this.styles.loaded) {
+            const tblStyle = tblPr && childElement(tblPr, 'tblStyle');
+            const id = tblStyle && tblStyle.getAttribute('w:val');
+            const definitions = this.styles.definitions.table;
+            const styleId = definitions.has(id) ? id : this.styles.defaultTable;
+            const resolved = this.styles.resolved.table;
+            if (!resolved.has(styleId)) {
+                const chain = [];
+                for (let sid = styleId; definitions.has(sid) && !chain.includes(definitions.get(sid)); sid = definitions.get(sid).basedOn) {
+                    chain.unshift(definitions.get(sid));
+                }
+                resolved.set(styleId, {
+                    borders: Object.assign({}, ...chain.map(style => style.borders)),
+                    cells: Object.assign({}, ...chain.map(style => style.cellBorders))
+                });
+            }
+            ({ borders: base, cells } = resolved.get(styleId));
+        } else {
+            base = Object.fromEntries(Object.keys(TABLE_EDGES).map(edge => [edge, true]));
+        }
+
+        const own = this.readBorders(tblPr && childElement(tblPr, 'tblBorders'), TABLE_EDGES);
+        const edges = Object.assign({}, base, own);
+        for (const edge of Object.keys(TABLE_EDGES)) edges[edge] = Boolean(edges[edge]);
+        edges.cells = cells;
+        return edges;
+    }
+
+    /**
+     * Give each cell of a parsed table the four edges that draw a line, as cell.borders.
+     * A cell's outer edges come from the table's top, bottom, left and right edges and the
+     * edges between cells from insideH and insideV; an edge the table style's cell borders
+     * set overrides that, and an edge the cell's own w:tcBorders sets overrides both. An edge two cells share then has a line when either cell's edge does,
+     * and is set on both. Cells above and below each other share an edge where their grid
+     * columns (w:gridSpan included) overlap; such a line is set on a cell only when it runs
+     * along that cell's whole edge, so it doesn't reach past a narrower cell along a wider one.
+     * @param {Object} table - Parsed table, its rows' cells without borders yet
+     * @param {Object<string,boolean>} edges - The table's edges (see tableBorders)
+     * @param {Array<Array<Element>>} cellElements - The w:tc element of each cell, row by row
+     */
+    resolveCellBorders(table, edges, cellElements) {
+        const { rows } = table;
+        const columns = rows.map(row => {
+            let column = 0;
+            return row.cells.map(cell => {
+                const start = column;
+                column += Math.max(1, cell.colspan || 1);
+                return [start, column];
+            });
+        });
+
+        rows.forEach((row, i) => row.cells.forEach((cell, j) => {
+            const tcPr = childElement(cellElements[i][j], 'tcPr');
+            cell.borders = Object.assign({
+                top: i === 0 ? edges.top : edges.insideH,
+                right: j === row.cells.length - 1 ? edges.right : edges.insideV,
+                bottom: i === rows.length - 1 ? edges.bottom : edges.insideH,
+                left: j === 0 ? edges.left : edges.insideV
+            }, edges.cells, this.readBorders(tcPr && childElement(tcPr, 'tcBorders'), CELL_EDGES));
+        }));
+
+        // Each shared edge is decided from the cells' own edges, so a line doesn't spread
+        // along a row through a cell that spans several columns
+        const own = rows.map(row => row.cells.map(cell => ({ ...cell.borders })));
+        rows.forEach((row, i) => row.cells.forEach((cell, j) => {
+            const right = row.cells[j + 1];
+            if (right && (own[i][j].right || own[i][j + 1].left)) {
+                cell.borders.right = right.borders.left = true;
+            }
+            if (i + 1 === rows.length) return;
+            const [start, end] = columns[i][j];
+            rows[i + 1].cells.forEach((below, k) => {
+                const [belowStart, belowEnd] = columns[i + 1][k];
+                if (belowStart < end && start < belowEnd && (own[i][j].bottom || own[i + 1][k].top)) {
+                    if (belowStart <= start && end <= belowEnd) cell.borders.bottom = true;
+                    if (start <= belowStart && belowEnd <= end) below.borders.top = true;
+                }
+            });
+        }));
     }
 
     /**

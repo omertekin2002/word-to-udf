@@ -107,6 +107,30 @@ const HEADING_STYLE =
     '<w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="0"/></w:pPr>' +
     '<w:rPr><w:b/><w:bCs/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>';
 
+// Word's default table style ("Normal Table", Turkish id NormalTablo): cell margins and no borders
+const NORMAL_TABLE_STYLE =
+    '<w:style w:type="table" w:default="1" w:styleId="NormalTablo"><w:name w:val="Normal Table"/><w:uiPriority w:val="99"/>' +
+    '<w:semiHidden/><w:unhideWhenUsed/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar>' +
+    '<w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/>' +
+    '</w:tblCellMar></w:tblPr></w:style>';
+
+/**
+ * A signature block laid out as a borderless two-column table, the way many petitions are:
+ * an empty left cell, then the role and the name centred on the right, with a line under the
+ * name. The table has no w:tblStyle or w:tblBorders, so it takes the default table style.
+ */
+function signatureTable(rec, role, name) {
+    const cell = (tcPr, content) => `<w:tc><w:tcPr><w:tcW w:w="4536" w:type="dxa"/>${tcPr}</w:tcPr>${content}</w:tc>`;
+    return '<w:tbl><w:tblPr><w:tblW w:w="9072" w:type="dxa"/><w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" ' +
+        'w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr>' +
+        '<w:tblGrid><w:gridCol w:w="4536"/><w:gridCol w:w="4536"/></w:tblGrid>' +
+        `<w:tr>${cell('', empty())}${cell('', p(rec.run(role), jc('center')))}</w:tr>` +
+        `<w:tr>${cell('', empty())}` +
+        cell('<w:tcBorders><w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tcBorders>',
+            p(rec.run(name), jc('center'))) +
+        '</w:tr></w:tbl>';
+}
+
 /** One w:lvl of an abstract numbering definition */
 const level = (ilvl, numFmt, lvlText, left) =>
     `<w:lvl w:ilvl="${ilvl}"><w:start w:val="1"/><w:numFmt w:val="${numFmt}"/><w:lvlText w:val="${lvlText}"/>` +
@@ -368,7 +392,7 @@ function cevapDilekcesi() {
 
     // Argument headings carry the list; sub-arguments take it from Gerekce through w:basedOn
     // and set only their level. The request items' style gives a numId without a w:ilvl.
-    const styles = BASE_STYLES +
+    const styles = BASE_STYLES + NORMAL_TABLE_STYLE +
         '<w:style w:type="paragraph" w:styleId="Gerekce"><w:name w:val="Gerekce"/><w:basedOn w:val="Normal"/>' +
         `<w:pPr>${numPr(ARGUMENTS, 0)}<w:ind w:left="567" w:hanging="567"/></w:pPr><w:rPr><w:b/></w:rPr></w:style>` +
         '<w:style w:type="paragraph" w:styleId="AltGerekce"><w:name w:val="Alt Gerekce"/><w:basedOn w:val="Gerekce"/>' +
@@ -401,8 +425,7 @@ function cevapDilekcesi() {
         p(rec.run('Yargılama giderlerinin davacıya yükletilmesine karar verilmesini saygıyla arz ederim. ' +
             'ĞÜŞÖÇİ ğüşöçı'), styled('IstemMaddesi')),
         empty(),
-        p(rec.run('Davalı'), jc('right')),
-        p(rec.run('Ad Soyad'), jc('right'))
+        signatureTable(rec, 'Davalı', 'Ad Soyad')
     ].join('');
 
     const numbering =
@@ -429,7 +452,9 @@ function cevapDilekcesi() {
                 'ĞÜŞÖÇİ ğüşöçı', kind: 'number', level: 0, listId: REQUESTS, numberType: 'NUMBER_TYPE_NUMBER_PARENTHESIS' }
         ],
         // In a numbered style, but switched off with w:numId 0
-        unnumbered: ['Ödeme belgeleri dilekçemiz ekindedir; ayrıca sayılmamıştır.']
+        unnumbered: ['Ödeme belgeleri dilekçemiz ekindedir; ayrıca sayılmamıştır.'],
+        // The borderless signature table: its texts, and the one with a line under it
+        signature: { texts: ['Davalı', 'Ad Soyad'], underlined: 'Ad Soyad' }
     };
 }
 
