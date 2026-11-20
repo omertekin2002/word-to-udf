@@ -8,7 +8,7 @@ Convert Word documents (.docx) to UYAP UDF format - a proprietary document forma
 - 📄 **DOCX Support**: Converts standard Word documents
 - 📋 **Formatting**: Preserves bold, italic, fonts, and alignment
 - 📊 **Tables**: Handles table structure with cells and borders
-- 🖼️ **Images**: Embeds images as base64
+- 🖼️ **Images**: Embeds images as base64, including legacy VML pictures (`w:pict`) and the preview pictures of embedded OLE objects (`w:object`), such as an Excel table or an Equation Editor formula. Charts, SmartArt and shapes without a text box aren't converted; they are listed in the conversion notes
 - 📐 **Page Setup**: Keeps the page margins, orientation and header/footer offsets
 - 🗂️ **Headers and footers**: Keeps the text of the last section's main header and footer, such as an office name or a file reference (page numbers aren't converted yet)
 - ↕️ **Spacing**: Keeps the space before and after paragraphs and their line spacing
@@ -156,6 +156,7 @@ A paragraph's list comes from `w:numPr`, read from the paragraph style and its `
 | `nestedTables` | A table inside a table cell is flattened into that cell. | The start of the nested table's first non-empty paragraph |
 | `missingImage` | A picture's relationship or media part is missing, so it is skipped. | The text of the nearest paragraph |
 | `unsupportedImage` | A picture's data is not PNG or JPEG, judged by its leading bytes, not its file extension. It is still embedded as-is. | The format: `EMF`, `WMF`, `GIF`, `TIFF`, `SVG` or `unknown` |
+| `unconvertedDrawing` | A drawing that shows no picture and holds no text box is left out: a DrawingML chart (`c:chart`), SmartArt diagram or shape (`w:drawing` with no `a:blip`), or a VML shape or OLE object with no preview picture (`w:pict` or `w:object` with no `v:imagedata`). A text box's paragraphs are kept, so a shape that holds one isn't reported. Counted per drawing. | The text of the nearest paragraph |
 | `notesMoved` | A footnote reference is converted: its note is written as plain text before the next manual page break or at the end, not at the bottom of its page. Counted per reference. | The start of the note text |
 | `endnotesMoved` | An endnote reference is converted in a document whose endnotes Word would place or number differently: at the end of each section (`w:endnotePr/w:pos w:val="sectEnd"`) or restarted at each section (`w:numRestart w:val="eachSect"`) when there is more than one section, or restarted at each page. The restart is read from each section's `w:sectPr`, then from `word/settings.xml`; the placement only from `word/settings.xml`, because a `w:pos` in a section's `w:endnotePr` is ignored (ECMA-376 Part 1, 17.11.22). Endnotes at the end of the document with continuous numbering, Word's default, are not reported. Counted per reference. | The start of the note text |
 | `lineSpacing` | A converted paragraph's line rule, resolved from `w:docDefaults`, the paragraph style chain and the paragraph itself, is `exact` or `atLeast`, so it gets single spacing. Counted per paragraph, table cells included. | The start of the paragraph's text |
@@ -176,7 +177,7 @@ The notes only report: the converted `.udf` is the same with or without them.
 ## Limitations
 
 - Nested tables are flattened: their text goes into the containing cell, in reading order
-- Embedded OLE objects are not supported
+- Embedded OLE objects are written as their preview picture (often EMF or WMF, which UDF doesn't define, so they are reported as `unsupportedImage`); charts, SmartArt diagrams and shapes without a text box are left out and listed in the conversion notes. VML pictures are written inline where their run is, without cropping, wrapping or position
 - Documents whose parts decompress to more than 100 MiB each, or 300 MiB together, are refused (see [Usage](#usage))
 - Password-protected documents and `.doc` files are not converted: remove the password, or save the file as `.docx`, in Word first
 - Track changes / comments are not preserved (inserted text is kept, deleted text is dropped)

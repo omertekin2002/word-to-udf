@@ -20,6 +20,7 @@ const FINDING_KEYS = {
     nestedTables: 'notes.nestedTables',
     missingImage: 'notes.missingImage',
     unsupportedImage: 'notes.unsupportedImage',
+    unconvertedDrawing: 'notes.unconvertedDrawing',
     notesMoved: 'notes.notesMoved',
     endnotesMoved: 'notes.endnotesMoved',
     lineSpacing: 'notes.lineSpacing',
@@ -31,7 +32,7 @@ const FINDING_KEYS = {
 const PROGRESS_STAGES = ['progress.parsing', 'progress.converting', 'progress.complete'];
 
 // Findings whose examples are document text, shown in quotes; the others are format names
-const QUOTED_EXAMPLE_CODES = ['hiddenText', 'nestedTables', 'missingImage', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
+const QUOTED_EXAMPLE_CODES = ['hiddenText', 'nestedTables', 'missingImage', 'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
 
 class WordToUdfApp {
     constructor() {
