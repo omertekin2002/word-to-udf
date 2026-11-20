@@ -203,6 +203,30 @@ test('without a styles part, a table with no borders of its own keeps a full gri
     assert.deepEqual(attributes(own.doc, 'borderSpec'), [['14', '14']]);
 });
 
+test("a table style's cell borders (w:tcPr/w:tcBorders) apply to every cell, under the cell's own", async () => {
+    const cellStyle = (id, borders, basedOn = 'NormalTable') =>
+        `<w:style w:type="table" w:styleId="${id}"><w:name w:val="${id}"/><w:basedOn w:val="${basedOn}"/>` +
+        `<w:tblPr/><w:tcPr>${tcBorders(borders)}</w:tcPr></w:style>`;
+    const styles = STYLES + cellStyle('CellGrid', edges('single', 'top', 'left', 'bottom', 'right')) +
+        // Through w:basedOn, and removing one cell edge over the table's
+        tableStyle('CellGridChild', '', 'CellGrid') + cellStyle('GridNoTop', edges('nil', 'top'), 'TableGrid');
+    const rows = [[['A1'], ['B1']], [['A2'], ['B2']]];
+
+    for (const id of ['CellGrid', 'CellGridChild']) {
+        const { doc } = await convertBody(table(rows, style(id)), { styles });
+        assert.equal(tableElement(doc).getAttribute('border'), 'borderCell', id);
+        assert.deepEqual(attributes(doc, 'borderSpec'), [[null, null], [null, null]], id);
+    }
+
+    // Every cell drops its top; the edge between the rows stays because the upper cells draw it
+    const noTop = await convertBody(table(rows, style('GridNoTop')), { styles });
+    assert.deepEqual(attributes(noTop.doc, 'borderSpec'), [['14', '14'], [null, null]]);
+
+    // A cell's own w:tcBorders overrides the style's cell borders
+    const own = await convertBody(table([[['A1', tcBorders(edges('nil', 'top', 'left'))], ['B1']]], style('CellGrid')), { styles });
+    assert.deepEqual(attributes(own.doc, 'borderSpec'), [['6', null]]);
+});
+
 test('a w:basedOn loop between table styles stops instead of hanging', async () => {
     const styles = tableStyle('Loop1', edges('single', 'top'), 'Loop2') + tableStyle('Loop2', '', 'Loop1');
     const { doc } = await convertBody(table([[['A1']]], style('Loop1')), { styles });

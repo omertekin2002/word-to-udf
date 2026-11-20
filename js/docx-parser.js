@@ -1185,9 +1185,11 @@ class DocxParser {
                 const basedOn = childElement(style, 'basedOn');
                 if (type === 'table') {
                     const tblPr = childElement(style, 'tblPr');
+                    const tcPr = childElement(style, 'tcPr');
                     definitions.set(id, {
                         basedOn: basedOn ? basedOn.getAttribute('w:val') : null,
-                        borders: this.readBorders(tblPr && childElement(tblPr, 'tblBorders'), TABLE_EDGES)
+                        borders: this.readBorders(tblPr && childElement(tblPr, 'tblBorders'), TABLE_EDGES),
+                        cellBorders: this.readBorders(tcPr && childElement(tcPr, 'tcBorders'), CELL_EDGES)
                     });
                     if (this.styles.defaultTable === null && this.isOn(style, 'w:default', false)) {
                         this.styles.defaultTable = id;
@@ -1909,12 +1911,16 @@ class DocxParser {
      * table style) with its w:basedOn chain, then the table's own w:tblBorders. The nearest
      * layer that sets an edge wins, and an edge nothing sets has no line. Without a styles
      * part the style layer is unknown, so every edge has a line unless the table removes it.
-     * Conditional formatting (w:tblStylePr) is not read.
+     * The style's cell borders (its w:tcPr/w:tcBorders, through the same chain) are returned
+     * apart: they apply to every cell, over the table's edges. Conditional formatting
+     * (w:tblStylePr) is not read.
      * @param {Element|null} tblPr - The table's w:tblPr
-     * @returns {{top: boolean, left: boolean, bottom: boolean, right: boolean, insideH: boolean, insideV: boolean}}
+     * @returns {{top: boolean, left: boolean, bottom: boolean, right: boolean, insideH: boolean,
+     *   insideV: boolean, cells: Object<string,boolean>}} cells: only the cell edges the style sets
      */
     tableBorders(tblPr) {
         let base;
+        let cells = {};
         if (this.styles.loaded) {
             const tblStyle = tblPr && childElement(tblPr, 'tblStyle');
             const id = tblStyle && tblStyle.getAttribute('w:val');
@@ -1926,9 +1932,12 @@ class DocxParser {
                 for (let sid = styleId; definitions.has(sid) && !chain.includes(definitions.get(sid)); sid = definitions.get(sid).basedOn) {
                     chain.unshift(definitions.get(sid));
                 }
-                resolved.set(styleId, Object.assign({}, ...chain.map(style => style.borders)));
+                resolved.set(styleId, {
+                    borders: Object.assign({}, ...chain.map(style => style.borders)),
+                    cells: Object.assign({}, ...chain.map(style => style.cellBorders))
+                });
             }
-            base = resolved.get(styleId);
+            ({ borders: base, cells } = resolved.get(styleId));
         } else {
             base = Object.fromEntries(Object.keys(TABLE_EDGES).map(edge => [edge, true]));
         }
@@ -1936,14 +1945,15 @@ class DocxParser {
         const own = this.readBorders(tblPr && childElement(tblPr, 'tblBorders'), TABLE_EDGES);
         const edges = Object.assign({}, base, own);
         for (const edge of Object.keys(TABLE_EDGES)) edges[edge] = Boolean(edges[edge]);
+        edges.cells = cells;
         return edges;
     }
 
     /**
      * Give each cell of a parsed table the four edges that draw a line, as cell.borders.
      * A cell's outer edges come from the table's top, bottom, left and right edges and the
-     * edges between cells from insideH and insideV; an edge the cell's w:tcBorders sets
-     * overrides that. An edge two cells share then has a line when either cell's edge does,
+     * edges between cells from insideH and insideV; an edge the table style's cell borders
+     * set overrides that, and an edge the cell's own w:tcBorders sets overrides both. An edge two cells share then has a line when either cell's edge does,
      * and is set on both. Cells above and below each other share an edge where their grid
      * columns (w:gridSpan included) overlap.
      * @param {Object} table - Parsed table, its rows' cells without borders yet
@@ -1968,7 +1978,7 @@ class DocxParser {
                 right: j === row.cells.length - 1 ? edges.right : edges.insideV,
                 bottom: i === rows.length - 1 ? edges.bottom : edges.insideH,
                 left: j === 0 ? edges.left : edges.insideV
-            }, this.readBorders(tcPr && childElement(tcPr, 'tcBorders'), CELL_EDGES));
+            }, edges.cells, this.readBorders(tcPr && childElement(tcPr, 'tcBorders'), CELL_EDGES));
         }));
 
         // Each shared edge is decided from the cells' own edges, so a line doesn't spread
