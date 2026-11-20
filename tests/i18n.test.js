@@ -274,7 +274,7 @@ test('every finding code the parser reports has a TR and an EN message, and app.
     const { strings, run } = await loadPage({ app: true });
     const codes = run('FINDING_CODES');
     assert.deepEqual([...codes], ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
-        'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops']);
+        'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols']);
     const keys = run('FINDING_KEYS');
     assert.deepEqual(Object.keys(keys).sort(), [...codes].sort());
     for (const code of codes) {
@@ -400,4 +400,25 @@ test('hidden text, moved notes, lost line heights and lost tab stops are listed 
     document.querySelector('[data-set-lang="en"]').click();
     assert.deepEqual(noteItems(document), expected('en'));
     assert.notEqual(strings.tr['notes.tabStops'], strings.en['notes.tabStops']);
+});
+
+test('converted and left-out symbols are listed in both languages, with unquoted font and code examples', async () => {
+    const { window, document, strings } = await loadPage({ app: true });
+    const sym = (font, char) => `<w:r><w:sym w:font="${font}" w:char="${char}"/></w:r>`;
+    const docx = await buildDocx(`<w:p>${sym('Wingdings', 'F0FE')}<w:r><w:t xml:space="preserve"> Kabul </w:t></w:r>` +
+        `${sym('Wingdings', 'F0A8')}<w:r><w:t xml:space="preserve"> Ret </w:t></w:r>${sym('Webdings', 'F021')}</w:p>`);
+    window.app.processFile(fileOf('dilekce.docx', docx));
+    await window.app.handleConvert();
+
+    const expected = lang => [{
+        code: 'symbols',
+        text: strings[lang]['notes.symbols'],
+        count: strings[lang]['notes.count'].replace('{count}', '3'),
+        examples: ['Wingdings F0FE → ☑', 'Wingdings F0A8 → □', 'Webdings F021']
+    }];
+    assert.ok(visible(document.getElementById('conversionNotes')));
+    assert.deepEqual(noteItems(document), expected('tr'));
+    document.querySelector('[data-set-lang="en"]').click();
+    assert.deepEqual(noteItems(document), expected('en'));
+    assert.notEqual(strings.tr['notes.symbols'], strings.en['notes.symbols']);
 });
