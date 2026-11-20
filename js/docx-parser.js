@@ -29,6 +29,13 @@ const DEFAULT_RUN_FORMATTING = {
     fontSize: 12
 };
 
+// Word's fixed highlighting palette (w:highlight w:val, ST_HighlightColor, ECMA-376 Part 1, 17.18.40)
+const HIGHLIGHT_COLORS = {
+    yellow: 'FFFF00', green: '00FF00', cyan: '00FFFF', magenta: 'FF00FF', blue: '0000FF', red: 'FF0000',
+    darkBlue: '000080', darkCyan: '008080', darkGreen: '008000', darkMagenta: '800080', darkRed: '800000',
+    darkYellow: '808000', darkGray: '808080', lightGray: 'C0C0C0', black: '000000', white: 'FFFFFF'
+};
+
 // On/off properties that toggle, rather than override, between the paragraph and
 // character style levels (ECMA-376 Part 1, 17.7.3)
 const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike', 'hidden', 'caps', 'smallCaps'];
@@ -1490,8 +1497,8 @@ class DocxParser {
     /**
      * Read the character properties a w:rPr sets, from a run, a style or the document defaults
      * @param {Element|null} rPr - The w:rPr element
-     * @returns {Object} Only the properties it sets; an explicit "off" is kept as false,
-     *   and color "auto" as null, so it overrides an earlier layer
+     * @returns {Object} Only the properties it sets; an explicit "off" is kept as false, and
+     *   color "auto", highlight "none" and shading "nil" or "auto" as null, so they override an earlier layer
      */
     readRunProperties(rPr) {
         const props = {};
@@ -1522,6 +1529,25 @@ class DocxParser {
         const color = childElement(rPr, 'color');
         const colorVal = color && color.getAttribute('w:val');
         if (colorVal) props.color = colorVal === 'auto' ? null : '#' + colorVal;
+
+        // Highlighting (w:highlight): "none" is null, so it overrides an inherited highlight;
+        // a value outside Word's palette is ignored
+        const highlight = childElement(rPr, 'highlight');
+        const highlightVal = highlight && highlight.getAttribute('w:val');
+        if (highlightVal === 'none') props.highlight = null;
+        else if (Object.hasOwn(HIGHLIGHT_COLORS, highlightVal)) props.highlight = '#' + HIGHLIGHT_COLORS[highlightVal];
+
+        // Run shading (w:shd): a solid pattern is drawn entirely in its pattern color (w:color),
+        // any other pattern is approximated by its background fill (w:fill). "nil", or an "auto"
+        // or missing color, is null; a color that isn't 6 hex digits is ignored.
+        const shd = childElement(rPr, 'shd');
+        if (shd) {
+            const pattern = shd.getAttribute('w:val');
+            const solidColor = pattern === 'solid' ? shd.getAttribute('w:color') : '';
+            const fill = solidColor && solidColor !== 'auto' ? solidColor : shd.getAttribute('w:fill');
+            if (pattern === 'nil' || !fill || fill === 'auto') props.shading = null;
+            else if (/^[0-9A-Fa-f]{6}$/.test(fill)) props.shading = '#' + fill.toUpperCase();
+        }
 
         return props;
     }
@@ -2071,6 +2097,11 @@ class DocxParser {
             }
         }
         if (!formatting.color) delete formatting.color;
+        // Word draws highlighting over shading, so the highlight wins; each resolves on its own first
+        const background = formatting.highlight || formatting.shading;
+        delete formatting.highlight;
+        delete formatting.shading;
+        if (background) formatting.background = background;
 
         return formatting;
     }

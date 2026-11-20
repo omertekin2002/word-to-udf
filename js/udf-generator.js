@@ -438,6 +438,9 @@ class UdfGenerator {
             attrs.push(`foreground="${rgb}"`);
         }
 
+        // Highlighting or run shading, the documented content background color
+        if (run.background) attrs.push(`background="${this.hexToRgbInt(run.background)}"`);
+
         return attrs.join(' ');
     }
 
