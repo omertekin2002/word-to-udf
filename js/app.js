@@ -23,7 +23,8 @@ const FINDING_KEYS = {
     notesMoved: 'notes.notesMoved',
     endnotesMoved: 'notes.endnotesMoved',
     lineSpacing: 'notes.lineSpacing',
-    tabStops: 'notes.tabStops'
+    tabStops: 'notes.tabStops',
+    symbols: 'notes.symbols'
 };
 
 // The conversion's real steps, in order; the bar fills one share per step

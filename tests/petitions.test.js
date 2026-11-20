@@ -379,3 +379,17 @@ test('cevap dilekçesi: the borderless signature table draws only the line under
         assert.equal(paragraphOf(doc, content, text).getAttribute('Alignment'), '1', text);
     }
 });
+
+test('dava dilekçesi: the EKLER check boxes become ☑ and □ at the start of their paragraphs and are reported', async () => {
+    const { doc, content, parsed } = await converted(dava);
+    for (const line of dava.checkBoxes) {
+        const at = content.indexOf(line);
+        assert.ok(at > 0, `${JSON.stringify(line)} is missing`);
+        const paragraph = elementsWithText(doc, content, line.slice(1))[0].closest('paragraph');
+        const pieces = [...paragraph.querySelectorAll('[startOffset]')];
+        assert.equal(textOf(pieces[0], content), line[0], `${JSON.stringify(line)}: the box is the paragraph's first text`);
+        assert.equal(Number(pieces[0].getAttribute('startOffset')), at);
+    }
+    const symbols = JSON.parse(JSON.stringify(parsed.findings)).find(finding => finding.code === 'symbols');
+    assert.deepEqual(symbols, { code: 'symbols', count: 3, examples: ['Wingdings F0FE → ☑', 'Wingdings F0A8 → □'] });
+});

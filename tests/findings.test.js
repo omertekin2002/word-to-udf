@@ -264,12 +264,17 @@ test('the generator ignores findings: the UDF is the same with or without them',
 });
 
 // None of the petition fixtures has headers, comments, nested tables, pictures, endnotes, exact or
-// at-least line heights, or bar stops and underscore or heavy leaders. Only the dava dilekçesi has footnotes.
+// at-least line heights, or bar stops and underscore or heavy leaders. Only the dava dilekçesi has footnotes,
+// and Wingdings check boxes in its EKLER list.
 const EXPECTED_FIXTURE_FINDINGS = {
     'dava dilekçesi': [{
         code: 'notesMoved',
         count: 2,
         examples: ['Ek-1: Hizmet sözleşmesinin örneği.', 'Ek-2: Örnek Noterliğinin 00.00.2026 tari…']
+    }, {
+        code: 'symbols',
+        count: 3,
+        examples: ['Wingdings F0FE → ☑', 'Wingdings F0A8 → □']
     }],
     'icra/itiraz dilekçesi': [],
     'ekli tablo dilekçesi': [],
