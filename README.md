@@ -84,7 +84,7 @@ UDF (UYAP Document Format) is a ZIP archive containing:
 
 The format uses an offset-based content model where all text is stored in a CDATA block, and elements reference text positions using `startOffset` and `length` attributes.
 
-The generator's vocabulary is checked against the format documentation ([`Docs.md` at commit `15496404`](https://github.com/saidsurucu/UDF-Toolkit/blob/15496404cb38ee377ef087cb9b57649c352ed074/Docs.md)): `tests/vocabulary.test.js` converts a corpus of documents and fails on any element or attribute name the documentation doesn't give. Two `<content>` attributes are written beyond it: `superscript="true"` on footnote and endnote marks and note numbers, and `strikethrough="true"` for struck-through text (`w:strike`). Like the documented `<content>` attributes, they are Java Swing `StyleConstants` key names, but they are unverified until checked in the official editor.
+The generator's vocabulary is checked against the format documentation ([`Docs.md` at commit `15496404`](https://github.com/saidsurucu/UDF-Toolkit/blob/15496404cb38ee377ef087cb9b57649c352ed074/Docs.md)): `tests/vocabulary.test.js` converts a corpus of documents and fails on any element or attribute name the documentation doesn't give. Two `<content>` attributes are written beyond it: `superscript="true"` on footnote and endnote marks and note numbers, and `strikethrough="true"` for struck-through text (`w:strike`). Like the documented `<content>` formatting attributes (`family`, `size`, `bold`, …), they are Java Swing `StyleConstants` key names, but they are unverified until checked in the official editor.
 
 ### Page Setup
 The `<pageFormat>` element takes its values from the document's final section properties (`w:sectPr`):
