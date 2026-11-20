@@ -103,7 +103,7 @@ The default header and footer (`w:headerReference` / `w:footerReference` with `w
 
 ### Run text
 A run's text is written as Word shows it:
-- Hidden text (`w:vanish`) is left out, together with any tabs, breaks, pictures and note references in the hidden run, and reported as a `hiddenText` conversion note. Like bold and italic, it resolves through `w:docDefaults`, the paragraph style chain, the character style chain and the run itself, so `<w:vanish w:val="0"/>` on a run shows text a style hides. The paragraph itself is still written, even when all of its text is hidden.
+- Hidden text (`w:vanish`) is left out, together with any tabs, breaks, pictures and note references in the hidden run, and reported as a `hiddenText` conversion note. Like bold and italic, it resolves through `w:docDefaults`, the paragraph style chain, the character style chain and the run itself, so `<w:vanish w:val="0"/>` on a run shows text a style hides. The paragraph itself is still written, even when all of its text is hidden. Hidden runs in footnotes and endnotes are left out the same way.
 - All Caps (`w:caps`) and Small Caps (`w:smallCaps`) text is written in capitals, resolved the same way. Text whose language (`w:lang w:val`) is Turkish, or not set, is upper-cased the Turkish way (`i` becomes `İ`, `ı` becomes `I`); text in another language uses the general rules. Small capitals are written full size: the UDF has no small-caps attribute.
 - A non-breaking hyphen (`w:noBreakHyphen`) becomes a hyphen-minus (`-`). An optional hyphen (`w:softHyphen`) is left out, as Word only shows it at a line break.
 - A positional tab (`w:ptab`) becomes a plain tab.
@@ -152,7 +152,7 @@ A paragraph's list comes from `w:numPr`, read from the paragraph style and its `
 | --- | --- | --- |
 | `headersFooters` | Header or footer content is not converted (see [Headers and footers](#headers-and-footers)): a section references a first-page or even-page header or footer with non-whitespace text, or a header or footer with text other than the final section's default one; or the converted default header or footer holds a field, picture, text box or table, which is left out. Reported once for the document. | none |
 | `comments` | The comments part has comments with text; `count` is the number of such comments. | none |
-| `hiddenText` | Text formatted as hidden (`w:vanish`, see [Run text](#run-text)) is left out. Counted per paragraph, header and footer paragraphs and table cells included. | The start of the paragraph's hidden text |
+| `hiddenText` | Text formatted as hidden (`w:vanish`, see [Run text](#run-text)) is left out. Counted per paragraph, header and footer paragraphs and table cells included, and per paragraph of a footnote or endnote once per converted reference. | The start of the paragraph's hidden text |
 | `nestedTables` | A table inside a table cell is flattened into that cell. | The start of the nested table's first non-empty paragraph |
 | `missingImage` | A picture's relationship or media part is missing, so it is skipped. | The text of the nearest paragraph |
 | `unsupportedImage` | A picture's data is not PNG or JPEG, judged by its leading bytes, not its file extension. It is still embedded as-is. | The format: `EMF`, `WMF`, `GIF`, `TIFF`, `SVG` or `unknown` |

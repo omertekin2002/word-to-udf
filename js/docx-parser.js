@@ -286,6 +286,20 @@ function symbolText(sym, runFont = '') {
 }
 
 /**
+ * What a hidden run (w:vanish) would show: its text, and whether it holds anything Word would
+ * show, text or one of HIDDEN_CONTENT_ELEMENTS, a drawing included
+ * @param {Element} run - The w:r element
+ * @returns {{shows: boolean, text: string}}
+ */
+function hiddenRunContent(run) {
+    const text = childElements(run, 't').map(t => t.textContent || '').join('');
+    const shows = text !== '' || Array.from(run.children).some(child =>
+        HIDDEN_CONTENT_ELEMENTS.includes(child.localName) ||
+        (child.localName !== 'rPr' && child.getElementsByTagNameNS(WORD_NS, 'drawing').length > 0));
+    return { shows, text };
+}
+
+/**
  * Plain text of a parsed paragraph's text runs
  * @param {Object} paragraph - A parsed paragraph
  * @returns {string}
@@ -527,8 +541,8 @@ class DocxParser {
         this.imageFormats = {};
         this.footnotes = {};
         this.endnotes = {};
-        // symbols finding examples of each note's symbols, recorded when a reference to it is converted
-        this.noteSymbols = { footnote: {}, endnote: {} };
+        // The [code, example] findings of each note's text, recorded when a reference to it is converted
+        this.noteFindings = { footnote: {}, endnote: {} };
         this.numbering = {};
         this.styles = this.emptyStyles();
         this.findings = {};
@@ -554,7 +568,7 @@ class DocxParser {
             this.imageFormats = {};
             this.footnotes = {};
             this.endnotes = {};
-            this.noteSymbols = { footnote: {}, endnote: {} };
+            this.noteFindings = { footnote: {}, endnote: {} };
             this.numbering = {};
             this.styles = this.emptyStyles();
             this.findings = {};
@@ -574,15 +588,15 @@ class DocxParser {
             // Parse relationships to find media files
             await this.parseRelationships();
 
-            // Parse footnotes and endnotes
-            this.footnotes = await this.parseNotes('footnote');
-            this.endnotes = await this.parseNotes('endnote');
-
             // Parse list definitions
             await this.parseNumbering();
 
             // Parse style definitions
             await this.parseStyles();
+
+            // Parse footnotes and endnotes, after the styles their runs' hidden formatting resolves through
+            this.footnotes = await this.parseNotes('footnote');
+            this.endnotes = await this.parseNotes('endnote');
 
             // Parse the main document content. A malformed part parses to a parsererror
             // document instead of throwing (or, in Chromium, keeps a partial w:document with a
@@ -1005,7 +1019,7 @@ class DocxParser {
     /**
      * Parse the notes of the footnotes part (word/footnotes.xml) or the endnotes part
      * (word/endnotes.xml) into plain text keyed by w:id. Word's separator notes are left out.
-     * The symbols finding examples of each note's symbols go into noteSymbols.
+     * The findings of each note's text (its symbols and hidden text) go into noteFindings.
      * @param {'footnote'|'endnote'} type - The note element's local name
      * @returns {Promise<Object<string, string>>}
      */
@@ -1023,9 +1037,9 @@ class DocxParser {
                 // gives them ids -1 and 0, and marks them with w:type.
                 if (id === '0' || id === '-1' || SEPARATOR_NOTE_TYPES.includes(note.getAttribute('w:type'))) continue;
 
-                const symbols = [];
-                notes[id] = this.noteText(note, symbols);
-                this.noteSymbols[type][id] = symbols;
+                const findings = [];
+                notes[id] = this.noteText(note, findings);
+                this.noteFindings[type][id] = findings;
             }
         } catch (error) {
             rethrowFatal(error);
@@ -1038,27 +1052,40 @@ class DocxParser {
      * Plain text of a footnote or endnote: the text of its runs in document order, with one
      * space between paragraphs. A tab (w:tab, w:ptab) or line break (w:br, w:cr) in a run becomes a
      * space, so the words on either side of it stay apart. A symbol (w:sym) becomes its Unicode
-     * text (see symbolText).
+     * text (see symbolText). A hidden run (w:vanish, resolved through the paragraph and character
+     * styles as in the body) adds nothing.
      * @param {Element} note - The w:footnote or w:endnote element
-     * @param {Array<string>} [symbols] - Receives the symbols finding example of each symbol
+     * @param {Array<[string, string]>} [findings] - Receives a [code, example] pair for each symbol
+     *   (symbols) and for each paragraph with hidden content (hiddenText)
      * @returns {string}
      */
-    noteText(note, symbols = []) {
+    noteText(note, findings = []) {
         let text = '';
         for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
+            const style = this.paragraphStyle(childElement(para, 'pPr'));
+            const hidden = { found: false, text: '' };
             for (const run of para.getElementsByTagNameNS(WORD_NS, 'r')) {
+                if (this.parseRunFormatting(run, style.run).hidden) {
+                    const { shows, text: hiddenText } = hiddenRunContent(run);
+                    if (shows) {
+                        hidden.found = true;
+                        hidden.text += hiddenText;
+                    }
+                    continue;
+                }
                 for (const child of run.getElementsByTagNameNS(WORD_NS, '*')) {
                     if (child.localName === 't') {
                         text += child.textContent || '';
                     } else if (child.localName === 'sym' && child.parentNode === run) {
                         const symbol = symbolText(child);
                         text += symbol.text;
-                        symbols.push(symbol.example);
+                        findings.push(['symbols', symbol.example]);
                     } else if (NOTE_WHITESPACE_ELEMENTS.includes(child.localName) && child.parentNode === run) {
                         text += ' ';
                     }
                 }
             }
+            if (hidden.found) findings.push(['hiddenText', shortExample(hidden.text)]);
             text += ' ';
         }
         return text.trim();
@@ -1816,11 +1843,8 @@ class DocxParser {
         const { hidden: isHidden, caps, smallCaps, lang, ...formatting } = this.parseRunFormatting(run, paragraphRun);
 
         if (isHidden) {
-            const text = childElements(run, 't').map(t => t.textContent || '').join('');
-            const showsSomething = text !== '' || Array.from(run.children).some(child =>
-                HIDDEN_CONTENT_ELEMENTS.includes(child.localName) ||
-                (child.localName !== 'rPr' && child.getElementsByTagNameNS(WORD_NS, 'drawing').length > 0));
-            if (hidden && showsSomething) {
+            const { shows, text } = hiddenRunContent(run);
+            if (hidden && shows) {
                 hidden.found = true;
                 hidden.text += text;
             }
@@ -1880,8 +1904,8 @@ class DocxParser {
                     // Footnotes always leave their page; endnotes only when Word places or numbers them per section
                     if (kind === 'footnote') this.addFinding('notesMoved', shortExample(notes[id]));
                     else if (this.endnotesMoved) this.addFinding('endnotesMoved', shortExample(notes[id]));
-                    // The note's text is written once per reference, and its symbols with it
-                    for (const example of this.noteSymbols[kind][id] || []) this.addFinding('symbols', example);
+                    // The note's text is written once per reference, and its findings with it
+                    for (const [code, example] of this.noteFindings[kind][id] || []) this.addFinding(code, example);
                 }
             } else if (localName !== 'rPr') {
                 // w:drawing, or a drawing wrapped in mc:AlternateContent

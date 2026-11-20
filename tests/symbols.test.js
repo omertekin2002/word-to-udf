@@ -195,3 +195,28 @@ test('a positional tab (w:ptab) becomes a tab', async () => {
     assert.deepEqual(plain(parsed.elements[0].runs.map(item => item.type)), ['text', 'tab', 'text']);
     assert.ok(content.startsWith('Sol\tsağ'));
 });
+
+test('a hidden run in a referenced note writes nothing, its symbols included, and is reported as hidden text', async () => {
+    const styles = '<w:style w:type="character" w:styleId="Gizli"><w:name w:val="Gizli"/><w:rPr><w:vanish/></w:rPr></w:style>';
+    const { content, parsed } = await convertBody(
+        p(r('Dipnotlu') + '<w:r><w:footnoteReference w:id="1"/></w:r>') +
+        p(r('Son notlu') + '<w:r><w:endnoteReference w:id="1"/></w:r>'), {
+            styles,
+            footnotes: {
+                1: p(r('Seçim: ') + sym('Wingdings', 'F0FE', '<w:vanish/>') + sym('Wingdings', 'F0A8') + r(' taslak', '<w:vanish/>')),
+                // Unreferenced: never written, so it reports nothing
+                2: p(r('Kullanılmayan ') + sym('Wingdings', 'F0FE', '<w:vanish/>'))
+            },
+            endnotes: { 1: p(r('Görünen ') + r('stille gizli', '<w:rStyle w:val="Gizli"/>')) }
+        });
+
+    assert.ok(content.includes('1. Seçim: □'));
+    assert.equal(content.includes('☑'), false);
+    assert.equal(content.includes('taslak'), false);
+    assert.equal(content.includes('stille gizli'), false);
+    assert.ok(content.includes('Görünen'));
+    assert.deepEqual(findingsOf(parsed).filter(finding => ['hiddenText', 'symbols'].includes(finding.code)), [
+        { code: 'hiddenText', count: 2, examples: ['taslak', 'stille gizli'] },
+        { code: 'symbols', count: 1, examples: ['Wingdings F0A8 → □'] }
+    ]);
+});
