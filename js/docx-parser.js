@@ -33,9 +33,21 @@ const DEFAULT_RUN_FORMATTING = {
 // character style levels (ECMA-376 Part 1, 17.7.3)
 const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike', 'hidden', 'caps', 'smallCaps'];
 
+// Run children that hold a picture, text box, chart or shape: DrawingML w:drawing, and the
+// VML w:pict and w:object (an OLE object, shown by its preview picture)
+const PICTURE_ELEMENTS = ['drawing', 'pict', 'object'];
+
 // Run children that show something, so a hidden run (w:vanish) holding one leaves content out.
-// w:t counts only when it has text; a drawing may also be wrapped in mc:AlternateContent.
-const HIDDEN_CONTENT_ELEMENTS = ['tab', 'ptab', 'br', 'cr', 'noBreakHyphen', 'sym', 'footnoteReference', 'endnoteReference', 'drawing'];
+// w:t counts only when it has text; a picture may also be wrapped in mc:AlternateContent.
+const HIDDEN_CONTENT_ELEMENTS = ['tab', 'ptab', 'br', 'cr', 'noBreakHyphen', 'sym', 'footnoteReference', 'endnoteReference',
+    ...PICTURE_ELEMENTS];
+
+// Width and height of a picture whose size the document doesn't give, in points
+const DEFAULT_IMAGE_SIZE = 100;
+
+// Points per unit of a CSS length in a VML shape's style (e.g. "width:120pt"); a number
+// without a unit is in pixels, at 96 per inch
+const VML_POINTS_PER_UNIT = { pt: 1, in: 72, cm: 72 / 2.54, mm: 72 / 25.4, pc: 12, px: 72 / 96 };
 
 // Points per unit of an OOXML universal measure (ST_UniversalMeasure, e.g. "2.5cm")
 const POINTS_PER_UNIT = { mm: 72 / 25.4, cm: 72 / 2.54, in: 72, pt: 1, pc: 12, pi: 12 };
@@ -150,7 +162,7 @@ const LOST_LINE_RULES = ['exact', 'atLeast'];
 
 // Header and footer content the conversion leaves out: pictures and text boxes (w:drawing, VML
 // w:pict, w:object), and fields (w:fldSimple, w:fldChar), whose displayed result would be stale
-const HEADER_FOOTER_DRAWINGS = ['drawing', 'pict', 'object'];
+const HEADER_FOOTER_DRAWINGS = PICTURE_ELEMENTS;
 
 // Run items a header or footer paragraph keeps: page breaks and note references have no place there
 const HEADER_FOOTER_RUN_TYPES = ['text', 'tab', 'break'];
@@ -216,7 +228,7 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 // Codes of the conversion findings parse() reports, in the order it lists them: content the
 // conversion drops or simplifies, so the user can fix it in Word before filing
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
-    'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols'];
+    'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols'];
 
 // How many location hints a finding keeps, and how long each may be
 const MAX_FINDING_EXAMPLES = 3;
@@ -295,8 +307,66 @@ function hiddenRunContent(run) {
     const text = childElements(run, 't').map(t => t.textContent || '').join('');
     const shows = text !== '' || Array.from(run.children).some(child =>
         HIDDEN_CONTENT_ELEMENTS.includes(child.localName) ||
-        (child.localName !== 'rPr' && child.getElementsByTagNameNS(WORD_NS, 'drawing').length > 0));
+        (child.localName !== 'rPr' && PICTURE_ELEMENTS.some(name => child.getElementsByTagNameNS(WORD_NS, name).length > 0)));
     return { shows, text };
+}
+
+/**
+ * A length in a VML element's style attribute, e.g. "width:120pt"
+ * @param {Element} element - A VML element
+ * @param {string} name - 'width' or 'height'
+ * @returns {{value: number, unit: string}|null} The number and its lower-case unit ('' for a
+ *   bare number), or null when the style doesn't give the length or gives it unreadably
+ */
+function vmlStyleLength(element, name) {
+    for (const declaration of ((element && element.getAttribute('style')) || '').split(';')) {
+        const colon = declaration.indexOf(':');
+        if (colon < 0 || declaration.slice(0, colon).trim().toLowerCase() !== name) continue;
+        const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)([a-z]*)$/i.exec(declaration.slice(colon + 1).trim());
+        return match ? { value: parseFloat(match[1]), unit: match[2].toLowerCase() } : null;
+    }
+    return null;
+}
+
+/**
+ * Points of a VML length. A bare number in a shape inside a v:group is in the group's
+ * coordinate system (coordsize, 1000 by default), which the group's own width or height
+ * spans; elsewhere it is in pixels.
+ * @param {Element} element - The VML element the length belongs to
+ * @param {string} name - 'width' or 'height'
+ * @param {{value: number, unit: string}} length
+ * @returns {number|null} Points, or null for an unknown unit or a group whose size is unreadable
+ */
+function vmlLengthToPoints(element, name, { value, unit }) {
+    const group = element.parentElement;
+    if (!unit && group && group.namespaceURI === VML_NS && group.localName === 'group') {
+        const groupLength = vmlStyleLength(group, name);
+        const coordinates = (group.getAttribute('coordsize') || '').split(',').map(part => parseFloat(part));
+        const span = coordinates[name === 'width' ? 0 : 1];
+        const coordinateSize = Number.isFinite(span) ? span : 1000;
+        if (!groupLength || !(coordinateSize > 0)) return null;
+        return vmlLengthToPoints(group, name, { value: value * groupLength.value / coordinateSize, unit: groupLength.unit });
+    }
+    const key = unit || 'px';
+    return Object.prototype.hasOwnProperty.call(VML_POINTS_PER_UNIT, key) ? value * VML_POINTS_PER_UNIT[key] : null;
+}
+
+/**
+ * Size of a VML shape from the width and height in its style attribute, scaled through any
+ * v:group holding it
+ * @param {Element} shape - The v:shape (or other VML element) that owns a v:imagedata
+ * @returns {{width: number, height: number}} Rounded points; DEFAULT_IMAGE_SIZE for a side
+ *   that is missing, unreadable, non-finite or not positive
+ */
+function vmlShapeSize(shape) {
+    const size = { width: DEFAULT_IMAGE_SIZE, height: DEFAULT_IMAGE_SIZE };
+    for (const name of ['width', 'height']) {
+        const length = vmlStyleLength(shape, name);
+        const points = length && vmlLengthToPoints(shape, name, length);
+        const rounded = points === null ? NaN : Math.round(points);
+        if (Number.isFinite(rounded) && rounded > 0) size[name] = rounded;
+    }
+    return size;
 }
 
 /**
@@ -747,13 +817,20 @@ class DocxParser {
 
     /**
      * Decode the images the main document part shows, keyed by part name: those an a:blip
-     * embeds, text-box pictures included. An image part nothing shows (left over from a
-     * deleted picture, an unused fallback) is never decompressed.
+     * embeds or a VML v:imagedata shows (legacy pictures and OLE object previews), text-box
+     * pictures included. An image part nothing shows (left over from a deleted picture, or
+     * in the mc:AlternateContent branch that isn't read) is never decompressed.
      */
     async extractImages() {
-        const embeds = new Set(Array.from(this.document.getElementsByTagNameNS(DRAWING_NS, 'blip'))
-            .map(blip => blip.getAttributeNS(RELATIONSHIPS_NS, 'embed'))
-            .filter(Boolean));
+        const references = [
+            ...Array.from(this.document.getElementsByTagNameNS(DRAWING_NS, 'blip'))
+                .map(blip => [blip, blip.getAttributeNS(RELATIONSHIPS_NS, 'embed')]),
+            ...Array.from(this.document.getElementsByTagNameNS(VML_NS, 'imagedata'))
+                .map(imageData => [imageData, imageData.getAttributeNS(RELATIONSHIPS_NS, 'id')])
+        ];
+        const embeds = new Set(references
+            .filter(([element, id]) => id && this.isInReadBranch(element))
+            .map(([, id]) => id));
         for (const id of embeds) {
             if (!Object.prototype.hasOwnProperty.call(this.relationships, id)) continue;
             const { type, path } = this.relationships[id];
@@ -1744,6 +1821,22 @@ class DocxParser {
     }
 
     /**
+     * Whether an element is outside mc:AlternateContent, or only in branches that
+     * alternateContentBranch picks to read
+     * @param {Element} element - An element of a parsed part
+     * @returns {boolean}
+     */
+    isInReadBranch(element) {
+        for (let el = element.parentElement; el; el = el.parentElement) {
+            if (el.namespaceURI === MARKUP_COMPATIBILITY_NS && (el.localName === 'Choice' || el.localName === 'Fallback') &&
+                el.parentElement && this.alternateContentBranch(el.parentElement) !== el) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Find the text box contents (w:txbxContent) anchored in an element, once each.
      * Only one branch of mc:AlternateContent is read, and text boxes nested in
      * another text box are left for that text box's own parse.
@@ -1909,16 +2002,35 @@ class DocxParser {
                     for (const [code, example] of this.noteFindings[kind][id] || []) this.addFinding(code, example);
                 }
             } else if (localName !== 'rPr') {
-                // w:drawing, or a drawing wrapped in mc:AlternateContent
-                const drawing = localName === 'drawing' ? child
-                    : child.getElementsByTagNameNS(WORD_NS, 'drawing')[0];
-                if (drawing) {
-                    items.push(this.parseDrawing(drawing));
-                }
+                items.push(...this.parsePictures(child));
             }
         }
 
         return items;
+    }
+
+    /**
+     * Parse a run child that may show a picture: w:drawing, a VML w:pict or w:object, or
+     * mc:AlternateContent, of which only the branch alternateContentBranch picks is read, so
+     * a picture written both as DrawingML and as a VML fallback appears once
+     * @param {Element} element - A run child
+     * @returns {Array<Object>} Parsed images (see parseDrawing), in document order
+     */
+    parsePictures(element) {
+        if (element.namespaceURI === MARKUP_COMPATIBILITY_NS && element.localName === 'AlternateContent') {
+            const branch = this.alternateContentBranch(element);
+            return branch ? Array.from(branch.children).flatMap(child => this.parsePictures(child)) : [];
+        }
+        if (element.namespaceURI === WORD_NS && element.localName === 'drawing') {
+            return [this.parseDrawing(element)];
+        }
+        if (element.namespaceURI === WORD_NS && (element.localName === 'pict' || element.localName === 'object')) {
+            const image = this.parseVmlPicture(element);
+            return image ? [image] : [];
+        }
+        // Any other element: a drawing somewhere inside it
+        const drawing = element.getElementsByTagNameNS(WORD_NS, 'drawing')[0];
+        return drawing ? [this.parseDrawing(drawing)] : [];
     }
 
     /**
@@ -1971,8 +2083,8 @@ class DocxParser {
     parseDrawing(drawing) {
         const image = {
             type: 'image',
-            width: 100,
-            height: 100,
+            width: DEFAULT_IMAGE_SIZE,
+            height: DEFAULT_IMAGE_SIZE,
             data: null
         };
 
@@ -1988,24 +2100,67 @@ class DocxParser {
         }
 
         // Get embedded image reference. Pictures inside a text box belong to the
-        // text box's own paragraphs, which are parsed separately.
+        // text box's own paragraphs, which are parsed separately; one in an
+        // mc:AlternateContent branch that isn't read isn't shown (or extracted).
         const blips = Array.from(drawing.getElementsByTagNameNS(DRAWING_NS, 'blip'))
-            .filter(blip => !this.isInTextBox(blip, drawing));
+            .filter(blip => !this.isInTextBox(blip, drawing) && this.isInReadBranch(blip));
         if (blips.length > 0) {
-            const embed = blips[0].getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'embed');
-            const path = embed && this.relationships[embed] && this.relationships[embed].path;
-            if (path && this.images[path]) {
-                image.data = this.images[path];
-                // Embedded as-is, though UDF documents only PNG and JPEG
-                const format = this.imageFormats[path];
-                if (!SUPPORTED_IMAGE_FORMATS.includes(format)) this.addFinding('unsupportedImage', format);
-            } else {
-                // No relationship, or no media part behind it: the generator skips the picture
-                this.addFinding('missingImage', this.nearestParagraphText(drawing));
-            }
+            this.embedPicture(image, blips[0].getAttributeNS(RELATIONSHIPS_NS, 'embed'), drawing);
+        } else if (drawing.getElementsByTagNameNS(WORD_NS, 'txbxContent').length === 0) {
+            // A chart, SmartArt diagram or shape with no picture and no text box to keep
+            this.addFinding('unconvertedDrawing', this.nearestParagraphText(drawing));
         }
 
         return image;
+    }
+
+    /**
+     * Parse a VML picture (w:pict) or OLE object (w:object): the first v:imagedata outside a
+     * text box is embedded, sized by its shape's style. An OLE object is shown by that preview
+     * picture, as in Word; one written with a DrawingML w:drawing instead is parsed as a drawing.
+     * @param {Element} element - The w:pict or w:object element
+     * @returns {Object|null} Parsed image (see parseDrawing), or null when it shows no picture
+     */
+    parseVmlPicture(element) {
+        const imageData = Array.from(element.getElementsByTagNameNS(VML_NS, 'imagedata'))
+            .find(el => el.getAttributeNS(RELATIONSHIPS_NS, 'id') && !this.isInTextBox(el, element) && this.isInReadBranch(el));
+        if (imageData) {
+            const image = { type: 'image', ...vmlShapeSize(imageData.parentElement), data: null };
+            this.embedPicture(image, imageData.getAttributeNS(RELATIONSHIPS_NS, 'id'), element);
+            return image;
+        }
+
+        const drawing = Array.from(element.getElementsByTagNameNS(WORD_NS, 'drawing'))
+            .find(el => !this.isInTextBox(el, element) && this.isInReadBranch(el));
+        if (drawing) return this.parseDrawing(drawing);
+
+        // A shape, line or object with no picture; a text box's paragraphs are kept on their own
+        if (element.getElementsByTagNameNS(WORD_NS, 'txbxContent').length === 0) {
+            this.addFinding('unconvertedDrawing', this.nearestParagraphText(element));
+        }
+        return null;
+    }
+
+    /**
+     * Set a parsed image's data from the picture a relationship points at. A picture that
+     * isn't PNG or JPEG is embedded as-is, though UDF documents only those, and reported as
+     * unsupportedImage; one with no relationship or media part is reported as missingImage
+     * and keeps no data, so the generator skips it.
+     * @param {Object} image - The parsed image
+     * @param {string} relationshipId - r:embed of an a:blip, or r:id of a v:imagedata
+     * @param {Element} element - The picture's element in the main document part, for the location hint
+     */
+    embedPicture(image, relationshipId, element) {
+        const relationship = relationshipId && Object.prototype.hasOwnProperty.call(this.relationships, relationshipId)
+            ? this.relationships[relationshipId] : null;
+        const path = relationship && relationship.path;
+        if (path && this.images[path]) {
+            image.data = this.images[path];
+            const format = this.imageFormats[path];
+            if (!SUPPORTED_IMAGE_FORMATS.includes(format)) this.addFinding('unsupportedImage', format);
+        } else {
+            this.addFinding('missingImage', this.nearestParagraphText(element));
+        }
     }
 
     /**

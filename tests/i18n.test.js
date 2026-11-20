@@ -274,7 +274,7 @@ test('every finding code the parser reports has a TR and an EN message, and app.
     const { strings, run } = await loadPage({ app: true });
     const codes = run('FINDING_CODES');
     assert.deepEqual([...codes], ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
-        'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols']);
+        'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols']);
     const keys = run('FINDING_KEYS');
     assert.deepEqual(Object.keys(keys).sort(), [...codes].sort());
     for (const code of codes) {
