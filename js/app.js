@@ -51,6 +51,11 @@ class WordToUdfApp {
         this.downloadSection = document.getElementById('downloadSection');
         this.downloadBtn = document.getElementById('downloadBtn');
         this.convertAnother = document.getElementById('convertAnother');
+        this.replaceSourceBtn = document.getElementById('replaceSource');
+        this.replaceInput = document.getElementById('replaceInput');
+        this.resultSourceFile = document.getElementById('resultSourceFile');
+        this.resultConverted = document.getElementById('resultConverted');
+        this.resultOutput = document.getElementById('resultOutput');
         this.conversionNotes = document.getElementById('conversionNotes');
         this.conversionNotesList = document.getElementById('conversionNotesList');
         this.errorMessage = document.getElementById('errorMessage');
@@ -92,6 +97,17 @@ class WordToUdfApp {
 
         // Convert another
         this.convertAnother.addEventListener('click', () => this.handleConvertAnother());
+
+        // Replace source: pick a new revision and convert it in place of the current result.
+        // The input is emptied first, so choosing a file of the same name still counts as a change
+        this.replaceSourceBtn.addEventListener('click', () => {
+            this.replaceInput.value = '';
+            this.replaceInput.click();
+        });
+        this.replaceInput.addEventListener('change', (e) => {
+            const files = e.target.files;
+            if (files.length > 0) this.replaceSource(files[0]);
+        });
     }
 
     handleDragOver(e) {
@@ -167,6 +183,23 @@ class WordToUdfApp {
         this.conversionRun++;
     }
 
+    /**
+     * Replace the source of the result on screen with a new file (usually a new revision of
+     * the same document) and convert it straight away. The old download, source line and
+     * notes go at once, before any work; a file that isn't a .docx leaves them in place.
+     * @param {File} file
+     * @returns {Promise<void>|undefined} The conversion, when one starts
+     */
+    replaceSource(file) {
+        if (getFileExtension(file.name) !== 'docx') {
+            this.showError('error.invalidType');
+            return;
+        }
+        this.clearResult();
+        this.processFile(file);
+        return this.handleConvert();
+    }
+
     async handleConvert() {
         const file = this.selectedFile;
         if (!file) return;
@@ -176,6 +209,13 @@ class WordToUdfApp {
         const run = ++this.conversionRun;
         const isStale = () => run !== this.conversionRun;
         const outputFilename = toUdfFilename(file.name);
+        // What the result will say about its source, read from the file this run converts
+        const source = {
+            name: file.name,
+            size: formatFileSize(file.size),
+            lastModified: Number.isFinite(file.lastModified) ? file.lastModified : null,
+            output: outputFilename
+        };
 
         // The parser reports any failure with an English message (and an error.code for the
         // failures it can name); show the translated message for the step that failed and
@@ -191,7 +231,7 @@ class WordToUdfApp {
             this.progressText.textContent = '';
             this.progressContainer.classList.remove('hidden');
             this.hideError();
-            this.clearNotes();
+            this.clearResult();
             await nextFrame();
             if (isStale()) return;
 
@@ -221,6 +261,7 @@ class WordToUdfApp {
             // and take keyboard and screen-reader users to the result
             this.progressContainer.classList.add('hidden');
             this.fileInfo.classList.add('hidden');
+            this.showSource(source, Date.now());
             this.showNotes(document.findings || []);
             this.downloadSection.classList.remove('hidden');
             this.downloadBtn.focus();
@@ -238,9 +279,12 @@ class WordToUdfApp {
             this.convertBtn.classList.remove('hidden');
             this.showError(failureKey);
             // The role="alert" message announces itself; put focus back on the convert button,
-            // which lost it when it was hidden, unless the user has moved it elsewhere
+            // which lost it when it was hidden, unless the user has moved it elsewhere. Focus
+            // left in the hidden result (the replace button that started this run) is lost too
             const focused = window.document.activeElement;
-            if (!focused || focused === window.document.body) this.convertBtn.focus();
+            if (!focused || focused === window.document.body || this.downloadSection.contains(focused)) {
+                this.convertBtn.focus();
+            }
         }
     }
 
@@ -288,10 +332,41 @@ class WordToUdfApp {
 
     handleConvertAnother() {
         // Drop the result, then reset the file, progress and buttons as removing the file does
+        this.clearResult();
+        this.handleRemoveFile();
+    }
+
+    /** Drop the result: its download, source line and notes go together */
+    clearResult() {
         this.convertedBlob = null;
         this.downloadSection.classList.add('hidden');
+        this.clearSource();
         this.clearNotes();
-        this.handleRemoveFile();
+    }
+
+    /**
+     * Say which file and revision the result came from. The name is the user's, so it only
+     * ever goes in through textContent; the times are written in the page language, and again
+     * on every language change.
+     * @param {{name: string, size: string, lastModified: ?number, output: string}} source
+     * @param {number} convertedAt - When the conversion finished (ms since the epoch)
+     */
+    showSource({ name, size, lastModified, output }, convertedAt) {
+        if (lastModified === null) {
+            setTranslatedText(this.resultSourceFile, 'result.sourceUndated', { name, size });
+        } else {
+            setTranslatedText(this.resultSourceFile, 'result.source', { name, size, modified: { dateTime: lastModified } });
+        }
+        setTranslatedText(this.resultConverted, 'result.converted', { time: { time: convertedAt } });
+        setTranslatedText(this.resultOutput, 'result.output', { output });
+    }
+
+    clearSource() {
+        for (const line of [this.resultSourceFile, this.resultConverted, this.resultOutput]) {
+            delete line.dataset.i18n;
+            delete line.dataset.i18nParams;
+            line.textContent = '';
+        }
     }
 
     /**
