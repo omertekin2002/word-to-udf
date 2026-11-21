@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const JSZip = require('jszip');
-const { loadConverter, buildDocx, convertBody, textOf } = require('./helpers');
+const { loadConverter, buildDocx, convertBody, textOf, findingSummaries } = require('./helpers');
 
 const p = inner => `<w:p>${inner}</w:p>`;
 const r = (text, rPr = '') => `<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ''}<w:t xml:space="preserve">${text}</w:t></w:r>`;
@@ -79,7 +79,7 @@ test('a VML picture is embedded with its PNG data and its shape\'s size in point
     assert.deepEqual(images(doc), [{ data: PNG.toString('base64'), width: '120', height: '40' }]);
     assert.match(xml, new RegExp(`<image startOffset="6" length="1" imageData="${PNG.toString('base64')}" width="120" height="40" />`));
     assert.equal(textOf(doc.querySelector('elements image'), content), '￼');
-    assert.deepEqual(plain(parsed.findings), []);
+    assert.deepEqual(findingSummaries(parsed.findings), []);
 });
 
 test('a VML shape\'s width and height convert from each CSS unit, a bare number being pixels', async () => {
@@ -130,7 +130,7 @@ test('a VML picture in a group is sized through the group\'s coordinate system',
 test('an OLE object is shown by its preview picture: an EMF preview embeds and gives unsupportedImage', async () => {
     const { doc, parsed } = await convertBody(p(r('Tablo: ') + oleObject('rId_image1')), { media: { 'image1.emf': EMF } });
     assert.deepEqual(images(doc), [{ data: EMF.toString('base64'), width: '200', height: '80' }]);
-    assert.deepEqual(plain(parsed.findings), [{ code: 'unsupportedImage', count: 1, examples: ['EMF'] }]);
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'unsupportedImage', count: 1, examples: ['EMF'] }]);
 });
 
 test('an OLE object or VML picture whose preview part is missing gives missingImage and writes no image', async () => {
@@ -139,7 +139,7 @@ test('an OLE object or VML picture whose preview part is missing gives missingIm
     zip.remove('word/media/image1.emf');
     const { DocxParser, UdfGenerator } = loadConverter();
     const parsed = await new DocxParser().parse(await zip.generateAsync({ type: 'nodebuffer' }));
-    assert.deepEqual(plain(parsed.findings), [{ code: 'missingImage', count: 2, examples: ['Ek tablo', 'İmza'] }]);
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'missingImage', count: 2, examples: ['Ek tablo', 'İmza'] }]);
 
     const udf = await JSZip.loadAsync(await (await new UdfGenerator().generate(parsed)).arrayBuffer());
     assert.doesNotMatch(await udf.file('content.xml').async('string'), /<image /);
@@ -150,7 +150,7 @@ test('an OLE object written with a DrawingML preview is embedded as a drawing', 
         `<o:OLEObject ${O_NS} Type="Embed" ProgID="Equation.3" r:id="rId_ole"/></w:object></w:r>`;
     const { doc, parsed } = await convertBody(p(object), { media: { 'image1.png': PNG } });
     assert.deepEqual(images(doc), [{ data: PNG.toString('base64'), width: '72', height: '36' }]);
-    assert.deepEqual(plain(parsed.findings), []);
+    assert.deepEqual(findingSummaries(parsed.findings), []);
 });
 
 test('alternate content with a DrawingML picture and a VML fallback writes the chosen picture once', async () => {
@@ -173,7 +173,7 @@ test('alternate content with a DrawingML picture and a VML fallback writes the c
     result = await convertBody(p(unsupported), { media: { 'image1.png': PNG, 'image2.png': PNG2 } });
     assert.deepEqual(images(result.doc), [{ data: PNG2.toString('base64'), width: '120', height: '40' }]);
     assert.deepEqual(Object.keys(plain(result.parsed.images)), ['word/media/image2.png']);
-    assert.deepEqual(plain(result.parsed.findings), []);
+    assert.deepEqual(findingSummaries(result.parsed.findings), []);
 });
 
 test('alternate content inside a drawing or VML picture embeds the branch that is read, not the first picture', async () => {
@@ -192,7 +192,7 @@ test('alternate content inside a drawing or VML picture embeds the branch that i
         { data: PNG2.toString('base64'), width: '10', height: '20' }
     ]);
     assert.deepEqual(Object.keys(plain(parsed.images)), ['word/media/image2.png']);
-    assert.deepEqual(plain(parsed.findings), []);
+    assert.deepEqual(findingSummaries(parsed.findings), []);
 });
 
 test('a chart, a SmartArt diagram and a shape with no text box give unconvertedDrawing and write no image', async () => {
@@ -202,7 +202,7 @@ test('a chart, a SmartArt diagram and a shape with no text box give unconvertedD
     assert.doesNotMatch(xml, /<image /);
     assert.equal(content.includes('￼'), false);
     assert.equal(doc.querySelectorAll('elements image').length, 0);
-    assert.deepEqual(plain(parsed.findings), [
+    assert.deepEqual(findingSummaries(parsed.findings), [
         { code: 'unconvertedDrawing', count: 3, examples: ['Grafik 1: Dava sayıları', 'Şema'] }
     ]);
 });
@@ -211,7 +211,7 @@ test('a VML shape with no picture or text box, such as a horizontal line, gives 
     const line = `<w:r><w:pict><v:rect ${O_NS} style="width:0;height:1.5pt" o:hralign="center" o:hrstd="t" o:hr="t"/></w:pict></w:r>`;
     const { xml, parsed } = await convertBody(p(r('Çizgi') + line));
     assert.doesNotMatch(xml, /<image /);
-    assert.deepEqual(plain(parsed.findings), [{ code: 'unconvertedDrawing', count: 1, examples: ['Çizgi'] }]);
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'unconvertedDrawing', count: 1, examples: ['Çizgi'] }]);
 });
 
 test('an unconverted drawing in a table cell is reported with its cell paragraph, and not in a merged-away cell', async () => {
@@ -219,14 +219,14 @@ test('an unconverted drawing in a table cell is reported with its cell paragraph
         `<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>${p(r('Hücre grafiği') + chart)}</w:tc></w:tr>` +
         `<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr>${p(r('Birleşik') + chart)}</w:tc></w:tr></w:tbl>`;
     const { parsed } = await convertBody(merged);
-    assert.deepEqual(plain(parsed.findings), [{ code: 'unconvertedDrawing', count: 1, examples: ['Hücre grafiği'] }]);
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'unconvertedDrawing', count: 1, examples: ['Hücre grafiği'] }]);
 });
 
 test('text-box shapes, DrawingML and VML, keep their paragraphs and give no unconvertedDrawing', async () => {
     const { content, parsed } = await convertBody(p(r('Çapa') + shapeTextBox('Kutu metni')) + p(r('VML çapa') + vmlTextBox('Eski kutu')));
     assert.ok(content.includes('Kutu metni'));
     assert.ok(content.includes('Eski kutu'));
-    assert.deepEqual(plain(parsed.findings), []);
+    assert.deepEqual(findingSummaries(parsed.findings), []);
 });
 
 test('a VML picture inside a VML text box is embedded once, by the text box\'s own paragraph', async () => {
@@ -234,7 +234,7 @@ test('a VML picture inside a VML text box is embedded once, by the text box\'s o
         '</w:txbxContent></v:textbox></v:shape></w:pict></w:r>';
     const { doc, parsed } = await convertBody(p(r('Çapa') + box), { media: { 'image1.png': PNG } });
     assert.deepEqual(images(doc), [{ data: PNG.toString('base64'), width: '120', height: '40' }]);
-    assert.deepEqual(plain(parsed.findings), []);
+    assert.deepEqual(findingSummaries(parsed.findings), []);
 });
 
 test('a VML picture, OLE object or chart in a hidden run writes nothing and gives only hiddenText', async () => {
@@ -244,7 +244,7 @@ test('a VML picture, OLE object or chart in a hidden run writes nothing and give
         p(chart.replace('<w:r>', `<w:r><w:rPr>${hidden}</w:rPr>`));
     const { xml, parsed } = await convertBody(body, { media: { 'image1.png': PNG } });
     assert.doesNotMatch(xml, /<image /);
-    assert.deepEqual(plain(parsed.findings), [{ code: 'hiddenText', count: 3, examples: [] }]);
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'hiddenText', count: 3, examples: [] }]);
 });
 
 test('only the pictures the document shows are decompressed, VML pictures included', async t => {
@@ -268,7 +268,7 @@ test('the new finding comes after unsupportedImage, and the UDF is the same with
     const docx = await buildDocx(p(r('Resim') + vmlPicture('rId_yok')) + p(oleObject('rId_image1')) +
         p(r('Grafik') + chart) + tbl([p(r('Hücre') + smartArt)]), { media: { 'image1.emf': EMF } });
     const parsed = await new DocxParser().parse(docx);
-    assert.deepEqual(plain(parsed.findings), [
+    assert.deepEqual(findingSummaries(parsed.findings), [
         { code: 'missingImage', count: 1, examples: ['Resim'] },
         { code: 'unsupportedImage', count: 1, examples: ['EMF'] },
         { code: 'unconvertedDrawing', count: 2, examples: ['Grafik', 'Hücre'] }

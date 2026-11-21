@@ -657,3 +657,123 @@ test('the replace button is a keyboard-reachable button named in TR and EN', asy
     assert.equal(button.textContent, strings.en['download.replace']);
     assert.equal(document.getElementById('replaceInput').getAttribute('aria-label'), strings.en['download.replaceInputLabel']);
 });
+
+/** Each conversion note's code, list label and listed lines */
+function noteLines(document) {
+    return [...document.querySelectorAll('#conversionNotesList > li')].map(item => ({
+        code: item.dataset.code,
+        label: item.querySelector('.conversion-note-examples-label')?.textContent ?? null,
+        lines: [...item.querySelectorAll('.conversion-note-examples > li')].map(li => li.textContent)
+    }));
+}
+
+test('located findings list one line per place in TR and EN, follow the toggle, skip document-wide places and show document text as text', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document, strings } = page;
+    const parser = stubParser(page);
+    const markup = '<img src=x onerror=alert(1)>';
+    const findings = [
+        { code: 'headersFooters', count: 1, examples: [], occurrences: [{ example: '', location: { kind: 'document' } }] },
+        { code: 'hiddenText', count: 6, examples: ['Gizli', markup], occurrences: [
+            { example: 'Gizli', location: { kind: 'paragraph', paragraph: 12, heading: 'AÇIKLAMALAR' } },
+            { example: markup, location: { kind: 'cell', table: 2, row: 3, cell: 1, heading: markup } },
+            { example: '', location: { kind: 'paragraph', paragraph: 3 } },
+            { example: 'Üstte', location: { kind: 'header' } },
+            { example: 'Altta', location: { kind: 'footer' } }
+        ] },
+        { code: 'symbols', count: 2, examples: ['Wingdings F0FC → ✓'], occurrences: [
+            { example: 'Wingdings F0FC → ✓', location: { kind: 'paragraph', paragraph: 7, note: { kind: 'footnote' } } },
+            { example: 'Wingdings F0FC → ✓', location: { kind: 'cell', table: 1, row: 1, cell: 2, heading: 'DELİLLER', note: { kind: 'endnote' } } }
+        ] },
+        { code: 'endnotesMoved', count: 1, examples: ['Son not'], occurrences: [{ example: 'Son not', location: { kind: 'document' } }] },
+        // A finding from before locations existed still lists its examples
+        { code: 'tabStops', count: 1, examples: ['Çubuk'] }
+    ];
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe')));
+    const conversion = window.app.handleConvert();
+    const call = await parser.called(1);
+    call.resolve(await parsedWith(parser, call, findings));
+    await conversion;
+
+    const expected = {
+        tr: [
+            { code: 'headersFooters', label: null, lines: [] },
+            { code: 'hiddenText', label: 'Nerede:', lines: [
+                'Paragraf 12 · “AÇIKLAMALAR” başlığı altında · “Gizli”',
+                `Tablo 2, satır 3, hücre 1 · “${markup}” başlığı altında · “${markup}”`,
+                'Paragraf 3',
+                'Üst bilgi · “Üstte”',
+                'Alt bilgi · “Altta”'
+            ] },
+            { code: 'symbols', label: 'Nerede:', lines: [
+                'Dipnot · Paragraf 7 · Wingdings F0FC → ✓',
+                'Son not · Tablo 1, satır 1, hücre 2 · “DELİLLER” başlığı altında · Wingdings F0FC → ✓'
+            ] },
+            { code: 'endnotesMoved', label: 'Örnekler:', lines: ['“Son not”'] },
+            { code: 'tabStops', label: 'Örnekler:', lines: ['“Çubuk”'] }
+        ],
+        en: [
+            { code: 'headersFooters', label: null, lines: [] },
+            { code: 'hiddenText', label: 'Where:', lines: [
+                'Paragraph 12 · under “AÇIKLAMALAR” · “Gizli”',
+                `Table 2, row 3, cell 1 · under “${markup}” · “${markup}”`,
+                'Paragraph 3',
+                'Header · “Üstte”',
+                'Footer · “Altta”'
+            ] },
+            { code: 'symbols', label: 'Where:', lines: [
+                'Footnote · Paragraph 7 · Wingdings F0FC → ✓',
+                'Endnote · Table 1, row 1, cell 2 · under “DELİLLER” · Wingdings F0FC → ✓'
+            ] },
+            { code: 'endnotesMoved', label: 'Examples:', lines: ['“Son not”'] },
+            { code: 'tabStops', label: 'Examples:', lines: ['“Çubuk”'] }
+        ]
+    };
+    const help = document.getElementById('conversionNotesHelp');
+    assert.deepEqual(noteLines(document), expected.tr);
+    assert.ok(visible(help));
+    assert.equal(help.textContent, strings.tr['notes.locationHelp']);
+    // The count still says when there are more places than are listed
+    assert.equal(document.querySelector('[data-code="hiddenText"] .conversion-note-count').textContent, 'Sayı: 6');
+    // Headings and examples are document text: shown as text, never parsed as markup
+    assert.equal(document.querySelectorAll('#conversionNotes img').length, 0);
+
+    document.querySelector('[data-set-lang="en"]').click();
+    assert.deepEqual(noteLines(document), expected.en);
+    assert.equal(help.textContent, strings.en['notes.locationHelp']);
+    assert.equal(document.querySelectorAll('#conversionNotes img').length, 0);
+    document.querySelector('[data-set-lang="tr"]').click();
+    assert.deepEqual(noteLines(document), expected.tr);
+});
+
+test('the paragraph-number help shows only when a location line is listed, and goes with the notes', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document } = page;
+    const parser = stubParser(page);
+    const help = document.getElementById('conversionNotesHelp');
+    assert.ok(!visible(help));
+
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe')));
+    let conversion = window.app.handleConvert();
+    let call = await parser.called(1);
+    call.resolve(await parsedWith(parser, call, [
+        { code: 'comments', count: 2, examples: [], occurrences: [{ example: '', location: { kind: 'document' } }] }
+    ]));
+    await conversion;
+    assert.ok(visible(document.getElementById('conversionNotes')));
+    assert.ok(!visible(help), 'no location line, no help');
+
+    document.getElementById('convertAnother').click();
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe')));
+    conversion = window.app.handleConvert();
+    call = await parser.called(2);
+    call.resolve(await parsedWith(parser, call, [
+        { code: 'lineSpacing', count: 1, examples: ['Tam'], occurrences: [{ example: 'Tam', location: { kind: 'paragraph', paragraph: 4 } }] }
+    ]));
+    await conversion;
+    assert.ok(visible(help));
+
+    document.getElementById('convertAnother').click();
+    assert.ok(!visible(document.getElementById('conversionNotes')));
+    assert.ok(!visible(help));
+});

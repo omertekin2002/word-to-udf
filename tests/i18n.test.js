@@ -314,7 +314,7 @@ test('every finding code the parser reports has a TR and an EN message, and app.
             assert.ok(strings[lang][`notes.${code}`], `${lang} message for ${code}`);
         }
     }
-    for (const key of ['notes.title', 'notes.count', 'notes.examples']) {
+    for (const key of ['notes.title', 'notes.count', 'notes.examples', 'notes.where', 'notes.locationHelp']) {
         assert.ok(strings.tr[key] && strings.en[key], key);
     }
     assert.match(strings.tr['notes.count'], /\{count\}/);
@@ -341,6 +341,13 @@ async function docxWithFindings() {
     });
 }
 
+/** A location line's text in a language: the dictionary strings named, filled in and joined by " · " */
+function where(dictionary, ...parts) {
+    return parts.map(part => (typeof part === 'string' ? part
+        : Object.entries(part[1] || {}).reduce((text, [name, value]) => text.replace(`{${name}}`, value),
+            dictionary[`notes.location.${part[0]}`]))).join(' · ');
+}
+
 function noteItems(document) {
     return [...document.querySelectorAll('#conversionNotesList > li')].map(item => ({
         code: item.dataset.code,
@@ -361,11 +368,14 @@ test('a conversion with findings lists them under the download button, translate
     assert.equal(notes.getAttribute('role'), 'status');
     assert.ok(notes.contains(document.getElementById('conversionNotesTitle')));
 
+    // The header and comments are document-wide, so they list no place
     const expected = lang => [
         { code: 'headersFooters', text: strings[lang]['notes.headersFooters'], count: null, examples: [] },
         { code: 'comments', text: strings[lang]['notes.comments'], count: strings[lang]['notes.count'].replace('{count}', '2'), examples: [] },
-        { code: 'nestedTables', text: strings[lang]['notes.nestedTables'], count: null, examples: ['“<img src=x> iç tablo”'] },
-        { code: 'unsupportedImage', text: strings[lang]['notes.unsupportedImage'], count: null, examples: ['GIF'] }
+        { code: 'nestedTables', text: strings[lang]['notes.nestedTables'], count: null,
+            examples: [where(strings[lang], ['cell', { table: 1, row: 1, cell: 1 }], '“<img src=x> iç tablo”')] },
+        { code: 'unsupportedImage', text: strings[lang]['notes.unsupportedImage'], count: null,
+            examples: [where(strings[lang], ['paragraph', { paragraph: 2 }], 'GIF')] }
     ];
     assert.deepEqual(noteItems(document), expected('tr'));
     assert.equal(document.getElementById('conversionNotesTitle').textContent, strings.tr['notes.title']);
@@ -419,17 +429,29 @@ test('hidden text, moved notes, lost line heights and lost tab stops are listed 
     window.app.processFile(fileOf('dilekce.docx', docx));
     await window.app.handleConvert();
 
+    // Moved endnotes are a setting of the whole document, so their examples are listed without a place
     const expected = lang => [
-        { code: 'hiddenText', text: strings[lang]['notes.hiddenText'], count: null, examples: ['“Gizli not”'] },
-        { code: 'notesMoved', text: strings[lang]['notes.notesMoved'], count: null, examples: ['“Dipnot metni”'] },
+        { code: 'hiddenText', text: strings[lang]['notes.hiddenText'], count: null,
+            examples: [where(strings[lang], ['paragraph', { paragraph: 2 }], '“Gizli not”')] },
+        { code: 'notesMoved', text: strings[lang]['notes.notesMoved'], count: null,
+            examples: [where(strings[lang], ['footnote'], ['paragraph', { paragraph: 3 }], '“Dipnot metni”')] },
         { code: 'endnotesMoved', text: strings[lang]['notes.endnotesMoved'], count: null, examples: ['“Son not metni”'] },
-        { code: 'lineSpacing', text: strings[lang]['notes.lineSpacing'], count: null, examples: ['“Tam satır”'] },
-        { code: 'tabStops', text: strings[lang]['notes.tabStops'], count: null, examples: ['“Çubuk sekme”'] }
+        { code: 'lineSpacing', text: strings[lang]['notes.lineSpacing'], count: null,
+            examples: [where(strings[lang], ['paragraph', { paragraph: 5 }], '“Tam satır”')] },
+        { code: 'tabStops', text: strings[lang]['notes.tabStops'], count: null,
+            examples: [where(strings[lang], ['paragraph', { paragraph: 6 }], '“Çubuk sekme”')] }
     ];
+    const labels = lang => [strings[lang]['notes.where'], strings[lang]['notes.where'], strings[lang]['notes.examples'],
+        strings[lang]['notes.where'], strings[lang]['notes.where']];
+    const labelTexts = () => [...document.querySelectorAll('.conversion-note-examples-label')].map(label => label.textContent);
     assert.ok(visible(document.getElementById('conversionNotes')));
+    assert.ok(visible(document.getElementById('conversionNotesHelp')), 'how paragraphs are counted');
     assert.deepEqual(noteItems(document), expected('tr'));
+    assert.deepEqual(labelTexts(), labels('tr'));
     document.querySelector('[data-set-lang="en"]').click();
     assert.deepEqual(noteItems(document), expected('en'));
+    assert.deepEqual(labelTexts(), labels('en'));
+    assert.equal(document.getElementById('conversionNotesHelp').textContent, strings.en['notes.locationHelp']);
     assert.notEqual(strings.tr['notes.tabStops'], strings.en['notes.tabStops']);
 });
 
@@ -446,6 +468,7 @@ test('converted and left-out symbols are listed in both languages, with unquoted
         text: strings[lang]['notes.symbols'],
         count: strings[lang]['notes.count'].replace('{count}', '3'),
         examples: ['Wingdings F0FE → ☑', 'Wingdings F0A8 → □', 'Webdings F021']
+            .map(example => where(strings[lang], ['paragraph', { paragraph: 1 }], example))
     }];
     assert.ok(visible(document.getElementById('conversionNotes')));
     assert.deepEqual(noteItems(document), expected('tr'));

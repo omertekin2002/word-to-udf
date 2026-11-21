@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const JSZip = require('jszip');
-const { loadConverter, buildDocx, convert } = require('./helpers');
+const { loadConverter, buildDocx, convert, findingSummaries } = require('./helpers');
 const { petitions } = require('./fixtures/petitions');
 
 const p = inner => `<w:p>${inner}</w:p>`;
@@ -44,9 +44,10 @@ const comments = list => ({
 // The parser runs in its own realm; copy its findings into this one so deepEqual can compare them
 const plain = value => JSON.parse(JSON.stringify(value));
 
+// Each finding's code, count and examples; the located occurrences are checked on their own below
 async function parse(docx, parser = new (loadConverter().DocxParser)()) {
     const parsed = await parser.parse(docx);
-    return { ...parsed, findings: plain(parsed.findings) };
+    return { ...parsed, findings: findingSummaries(parsed.findings) };
 }
 
 const findingsOf = async (bodyXml, options) => (await parse(await buildDocx(bodyXml, options))).findings;
@@ -157,7 +158,7 @@ test('a table nested in a cell gives nestedTables with the nested table\'s text,
     const body = tbl([[p(r('Dış hücre')) + nested, p(r('Yan hücre'))]]);
     const { parsed, content } = await convert(await buildDocx(body));
 
-    assert.deepEqual(plain(parsed.findings), [{ code: 'nestedTables', count: 1, examples: ['İç tablo metni'] }]);
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'nestedTables', count: 1, examples: ['İç tablo metni'] }]);
     // Flattened into the containing cell in reading order, as before
     const cellTexts = plain(parsed.elements[0].rows[0].cells).map(cell =>
         cell.paragraphs.map(para => para.runs.map(run => run.text || '').join('')));
@@ -497,7 +498,7 @@ test('a cell joined to the vertical merge above it is written empty, and its par
     ])));
 
     // Only the merge's first cell is converted, so only its paragraph counts
-    assert.deepEqual(plain(parsed.findings), lossyFindings('Birleşik'));
+    assert.deepEqual(findingSummaries(parsed.findings), lossyFindings('Birleşik'));
     assert.equal(content.trim(), 'Birleşik');
     const cells = [...doc.querySelectorAll('elements table row cell')];
     assert.equal(cells.length, 3);
@@ -516,7 +517,7 @@ test('a footnote, a picture and a nested table in a joined cell give no findings
             p(picture()) + tbl([[lossy('İç tablo')]])]
     ]), { footnotes: { 1: p(r('Yazılmayan dipnot')) }, media: { 'image1.png': IMAGES.gif } }));
 
-    assert.deepEqual(plain(parsed.findings), []);
+    assert.deepEqual(findingSummaries(parsed.findings), []);
     assert.equal(content.trim(), 'Birleşik');
 });
 
@@ -524,7 +525,7 @@ test('a continuation cell with no merge above it is converted, so its findings c
     const { parsed, content } = await convert(await buildDocx(mergeColumn([['continue', lossy('Sahipsiz devam')]])));
 
     assert.ok(content.includes('Sahipsiz devam'), JSON.stringify(content));
-    assert.deepEqual(plain(parsed.findings), lossyFindings('Sahipsiz devam'));
+    assert.deepEqual(findingSummaries(parsed.findings), lossyFindings('Sahipsiz devam'));
 });
 
 test('a nested table is flattened with its joined cells, so their findings count', async () => {
@@ -532,7 +533,7 @@ test('a nested table is flattened with its joined cells, so their findings count
     const { parsed, content } = await convert(await buildDocx(tbl([[nested, p(r('Yan hücre'))]])));
 
     assert.ok(content.includes('Düzleştirilen devam'), JSON.stringify(content));
-    assert.deepEqual(plain(parsed.findings), [
+    assert.deepEqual(findingSummaries(parsed.findings), [
         { code: 'nestedTables', count: 1, examples: ['İç başlık'] },
         ...lossyFindings('Düzleştirilen devam')
     ]);
@@ -551,7 +552,7 @@ test('a body paragraph holding only a page break is written as the break alone, 
 
     assert.deepEqual(topLevel(doc), ['paragraph', 'page-break', 'paragraph', 'page-break', 'page-break', 'paragraph']);
     assert.equal(writtenLossy(doc), 0);
-    assert.deepEqual(plain(parsed.findings), []);
+    assert.deepEqual(findingSummaries(parsed.findings), []);
 });
 
 test('a picture that is skipped does not make a page-break paragraph a written one', async () => {
@@ -559,7 +560,7 @@ test('a picture that is skipped does not make a page-break paragraph a written o
 
     assert.deepEqual(topLevel(doc), ['paragraph', 'page-break']);
     // The picture is still reported as skipped, with the nearest text
-    assert.deepEqual(plain(parsed.findings), [{ code: 'missingImage', count: 1, examples: ['Önce'] }]);
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'missingImage', count: 1, examples: ['Önce'] }]);
 });
 
 test('a paragraph with text before or after its page break is written, and counted once', async () => {
@@ -568,7 +569,7 @@ test('a paragraph with text before or after its page break is written, and count
         lossyRuns(r('İki') + pageBreak + r('yanında'))));
 
     assert.equal(writtenLossy(doc), 4, 'the paragraph split in two is written as two');
-    assert.deepEqual(plain(parsed.findings), [
+    assert.deepEqual(findingSummaries(parsed.findings), [
         { code: 'lineSpacing', count: 3, examples: ['Kesmeden önce', 'Kesmeden sonra', 'İkiyanında'] },
         { code: 'tabStops', count: 3, examples: ['Kesmeden önce', 'Kesmeden sonra', 'İkiyanında'] }
     ]);
@@ -579,7 +580,7 @@ test('in a table cell a page break is a line break, so a paragraph holding only 
 
     assert.equal(doc.querySelector('elements page-break'), null);
     assert.equal(writtenLossy(doc), 1);
-    assert.deepEqual(plain(parsed.findings), [
+    assert.deepEqual(findingSummaries(parsed.findings), [
         { code: 'lineSpacing', count: 1, examples: [] },
         { code: 'tabStops', count: 1, examples: [] }
     ]);
@@ -593,11 +594,11 @@ test('a text box paragraph in the body follows the body rule, one in a cell the 
 
     const inBody = await convert(await buildDocx(p(r('Çapa') + textBox(lossyRuns(pageBreak)))));
     assert.equal(writtenLossy(inBody.doc), 0);
-    assert.deepEqual(plain(inBody.parsed.findings), []);
+    assert.deepEqual(findingSummaries(inBody.parsed.findings), []);
 
     const inCell = await convert(await buildDocx(tbl([[p(r('Çapa') + textBox(lossyRuns(pageBreak)))]])));
     assert.equal(writtenLossy(inCell.doc), 1);
-    assert.deepEqual(plain(inCell.parsed.findings).map(finding => [finding.code, finding.count]),
+    assert.deepEqual(findingSummaries(inCell.parsed.findings).map(finding => [finding.code, finding.count]),
         [['lineSpacing', 1], ['tabStops', 1]]);
 });
 
@@ -634,7 +635,7 @@ test('lineSpacing and tabStops are recorded for exactly the paragraphs the gener
             assert.equal(written, context === 'cell' || hasContent || !names.includes('pageBreak'), `${label} written`);
 
             // The parser's findings follow it
-            const counts = Object.fromEntries(plain(parsed.findings).map(finding => [finding.code, finding.count]));
+            const counts = Object.fromEntries(findingSummaries(parsed.findings).map(finding => [finding.code, finding.count]));
             assert.equal(counts.lineSpacing || 0, written ? 1 : 0, `${label} lineSpacing`);
             assert.equal(counts.tabStops || 0, written ? 1 : 0, `${label} tabStops`);
         }
@@ -671,4 +672,196 @@ test('the UDF of a document with every new finding is the same with or without i
     const udfXml = async document => (await JSZip.loadAsync(
         await (await new UdfGenerator().generate(document)).arrayBuffer())).file('content.xml').async('string');
     assert.equal(await udfXml(parsed), await udfXml({ ...parsed, findings: [] }));
+});
+
+// Locations: where each occurrence of a finding is
+
+// Each finding of a parse as plain data in this realm, its occurrences included
+async function locatedFindingsOf(bodyXml, options) {
+    const { DocxParser } = loadConverter();
+    return plain((await new DocxParser().parse(await buildDocx(bodyXml, options))).findings);
+}
+const occurrencesOf = (findings, code) => (findings.find(finding => finding.code === code) || { occurrences: [] }).occurrences;
+const locationsOf = (findings, code) => occurrencesOf(findings, code).map(occurrence => occurrence.location);
+
+const hiddenRun = text => `<w:r><w:rPr><w:vanish/></w:rPr><w:t>${text}</w:t></w:r>`;
+const bold = text => `<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">${text}</w:t></w:r>`;
+const exact = text => withPPr(spacing('exact'), text);
+const vmlTextBox = inner => `<w:r><w:pict><v:shape style="width:100pt;height:50pt"><v:textbox><w:txbxContent>${inner}</w:txbxContent></v:textbox></v:shape></w:pict></w:r>`;
+const HEADING_STYLES = '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>' +
+    '<w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>' +
+    '<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Heading1"/>' +
+    '<w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style>' +
+    '<w:style w:type="paragraph" w:styleId="BodyText"><w:name w:val="Body Text"/><w:pPr><w:outlineLvl w:val="9"/></w:pPr></w:style>';
+const styled = (styleId, text) => withPPr(`<w:pStyle w:val="${styleId}"/>`, text);
+
+test('every finding lists its occurrences, at most 5, each with an example and a location, and keeps code, count and examples', async () => {
+    for (const petition of petitions) {
+        const { DocxParser } = loadConverter();
+        const findings = plain((await new DocxParser().parse(await petition.build())).findings);
+        for (const finding of findings) {
+            assert.deepEqual(Object.keys(finding), ['code', 'count', 'examples', 'occurrences'], petition.name);
+            assert.ok(finding.occurrences.length >= 1 && finding.occurrences.length <= 5, `${petition.name} ${finding.code}`);
+            for (const occurrence of finding.occurrences) {
+                assert.deepEqual(Object.keys(occurrence), ['example', 'location']);
+                assert.equal(typeof occurrence.example, 'string');
+                assert.ok(['paragraph', 'cell', 'header', 'footer', 'document'].includes(occurrence.location.kind));
+            }
+        }
+    }
+});
+
+test('body paragraphs are numbered from 1, empty ones included, and an extra paragraph before a finding moves it by one', async () => {
+    const body = p('') + p(r('Birinci')) + p('') + exact('Tam satır');
+    assert.deepEqual(occurrencesOf(await locatedFindingsOf(body), 'lineSpacing'),
+        [{ example: 'Tam satır', location: { kind: 'paragraph', paragraph: 4 } }]);
+    assert.deepEqual(locationsOf(await locatedFindingsOf(p(r('Eklenen')) + body), 'lineSpacing'),
+        [{ kind: 'paragraph', paragraph: 5 }]);
+    // Tables don't count as paragraphs, and content controls are looked through
+    const withTable = tbl([[p(r('Hücre')), p('')]]) + `<w:sdt><w:sdtContent>${p(r('Denetimde'))}</w:sdtContent></w:sdt>` + exact('Sonra');
+    assert.deepEqual(locationsOf(await locatedFindingsOf(withTable), 'lineSpacing'), [{ kind: 'paragraph', paragraph: 2 }]);
+});
+
+test('a finding in a cell names its table, row and cell; a nested table reports the outer cell', async () => {
+    const third = [p(r('Görünen') + hiddenRun('Gizli hücre')) + tbl([[p(r('İç') + hiddenRun('İç gizli')), p('')]]), p('')];
+    const body = p(r('Giriş')) + tbl([[p(r('Bir')), p(r('İki'))]]) + p('') +
+        tbl([[p(r('A')), p(r('B'))], [p(r('C')), exact('D')], third]);
+    const findings = await locatedFindingsOf(body);
+    const cell = (row, cellNumber) => ({ kind: 'cell', table: 2, row, cell: cellNumber });
+    assert.deepEqual(occurrencesOf(findings, 'hiddenText'), [
+        { example: 'Gizli hücre', location: cell(3, 1) },
+        { example: 'İç gizli', location: cell(3, 1) }
+    ]);
+    assert.deepEqual(occurrencesOf(findings, 'nestedTables'), [{ example: 'İç', location: cell(3, 1) }]);
+    assert.deepEqual(occurrencesOf(findings, 'lineSpacing'), [{ example: 'D', location: cell(2, 2) }]);
+});
+
+test('a text box\'s findings carry its anchoring paragraph, and its paragraphs don\'t shift the numbering', async () => {
+    const body = p(r('Birinci')) +
+        p(r('Çapa') + vmlTextBox(p(r('Kutu') + hiddenRun('Kutuda gizli')) + exact('Kutuda tam') + p(r('Üçüncü kutu paragrafı')))) +
+        exact('Sonraki');
+    const findings = await locatedFindingsOf(body);
+    assert.deepEqual(locationsOf(findings, 'hiddenText'), [{ kind: 'paragraph', paragraph: 2 }]);
+    assert.deepEqual(occurrencesOf(findings, 'lineSpacing'), [
+        { example: 'Kutuda tam', location: { kind: 'paragraph', paragraph: 2 } },
+        { example: 'Sonraki', location: { kind: 'paragraph', paragraph: 3 } }
+    ]);
+});
+
+test('the heading is the last outline-level paragraph before the place, from a Heading style or a direct w:outlineLvl', async () => {
+    const body = exact('Başlıktan önce') +
+        styled('Heading1', 'Olaylar') + exact('Olaylarda') +
+        withPPr('<w:outlineLvl w:val="2"/>', 'Doğrudan düzey') + exact('Düzeyde') +
+        styled('Heading2', 'Alt başlık') + tbl([[exact('Tabloda'), p('')]]);
+    const findings = await locatedFindingsOf(body, { styles: HEADING_STYLES });
+    assert.deepEqual(locationsOf(findings, 'lineSpacing'), [
+        { kind: 'paragraph', paragraph: 1 },
+        { kind: 'paragraph', paragraph: 3, heading: 'Olaylar' },
+        { kind: 'paragraph', paragraph: 5, heading: 'Doğrudan düzey' },
+        { kind: 'cell', table: 1, row: 1, cell: 1, heading: 'Alt başlık' }
+    ]);
+});
+
+test('outline level 9 (body text) is no heading, even when the paragraph sets it over a Heading style', async () => {
+    const body = styled('Heading1', 'Olaylar') + styled('BodyText', 'Gövde metni düzeyi') + exact('Gövdeden sonra') +
+        withPPr('<w:pStyle w:val="Heading1"/><w:outlineLvl w:val="9"/>', 'Düzeyi kaldırılmış') + exact('Kaldırılandan sonra');
+    assert.deepEqual(locationsOf(await locatedFindingsOf(body, { styles: HEADING_STYLES }), 'lineSpacing'), [
+        { kind: 'paragraph', paragraph: 3, heading: 'Olaylar' },
+        { kind: 'paragraph', paragraph: 5, heading: 'Olaylar' }
+    ]);
+});
+
+test('a heading\'s own finding names the heading before it, and a long one is shortened', async () => {
+    const long = 'Uzun bir başlık metni kırk karakteri rahatlıkla geçer ve kısaltılır';
+    const body = styled('Heading1', 'Birinci başlık') + withPPr('<w:pStyle w:val="Heading1"/>' + spacing('exact'), 'İkinci başlık') +
+        styled('Heading1', long) + exact('Altında');
+    const findings = await locatedFindingsOf(body, { styles: HEADING_STYLES });
+    assert.deepEqual(locationsOf(findings, 'lineSpacing'), [
+        { kind: 'paragraph', paragraph: 2, heading: 'Birinci başlık' },
+        { kind: 'paragraph', paragraph: 4, heading: 'Uzun bir başlık metni kırk karakteri rah…' }
+    ]);
+});
+
+test('without outline levels, a short all-bold or all-upper-case body paragraph is the heading', async () => {
+    const body = exact('Önce') +
+        p(r('AÇIKLAMALAR :')) + exact('Açıklamada') +
+        p(bold('Deliller') + r(' ') + bold('ve ekler')) + exact('Delillerde') +
+        p(r('SONUÇ VE İSTEM') + '<w:r><w:t xml:space="preserve">  </w:t></w:r>') + exact('Sonuçta') +
+        p(r('Karışık ') + bold('kalın')) + p(r('X'.repeat(81))) + p(r('2024/123')) + exact('Başlık değil') +
+        tbl([[p(bold('Hücrede kalın')), p('')]]) + exact('Tablodan sonra');
+    const findings = await locatedFindingsOf(body);
+    assert.deepEqual(locationsOf(findings, 'lineSpacing').map(location => location.heading), [
+        undefined, 'AÇIKLAMALAR :', 'Deliller ve ekler', 'SONUÇ VE İSTEM', 'SONUÇ VE İSTEM'
+    ]);
+    // A bold paragraph in a table is no heading
+    const tail = await locatedFindingsOf(p(r('SONUÇ')) + tbl([[p(bold('Hücrede kalın')), p('')]]) + exact('Tablodan sonra'));
+    assert.deepEqual(locationsOf(tail, 'lineSpacing'), [{ kind: 'paragraph', paragraph: 2, heading: 'SONUÇ' }]);
+});
+
+test('an outline-level heading wins over a later bold or upper-case one', async () => {
+    const body = styled('Heading1', 'Olaylar') + p(r('AÇIKLAMALAR')) + exact('Altında');
+    assert.deepEqual(locationsOf(await locatedFindingsOf(body, { styles: HEADING_STYLES }), 'lineSpacing'),
+        [{ kind: 'paragraph', paragraph: 3, heading: 'Olaylar' }]);
+});
+
+test('note text findings and moved footnotes are located at the reference, marked with the note kind', async () => {
+    const sym = '<w:r><w:sym w:font="Wingdings" w:char="F0FC"/></w:r>';
+    const body = p(r('BAŞLIK')) + p(r('Gövde') + footnoteRef(1)) + tbl([[p(r('Hücre') + endnoteRef(1)), p('')]]);
+    const findings = await locatedFindingsOf(body, {
+        footnotes: { 1: p(r('Dipnot') + sym + hiddenRun('Dipnotta gizli')) },
+        endnotes: { 1: p(r('Son not') + sym) }
+    });
+    const inFootnote = { kind: 'paragraph', paragraph: 2, heading: 'BAŞLIK', note: { kind: 'footnote' } };
+    const inEndnote = { kind: 'cell', table: 1, row: 1, cell: 1, heading: 'BAŞLIK', note: { kind: 'endnote' } };
+    assert.deepEqual(locationsOf(findings, 'notesMoved'), [inFootnote]);
+    assert.deepEqual(locationsOf(findings, 'hiddenText'), [inFootnote]);
+    assert.deepEqual(locationsOf(findings, 'symbols'), [inFootnote, inEndnote]);
+});
+
+test('header and footer findings are located in them; headersFooters, comments and endnotesMoved are document-wide', async () => {
+    const sym = '<w:r><w:sym w:font="Wingdings" w:char="F0FC"/></w:r>';
+    const findings = await locatedFindingsOf(sectionBreak() + p(r('Son not') + endnoteRef(1)), {
+        sectPr: headerRefs + '<w:headerReference w:type="first" r:id="rIdHeader2"/>',
+        endnotes: ENDNOTES,
+        settings: endnotePr(pos('sectEnd')),
+        parts: [
+            header('header1.xml', 'rIdHeader1', p(r('Üst') + hiddenRun('Üstte gizli'))),
+            header('footer1.xml', 'rIdFooter1', p(r('Alt') + sym), 'footer'),
+            header('header2.xml', 'rIdHeader2', p(r('İlk sayfa'))),
+            comments(['Yorum'])
+        ]
+    });
+    assert.deepEqual(locationsOf(findings, 'hiddenText'), [{ kind: 'header' }]);
+    assert.deepEqual(locationsOf(findings, 'symbols'), [{ kind: 'footer' }]);
+    assert.deepEqual(occurrencesOf(findings, 'headersFooters'), [{ example: '', location: { kind: 'document' } }]);
+    assert.deepEqual(occurrencesOf(findings, 'comments'), [{ example: '', location: { kind: 'document' } }]);
+    assert.deepEqual(occurrencesOf(findings, 'endnotesMoved'), [{ example: 'Birinci son not', location: { kind: 'document' } }]);
+});
+
+test('occurrences are capped at 5 in document order, and an example repeated at one place is listed once', async () => {
+    const sym = '<w:r><w:sym w:font="Wingdings" w:char="F0FC"/></w:r>';
+    const body = p(sym + sym) + Array.from({ length: 7 }, () => exact('Aynı')).join('') + p(sym);
+    const findings = await locatedFindingsOf(body);
+    const lineSpacing = findings.find(finding => finding.code === 'lineSpacing');
+    assert.equal(lineSpacing.count, 7);
+    assert.deepEqual(lineSpacing.examples, ['Aynı']);
+    assert.deepEqual(lineSpacing.occurrences.map(({ example, location }) => [example, location.paragraph]),
+        [['Aynı', 2], ['Aynı', 3], ['Aynı', 4], ['Aynı', 5], ['Aynı', 6]]);
+    const symbols = findings.find(finding => finding.code === 'symbols');
+    assert.equal(symbols.count, 3);
+    assert.deepEqual(symbols.occurrences.map(({ location }) => location.paragraph), [1, 9]);
+});
+
+test('a drawing keeps its nearest-paragraph example and takes the place of the paragraph or cell holding it', async () => {
+    const body = p(r('Önce')) + p(picture('rId_yok')) + tbl([[p(r('Hücre')), p(picture('rId_yok2'))]]);
+    assert.deepEqual(occurrencesOf(await locatedFindingsOf(body), 'missingImage'), [
+        { example: 'Önce', location: { kind: 'paragraph', paragraph: 2 } },
+        { example: 'Hücre', location: { kind: 'cell', table: 1, row: 1, cell: 2 } }
+    ]);
+});
+
+test('a cell joined to the merge above it still records no occurrence', async () => {
+    const findings = await locatedFindingsOf(mergeColumn([['restart', exact('Birleşik')], ['continue', exact('Yazılmayan')]]));
+    assert.deepEqual(occurrencesOf(findings, 'lineSpacing'),
+        [{ example: 'Birleşik', location: { kind: 'cell', table: 1, row: 1, cell: 1 } }]);
 });

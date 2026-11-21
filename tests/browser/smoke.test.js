@@ -198,15 +198,26 @@ test('a whole petition converts and downloads as a .udf holding its text', async
         assert.ok(content.includes(line), `content.xml is missing the check box line ${JSON.stringify(line)}`);
     }
 
-    // The EKLER check boxes get the symbols note, with the conversions as unquoted examples, in both languages
+    // The EKLER check boxes get the symbols note, one location line per box with its conversion
+    // as an unquoted example, in both languages
     const symbolsNote = page.locator('#conversionNotesList > li.conversion-note[data-code="symbols"]');
     assert.equal(await symbolsNote.count(), 1);
-    const examples = symbolsNote.locator('.conversion-note-examples > li');
-    assert.deepEqual(await examples.allTextContents(), ['Wingdings F0FE → ☑', 'Wingdings F0A8 → □']);
-    for (const lang of ['tr', 'en']) {
+    const lines = symbolsNote.locator('.conversion-note-examples > li');
+    const expectedLines = {
+        tr: ['Paragraf 23 · “EKLER” başlığı altında · Wingdings F0FE → ☑', 'Paragraf 24 · “EKLER” başlığı altında · Wingdings F0FE → ☑',
+            'Paragraf 25 · “EKLER” başlığı altında · Wingdings F0A8 → □'],
+        en: ['Paragraph 23 · under “EKLER” · Wingdings F0FE → ☑', 'Paragraph 24 · under “EKLER” · Wingdings F0FE → ☑',
+            'Paragraph 25 · under “EKLER” · Wingdings F0A8 → □']
+    };
+    assert.deepEqual(await lines.allTextContents(), expectedLines.tr);
+    assert.equal(await page.locator('#conversionNotesHelp').isVisible(), true);
+    for (const lang of ['en', 'tr']) {
         await page.locator(`[data-set-lang="${lang}"]`).click();
         assert.equal(await symbolsNote.locator('.conversion-note-text').textContent(),
             await page.evaluate(() => t('notes.symbols')), lang);
+        assert.deepEqual(await lines.allTextContents(), expectedLines[lang], lang);
+        assert.equal(await symbolsNote.locator('.conversion-note-examples-label').textContent(),
+            await page.evaluate(() => t('notes.where')), lang);
     }
     assertClean(problems);
 });

@@ -655,6 +655,11 @@ p {
   text-transform: uppercase;
 }
 
+.conversion-notes-help {
+  margin: 0 0 6px;
+  font: 12px/1.4 var(--font-body);
+}
+
 .conversion-notes-list {
   margin: 0;
   padding-left: 18px;

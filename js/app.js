@@ -34,6 +34,35 @@ const PROGRESS_STAGES = ['progress.parsing', 'progress.converting', 'progress.co
 // Findings whose examples are document text, shown in quotes; the others are format names
 const QUOTED_EXAMPLE_CODES = ['hiddenText', 'nestedTables', 'missingImage', 'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
 
+// What separates the parts of a location line
+const LOCATION_SEPARATOR = ' · ';
+
+/**
+ * The translated parts of a finding location's line, before its example: the note it is in,
+ * where it is, and the heading it is under. A document-wide location has none.
+ * @param {Object} location - See DocxParser.addFinding
+ * @returns {Array<[string, Object]>} [dictionary key, params] pairs, in order
+ */
+function locationParts(location) {
+    const parts = [];
+    if (location.note && (location.note.kind === 'footnote' || location.note.kind === 'endnote')) {
+        parts.push([`notes.location.${location.note.kind}`, {}]);
+    }
+    if (location.kind === 'paragraph') {
+        parts.push(['notes.location.paragraph', { paragraph: location.paragraph }]);
+    } else if (location.kind === 'cell') {
+        parts.push(['notes.location.cell', { table: location.table, row: location.row, cell: location.cell }]);
+    } else if (location.kind === 'header' || location.kind === 'footer') {
+        parts.push([`notes.location.${location.kind}`, {}]);
+    } else {
+        return [];
+    }
+    if (typeof location.heading === 'string' && location.heading !== '') {
+        parts.push(['notes.location.heading', { heading: location.heading }]);
+    }
+    return parts;
+}
+
 class WordToUdfApp {
     constructor() {
         // DOM Elements
@@ -58,6 +87,7 @@ class WordToUdfApp {
         this.resultOutput = document.getElementById('resultOutput');
         this.conversionNotes = document.getElementById('conversionNotes');
         this.conversionNotesList = document.getElementById('conversionNotesList');
+        this.conversionNotesHelp = document.getElementById('conversionNotesHelp');
         this.errorMessage = document.getElementById('errorMessage');
         this.errorText = document.getElementById('errorText');
 
@@ -370,16 +400,20 @@ class WordToUdfApp {
     }
 
     /**
-     * List the parser's findings under the download button; hidden when there are none.
-     * Examples are document text, so they only ever go in through textContent.
-     * @param {Array<{code: string, count: number, examples: Array<string>}>} findings
+     * List the parser's findings under the download button; hidden when there are none. A finding
+     * located somewhere in particular lists where, one line per place with its example; otherwise
+     * its examples are listed. Examples and headings are document text, so they only ever go in
+     * through textContent.
+     * @param {Array<{code: string, count: number, examples: Array<string>,
+     *   occurrences?: Array<{example: string, location: Object}>}>} findings
      */
     showNotes(findings) {
         this.clearNotes();
         const known = findings.filter(finding => Object.prototype.hasOwnProperty.call(FINDING_KEYS, finding.code));
         if (known.length === 0) return;
 
-        for (const { code, count, examples } of known) {
+        let located = false;
+        for (const { code, count, examples, occurrences = [] } of known) {
             const item = document.createElement('li');
             item.className = 'conversion-note';
             item.dataset.code = code;
@@ -396,29 +430,51 @@ class WordToUdfApp {
                 item.appendChild(countLine);
             }
 
-            if (examples.length > 0) {
+            const shown = text => (QUOTED_EXAMPLE_CODES.includes(code) ? `“${text}”` : text);
+            const places = occurrences
+                .map(({ example, location }) => ({ example, parts: locationParts(location || {}) }))
+                .filter(place => place.parts.length > 0);
+            if (places.length > 0 || examples.length > 0) {
                 const label = document.createElement('p');
                 label.className = 'conversion-note-examples-label';
-                setTranslatedText(label, 'notes.examples');
+                setTranslatedText(label, places.length > 0 ? 'notes.where' : 'notes.examples');
                 item.appendChild(label);
 
                 const list = document.createElement('ul');
                 list.className = 'conversion-note-examples';
-                for (const example of examples) {
-                    const entry = document.createElement('li');
-                    entry.textContent = QUOTED_EXAMPLE_CODES.includes(code) ? `“${example}”` : example;
-                    list.appendChild(entry);
+                if (places.length > 0) {
+                    located = true;
+                    for (const { example, parts } of places) {
+                        const entry = document.createElement('li');
+                        entry.className = 'conversion-note-location';
+                        parts.forEach(([key, params], i) => {
+                            if (i > 0) entry.append(LOCATION_SEPARATOR);
+                            const part = document.createElement('span');
+                            setTranslatedText(part, key, params);
+                            entry.appendChild(part);
+                        });
+                        if (example) entry.append(LOCATION_SEPARATOR + shown(example));
+                        list.appendChild(entry);
+                    }
+                } else {
+                    for (const example of examples) {
+                        const entry = document.createElement('li');
+                        entry.textContent = shown(example);
+                        list.appendChild(entry);
+                    }
                 }
                 item.appendChild(list);
             }
 
             this.conversionNotesList.appendChild(item);
         }
+        this.conversionNotesHelp.classList.toggle('hidden', !located);
         this.conversionNotes.classList.remove('hidden');
     }
 
     clearNotes() {
         this.conversionNotesList.replaceChildren();
+        this.conversionNotesHelp.classList.add('hidden');
         this.conversionNotes.classList.add('hidden');
     }
 

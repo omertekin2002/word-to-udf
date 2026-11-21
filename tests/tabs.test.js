@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { convertBody, textOf } = require('./helpers');
+const { convertBody, textOf, findingSummaries } = require('./helpers');
 
 const p = (runs, pPr = '') => `<w:p>${pPr ? `<w:pPr>${pPr}</w:pPr>` : ''}${runs}</w:p>`;
 const run = text => `<w:r><w:t>${text}</w:t></w:r>`;
@@ -181,7 +181,7 @@ test('bar stops replace inherited text stops from defaults and styles without re
     assert.equal(tabSetOf(doc, content, 'Style replaced'), '36.0:2:1');
     assert.equal(tabSetOf(doc, content, 'Style bar'), null);
     assert.equal(tabSetOf(doc, content, 'Child bar'), '36.0:2:1');
-    assert.deepEqual(JSON.parse(JSON.stringify(parsed.findings)), [
+    assert.deepEqual(findingSummaries(parsed.findings), [
         { code: 'tabStops', count: 4, examples: ['Default replaced', 'Style replaced', 'Style bar'] }
     ]);
 });
@@ -200,7 +200,7 @@ test('a later normal stop replaces an inherited bar, while a clear removes it', 
     assert.equal(tabSetOf(doc, content, 'Normal override'), '36.0:1:2');
     assert.equal(tabSetOf(doc, content, 'Clear override'), null);
     assert.equal(tabSetOf(doc, content, 'Child normal'), '36.0:0:0');
-    assert.deepEqual(JSON.parse(JSON.stringify(parsed.findings)), []);
+    assert.deepEqual(findingSummaries(parsed.findings), []);
 });
 
 test('bar stops and stops with an unreadable or negative position are left out', async () => {
