@@ -29,13 +29,32 @@ const DEFAULT_RUN_FORMATTING = {
     fontSize: 12
 };
 
+// Word's fixed highlighting palette (w:highlight w:val, ST_HighlightColor, ECMA-376 Part 1, 17.18.40)
+const HIGHLIGHT_COLORS = {
+    yellow: 'FFFF00', green: '00FF00', cyan: '00FFFF', magenta: 'FF00FF', blue: '0000FF', red: 'FF0000',
+    darkBlue: '000080', darkCyan: '008080', darkGreen: '008000', darkMagenta: '800080', darkRed: '800000',
+    darkYellow: '808000', darkGray: '808080', lightGray: 'C0C0C0', black: '000000', white: 'FFFFFF'
+};
+
 // On/off properties that toggle, rather than override, between the paragraph and
 // character style levels (ECMA-376 Part 1, 17.7.3)
 const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike', 'hidden', 'caps', 'smallCaps'];
 
+// Run children that hold a picture, text box, chart or shape: DrawingML w:drawing, and the
+// VML w:pict and w:object (an OLE object, shown by its preview picture)
+const PICTURE_ELEMENTS = ['drawing', 'pict', 'object'];
+
 // Run children that show something, so a hidden run (w:vanish) holding one leaves content out.
-// w:t counts only when it has text; a drawing may also be wrapped in mc:AlternateContent.
-const HIDDEN_CONTENT_ELEMENTS = ['tab', 'ptab', 'br', 'cr', 'noBreakHyphen', 'sym', 'footnoteReference', 'endnoteReference', 'drawing'];
+// w:t counts only when it has text; a picture may also be wrapped in mc:AlternateContent.
+const HIDDEN_CONTENT_ELEMENTS = ['tab', 'ptab', 'br', 'cr', 'noBreakHyphen', 'sym', 'footnoteReference', 'endnoteReference',
+    ...PICTURE_ELEMENTS];
+
+// Width and height of a picture whose size the document doesn't give, in points
+const DEFAULT_IMAGE_SIZE = 100;
+
+// Points per unit of a CSS length in a VML shape's style (e.g. "width:120pt"); a number
+// without a unit is in pixels, at 96 per inch
+const VML_POINTS_PER_UNIT = { pt: 1, in: 72, cm: 72 / 2.54, mm: 72 / 25.4, pc: 12, px: 72 / 96 };
 
 // Points per unit of an OOXML universal measure (ST_UniversalMeasure, e.g. "2.5cm")
 const POINTS_PER_UNIT = { mm: 72 / 25.4, cm: 72 / 2.54, in: 72, pt: 1, pc: 12, pi: 12 };
@@ -45,6 +64,12 @@ const SEPARATOR_NOTE_TYPES = ['separator', 'continuationSeparator', 'continuatio
 
 // Run children of a footnote or endnote that stand for whitespace: a tab or a line break
 const NOTE_WHITESPACE_ELEMENTS = ['tab', 'ptab', 'br', 'cr'];
+
+// Parsed run items a note paragraph keeps: page breaks, pictures and note references have no place there
+const NOTE_RUN_TYPES = ['text', 'tab', 'break'];
+
+// Font size of note text, in points, when neither the document defaults nor a style or the run gives one
+const NOTE_FONT_SIZE = 10;
 
 // Unicode text of the symbols Word writes as w:sym (Insert > Symbol, and check boxes), by
 // lower-case font name and character code. Word writes w:char as hex, usually in the private
@@ -150,7 +175,7 @@ const LOST_LINE_RULES = ['exact', 'atLeast'];
 
 // Header and footer content the conversion leaves out: pictures and text boxes (w:drawing, VML
 // w:pict, w:object), and fields (w:fldSimple, w:fldChar), whose displayed result would be stale
-const HEADER_FOOTER_DRAWINGS = ['drawing', 'pict', 'object'];
+const HEADER_FOOTER_DRAWINGS = PICTURE_ELEMENTS;
 
 // Run items a header or footer paragraph keeps: page breaks and note references have no place there
 const HEADER_FOOTER_RUN_TYPES = ['text', 'tab', 'break'];
@@ -216,11 +241,22 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 // Codes of the conversion findings parse() reports, in the order it lists them: content the
 // conversion drops or simplifies, so the user can fix it in Word before filing
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
-    'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols'];
+    'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders'];
 
 // How many location hints a finding keeps, and how long each may be
 const MAX_FINDING_EXAMPLES = 3;
 const MAX_EXAMPLE_LENGTH = 40;
+
+// How many located occurrences (an example and where it is) a finding keeps
+const MAX_FINDING_OCCURRENCES = 5;
+
+// Outline levels (w:outlineLvl w:val) that make a paragraph a heading: 0 to 8 are Word's
+// heading levels 1 to 9, and 9 is body text
+const MAX_HEADING_OUTLINE_LEVEL = 8;
+
+// Longest text a paragraph without an outline level may have and still count as a heading
+// when it is all bold or all upper case (see isPetitionHeading)
+const MAX_PETITION_HEADING_LENGTH = 80;
 
 // Picture formats, told apart by their leading bytes rather than the part's file extension.
 // UDF documents only PNG and JPEG. EMF starts with an EMR_HEADER record (type 1) whose
@@ -295,8 +331,92 @@ function hiddenRunContent(run) {
     const text = childElements(run, 't').map(t => t.textContent || '').join('');
     const shows = text !== '' || Array.from(run.children).some(child =>
         HIDDEN_CONTENT_ELEMENTS.includes(child.localName) ||
-        (child.localName !== 'rPr' && child.getElementsByTagNameNS(WORD_NS, 'drawing').length > 0));
+        (child.localName !== 'rPr' && PICTURE_ELEMENTS.some(name => child.getElementsByTagNameNS(WORD_NS, name).length > 0)));
     return { shows, text };
+}
+
+/**
+ * A length in a VML element's style attribute, e.g. "width:120pt"
+ * @param {Element} element - A VML element
+ * @param {string} name - 'width' or 'height'
+ * @returns {{value: number, unit: string}|null} The number and its lower-case unit ('' for a
+ *   bare number), or null when the style doesn't give the length or gives it unreadably
+ */
+function vmlStyleLength(element, name) {
+    for (const declaration of ((element && element.getAttribute('style')) || '').split(';')) {
+        const colon = declaration.indexOf(':');
+        if (colon < 0 || declaration.slice(0, colon).trim().toLowerCase() !== name) continue;
+        const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)([a-z]*)$/i.exec(declaration.slice(colon + 1).trim());
+        return match ? { value: parseFloat(match[1]), unit: match[2].toLowerCase() } : null;
+    }
+    return null;
+}
+
+/**
+ * Points of a VML length. A bare number in a shape inside a v:group is in the group's
+ * coordinate system (coordsize, 1000 by default), which the group's own width or height
+ * spans; elsewhere it is in pixels.
+ * @param {Element} element - The VML element the length belongs to
+ * @param {string} name - 'width' or 'height'
+ * @param {{value: number, unit: string}} length
+ * @returns {number|null} Points, or null for an unknown unit or a group whose size is unreadable
+ */
+function vmlLengthToPoints(element, name, { value, unit }) {
+    const group = element.parentElement;
+    if (!unit && group && group.namespaceURI === VML_NS && group.localName === 'group') {
+        const groupLength = vmlStyleLength(group, name);
+        const coordinates = (group.getAttribute('coordsize') || '').split(',').map(part => parseFloat(part));
+        const span = coordinates[name === 'width' ? 0 : 1];
+        const coordinateSize = Number.isFinite(span) ? span : 1000;
+        if (!groupLength || !(coordinateSize > 0)) return null;
+        return vmlLengthToPoints(group, name, { value: value * groupLength.value / coordinateSize, unit: groupLength.unit });
+    }
+    const key = unit || 'px';
+    return Object.prototype.hasOwnProperty.call(VML_POINTS_PER_UNIT, key) ? value * VML_POINTS_PER_UNIT[key] : null;
+}
+
+/**
+ * Size of a VML shape from the width and height in its style attribute, scaled through any
+ * v:group holding it
+ * @param {Element} shape - The v:shape (or other VML element) that owns a v:imagedata
+ * @returns {{width: number, height: number}} Rounded points; DEFAULT_IMAGE_SIZE for a side
+ *   that is missing, unreadable, non-finite or not positive
+ */
+function vmlShapeSize(shape) {
+    const size = { width: DEFAULT_IMAGE_SIZE, height: DEFAULT_IMAGE_SIZE };
+    for (const name of ['width', 'height']) {
+        const length = vmlStyleLength(shape, name);
+        const points = length && vmlLengthToPoints(shape, name, length);
+        const rounded = points === null ? NaN : Math.round(points);
+        if (Number.isFinite(rounded) && rounded > 0) size[name] = rounded;
+    }
+    return size;
+}
+
+/**
+ * Whether a parsed body paragraph reads as a petition's heading though no outline level makes it
+ * one: non-empty text of at most MAX_PETITION_HEADING_LENGTH characters in which every text run
+ * with visible text is bold, or every letter is upper case ("AÇIKLAMALAR :", "SONUÇ VE İSTEM")
+ * @param {Object} paragraph - A parsed paragraph
+ * @returns {boolean}
+ */
+function isPetitionHeading(paragraph) {
+    const text = paragraphText(paragraph).trim();
+    if (text === '' || text.length > MAX_PETITION_HEADING_LENGTH) return false;
+    const visibleRuns = paragraph.runs.filter(run => run.type === 'text' && run.text.trim() !== '');
+    if (visibleRuns.every(run => run.bold)) return true;
+    return /\p{L}/u.test(text) && !/\p{Ll}/u.test(text);
+}
+
+/**
+ * A copy of a finding's location, so the caller can't change the one the parser keeps
+ * @param {Object} location - See DocxParser.addFinding
+ * @returns {Object}
+ */
+function copyLocation(location) {
+    const copy = { ...location };
+    if (location.note) copy.note = { ...location.note };
+    return copy;
 }
 
 /**
@@ -543,10 +663,20 @@ class DocxParser {
         this.endnotes = {};
         // The [code, example] findings of each note's text, recorded when a reference to it is converted
         this.noteFindings = { footnote: {}, endnote: {} };
+        // The formatted paragraphs of each note (see parseNoteParagraphs), keyed like footnotes and endnotes
+        this.noteParagraphs = { footnote: {}, endnote: {} };
         this.numbering = {};
         this.styles = this.emptyStyles();
         this.findings = {};
         this.inDiscardedCell = false;
+        // Whether a note's paragraphs are being parsed (see parseNoteParagraphs): addFinding records
+        // nothing, since noteText's findings are recorded once per reference instead, and parseRun
+        // leaves out pictures and note references
+        this.parsingNote = false;
+        // Where findings are recorded now (see addFinding), and the body's paragraph and table counts
+        // and last heading so far (see parseBodyBlocks)
+        this.location = { kind: 'document' };
+        this.body = { paragraphs: 0, tables: 0, headings: { outline: null, petition: null } };
         this.documentParagraphs = null;
         this.endnotesMoved = false;
         // Decompression limits, in bytes; tests lower them instead of building huge files
@@ -569,10 +699,14 @@ class DocxParser {
             this.footnotes = {};
             this.endnotes = {};
             this.noteFindings = { footnote: {}, endnote: {} };
+            this.noteParagraphs = { footnote: {}, endnote: {} };
             this.numbering = {};
             this.styles = this.emptyStyles();
             this.findings = {};
             this.inDiscardedCell = false;
+            this.parsingNote = false;
+            this.location = { kind: 'document' };
+            this.body = { paragraphs: 0, tables: 0, headings: { outline: null, petition: null } };
             this.documentParagraphs = null;
             this.endnotesMoved = false;
             this.partBytes = new Map();
@@ -747,13 +881,20 @@ class DocxParser {
 
     /**
      * Decode the images the main document part shows, keyed by part name: those an a:blip
-     * embeds, text-box pictures included. An image part nothing shows (left over from a
-     * deleted picture, an unused fallback) is never decompressed.
+     * embeds or a VML v:imagedata shows (legacy pictures and OLE object previews), text-box
+     * pictures included. An image part nothing shows (left over from a deleted picture, or
+     * in the mc:AlternateContent branch that isn't read) is never decompressed.
      */
     async extractImages() {
-        const embeds = new Set(Array.from(this.document.getElementsByTagNameNS(DRAWING_NS, 'blip'))
-            .map(blip => blip.getAttributeNS(RELATIONSHIPS_NS, 'embed'))
-            .filter(Boolean));
+        const references = [
+            ...Array.from(this.document.getElementsByTagNameNS(DRAWING_NS, 'blip'))
+                .map(blip => [blip, blip.getAttributeNS(RELATIONSHIPS_NS, 'embed')]),
+            ...Array.from(this.document.getElementsByTagNameNS(VML_NS, 'imagedata'))
+                .map(imageData => [imageData, imageData.getAttributeNS(RELATIONSHIPS_NS, 'id')])
+        ];
+        const embeds = new Set(references
+            .filter(([element, id]) => id && this.isInReadBranch(element))
+            .map(([, id]) => id));
         for (const id of embeds) {
             if (!Object.prototype.hasOwnProperty.call(this.relationships, id)) continue;
             const { type, path } = this.relationships[id];
@@ -768,29 +909,43 @@ class DocxParser {
     }
 
     /**
-     * Record one occurrence of a conversion finding. Nothing is recorded while parsing a
-     * cell the generator writes empty (see parseTable): its content is never converted.
+     * Record one occurrence of a conversion finding, where it is: at this.location unless the
+     * caller gives one. Nothing is recorded while parsing a cell the generator writes empty (see
+     * parseTable): its content is never converted. Nor while a note's paragraphs are parsed.
      * @param {string} code - A FINDING_CODES value
-     * @param {string} [example] - A short location hint; blank and repeated ones aren't kept
+     * @param {string} [example] - A short location hint; blank and repeated ones aren't kept as examples
+     * @param {Object} [location] - Where it is: { kind: 'paragraph', paragraph, heading? },
+     *   { kind: 'cell', table, row, cell, heading? }, { kind: 'header' }, { kind: 'footer' } or
+     *   { kind: 'document' }; a note's text adds note: { kind: 'footnote' | 'endnote' }
      */
-    addFinding(code, example = '') {
-        if (this.inDiscardedCell) return;
-        const finding = this.findings[code] || (this.findings[code] = { code, count: 0, examples: [] });
+    addFinding(code, example = '', location = this.location) {
+        if (this.inDiscardedCell || this.parsingNote) return;
+        const finding = this.findings[code] ||
+            (this.findings[code] = { code, count: 0, examples: [], occurrences: [], places: new Set() });
         finding.count++;
         if (example && finding.examples.length < MAX_FINDING_EXAMPLES && !finding.examples.includes(example)) {
             finding.examples.push(example);
+        }
+        const place = JSON.stringify([example, location]);
+        if (finding.occurrences.length < MAX_FINDING_OCCURRENCES && !finding.places.has(place)) {
+            finding.places.add(place);
+            finding.occurrences.push({ example, location: copyLocation(location) });
         }
     }
 
     /**
      * The findings recorded during this parse, in FINDING_CODES order
-     * @returns {Array<{code: string, count: number, examples: Array<string>}>} Empty when nothing applies
+     * @returns {Array<{code: string, count: number, examples: Array<string>,
+     *   occurrences: Array<{example: string, location: Object}>}>} Empty when nothing applies.
+     *   occurrences lists up to MAX_FINDING_OCCURRENCES places in the order they were found,
+     *   each example and location pair once (see addFinding).
      */
     listFindings() {
         return FINDING_CODES.filter(code => this.findings[code]).map(code => ({
             code,
             count: this.findings[code].count,
-            examples: [...this.findings[code].examples]
+            examples: [...this.findings[code].examples],
+            occurrences: this.findings[code].occurrences.map(({ example, location }) => ({ example, location: copyLocation(location) }))
         }));
     }
 
@@ -871,9 +1026,15 @@ class DocxParser {
         let lost = false;
         for (const kind of ['header', 'footer']) {
             if (!converted[kind]) continue;
-            const { paragraphs, dropped } = await this.parseHeaderFooterPart(converted[kind], kind);
-            result[kind] = paragraphs;
-            lost = lost || dropped;
+            // What the part's own paragraphs report is located in it
+            this.location = { kind };
+            try {
+                const { paragraphs, dropped } = await this.parseHeaderFooterPart(converted[kind], kind);
+                result[kind] = paragraphs;
+                lost = lost || dropped;
+            } finally {
+                this.location = { kind: 'document' };
+            }
         }
 
         const checked = new Set();
@@ -884,7 +1045,7 @@ class DocxParser {
             lost = await this.partHasText(path);
         }
 
-        if (lost) this.addFinding('headersFooters');
+        if (lost) this.addFinding('headersFooters', '', { kind: 'document' });
         return result;
     }
 
@@ -980,7 +1141,7 @@ class DocxParser {
             for (const comment of commentsDoc.getElementsByTagNameNS(WORD_NS, 'comment')) {
                 const hasText = Array.from(comment.getElementsByTagNameNS(WORD_NS, 't'))
                     .some(t => (t.textContent || '').trim() !== '');
-                if (hasText) this.addFinding('comments');
+                if (hasText) this.addFinding('comments', '', { kind: 'document' });
             }
         } catch (error) {
             rethrowFatal(error);
@@ -1019,7 +1180,8 @@ class DocxParser {
     /**
      * Parse the notes of the footnotes part (word/footnotes.xml) or the endnotes part
      * (word/endnotes.xml) into plain text keyed by w:id. Word's separator notes are left out.
-     * The findings of each note's text (its symbols and hidden text) go into noteFindings.
+     * The findings of each note's text (its symbols and hidden text) go into noteFindings, and
+     * its formatted paragraphs into noteParagraphs.
      * @param {'footnote'|'endnote'} type - The note element's local name
      * @returns {Promise<Object<string, string>>}
      */
@@ -1040,6 +1202,7 @@ class DocxParser {
                 const findings = [];
                 notes[id] = this.noteText(note, findings);
                 this.noteFindings[type][id] = findings;
+                this.noteParagraphs[type][id] = this.parseNoteParagraphs(note);
             }
         } catch (error) {
             rethrowFatal(error);
@@ -1090,6 +1253,53 @@ class DocxParser {
             text += ' ';
         }
         return text.trim();
+    }
+
+    /**
+     * The paragraphs of a footnote or endnote, each a list of the parsed items (see parseRun) it
+     * shows: formatted text, tabs and line breaks. Runs are parsed as in the body, through the
+     * document defaults and the paragraph and character styles (e.g. FootnoteText), so hidden
+     * text, All Caps, symbols and non-breaking hyphens behave as they do there. Word's note mark
+     * (w:footnoteRef, w:endnoteRef) adds nothing, and the spaces or the one tab Word puts after it
+     * at the start of the first paragraph are dropped. Page breaks, pictures and nested note
+     * references are left out. A run whose size nothing sets is NOTE_FONT_SIZE points.
+     * Findings are left to noteText, which records them for each reference to the note.
+     * @param {Element} note - The w:footnote or w:endnote element
+     * @returns {Array<Array<Object>>} One list of items per w:p, in document order
+     */
+    parseNoteParagraphs(note) {
+        const paragraphs = [];
+        const parsingNote = this.parsingNote;
+        this.parsingNote = true;
+        try {
+            for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
+                const style = this.paragraphStyle(childElement(para, 'pPr'));
+                const paragraphRun = 'fontSize' in this.styles.defaults.run ? style.run : { fontSize: NOTE_FONT_SIZE, ...style.run };
+                paragraphs.push(this.paragraphRuns(para)
+                    .flatMap(run => this.parseRun(run, paragraphRun))
+                    .filter(item => NOTE_RUN_TYPES.includes(item.type)));
+            }
+        } finally {
+            this.parsingNote = parsingNote;
+        }
+
+        // The whitespace after the note mark: leading spaces, and at most one tab
+        const first = paragraphs[0] || [];
+        let tabDropped = false;
+        while (first.length > 0) {
+            const item = first[0];
+            if (item.type === 'tab' && !tabDropped) {
+                tabDropped = true;
+                first.shift();
+            } else if (item.type === 'text' && item.text.startsWith(' ')) {
+                const rest = item.text.replace(/^ +/, '');
+                if (rest) first[0] = { ...item, text: rest };
+                else first.shift();
+            } else {
+                break;
+            }
+        }
+        return paragraphs;
     }
 
     /**
@@ -1413,8 +1623,8 @@ class DocxParser {
     /**
      * Read the character properties a w:rPr sets, from a run, a style or the document defaults
      * @param {Element|null} rPr - The w:rPr element
-     * @returns {Object} Only the properties it sets; an explicit "off" is kept as false,
-     *   and color "auto" as null, so it overrides an earlier layer
+     * @returns {Object} Only the properties it sets; an explicit "off" is kept as false, and
+     *   color "auto", highlight "none" and shading "nil" or "auto" as null, so they override an earlier layer
      */
     readRunProperties(rPr) {
         const props = {};
@@ -1445,6 +1655,25 @@ class DocxParser {
         const color = childElement(rPr, 'color');
         const colorVal = color && color.getAttribute('w:val');
         if (colorVal) props.color = colorVal === 'auto' ? null : '#' + colorVal;
+
+        // Highlighting (w:highlight): "none" is null, so it overrides an inherited highlight;
+        // a value outside Word's palette is ignored
+        const highlight = childElement(rPr, 'highlight');
+        const highlightVal = highlight && highlight.getAttribute('w:val');
+        if (highlightVal === 'none') props.highlight = null;
+        else if (Object.hasOwn(HIGHLIGHT_COLORS, highlightVal)) props.highlight = '#' + HIGHLIGHT_COLORS[highlightVal];
+
+        // Run shading (w:shd): a solid pattern is drawn entirely in its pattern color (w:color),
+        // any other pattern is approximated by its background fill (w:fill). "nil", or an "auto"
+        // or missing color, is null; a color that isn't 6 hex digits is ignored.
+        const shd = childElement(rPr, 'shd');
+        if (shd) {
+            const pattern = shd.getAttribute('w:val');
+            const solidColor = pattern === 'solid' ? shd.getAttribute('w:color') : '';
+            const fill = solidColor && solidColor !== 'auto' ? solidColor : shd.getAttribute('w:fill');
+            if (pattern === 'nil' || !fill || fill === 'auto') props.shading = null;
+            else if (/^[0-9A-Fa-f]{6}$/.test(fill)) props.shading = '#' + fill.toUpperCase();
+        }
 
         return props;
     }
@@ -1493,6 +1722,11 @@ class DocxParser {
 
         const tabs = this.readTabs(childElement(pPr, 'tabs'));
         if (tabs.length > 0) props.tabs = tabs;
+
+        // The outline level, which makes a paragraph a heading (see MAX_HEADING_OUTLINE_LEVEL)
+        const outlineLvl = childElement(pPr, 'outlineLvl');
+        const outlineLevel = outlineLvl ? parseInt(outlineLvl.getAttribute('w:val'), 10) : NaN;
+        if (Number.isInteger(outlineLevel)) props.outlineLevel = outlineLevel;
 
         return props;
     }
@@ -1636,7 +1870,68 @@ class DocxParser {
         const body = this.document.getElementsByTagNameNS(WORD_NS, 'body')[0];
         if (!body) return [];
 
-        return this.parseBlocks(body);
+        try {
+            return this.parseBodyBlocks(body);
+        } finally {
+            this.location = { kind: 'document' };
+        }
+    }
+
+    /**
+     * Parse the body's own paragraphs and tables, keeping this.location on the one being parsed,
+     * so its findings say where they are. Body paragraphs and tables are numbered from 1 in
+     * document order, empty paragraphs included; a cell is located by its table, its row and its
+     * w:tc position in that row. Text boxes and nested tables aren't counted: their findings take
+     * the location of the paragraph that anchors the text box, or of the outer table's cell. Each
+     * location names the last heading before it with an outline level, else the last petition
+     * heading before it (see headingKind).
+     * @param {Element} body - The w:body element
+     * @returns {Array<Object>} Parsed paragraphs and tables in document order (see parseBlocks)
+     */
+    parseBodyBlocks(body) {
+        const elements = [];
+        const headingOf = () => {
+            const { outline, petition } = this.body.headings;
+            const heading = outline !== null ? outline : petition;
+            return heading === null ? {} : { heading };
+        };
+
+        for (const child of this.contentChildren(body)) {
+            if (child.localName === 'p') {
+                this.location = { kind: 'paragraph', paragraph: ++this.body.paragraphs, ...headingOf() };
+                const paragraphs = this.parseParagraphBlocks(child);
+                elements.push(...paragraphs);
+                // A heading names the places after it, not its own
+                const kind = this.headingKind(child, paragraphs[0]);
+                if (kind) this.body.headings[kind] = shortExample(paragraphText(paragraphs[0]));
+            } else if (child.localName === 'tbl') {
+                const table = ++this.body.tables;
+                const heading = headingOf();
+                elements.push(this.parseTable(child, false, (row, cell) => {
+                    this.location = { kind: 'cell', table, row, cell, ...heading };
+                }));
+            }
+        }
+
+        return elements;
+    }
+
+    /**
+     * Whether a body paragraph is a heading, and of which kind: 'outline' when its outline level,
+     * from its own w:pPr else its paragraph style chain, is one of Word's heading levels (built-in
+     * Heading 1-9 styles set one), else 'petition' when it reads as a petition heading (see
+     * isPetitionHeading). A paragraph with no text is never one.
+     * @param {Element} para - The w:p element
+     * @param {Object} paragraph - Its parsed paragraph
+     * @returns {'outline'|'petition'|null}
+     */
+    headingKind(para, paragraph) {
+        if (paragraphText(paragraph).trim() === '') return null;
+        const pPr = childElement(para, 'pPr');
+        const own = this.readParagraphProperties(pPr).outlineLevel;
+        const level = own !== undefined ? own : this.paragraphStyle(pPr).paragraph.outlineLevel;
+        if (level >= 0 && level <= MAX_HEADING_OUTLINE_LEVEL) return 'outline';
+        return isPetitionHeading(paragraph) ? 'petition' : null;
     }
 
     /**
@@ -1680,19 +1975,29 @@ class DocxParser {
             const localName = child.localName;
 
             if (localName === 'p') {
-                const runs = this.paragraphRuns(child);
-                elements.push(this.parseParagraph(child, runs, inCell));
-                // Text boxes anchored in the paragraph follow it as their own blocks
-                for (const run of runs) {
-                    for (const textBox of this.findTextBoxes(run)) {
-                        elements.push(...this.parseBlocks(textBox, inCell));
-                    }
-                }
+                elements.push(...this.parseParagraphBlocks(child, inCell));
             } else if (localName === 'tbl') {
                 elements.push(this.parseTable(child, inCell));
             }
         }
 
+        return elements;
+    }
+
+    /**
+     * Parse a paragraph, then the blocks of the text boxes anchored in it, which follow it
+     * @param {Element} para - The w:p element
+     * @param {boolean} [inCell] - Whether the content ends up in a table cell
+     * @returns {Array<Object>} The parsed paragraph first, then the text boxes' paragraphs and tables
+     */
+    parseParagraphBlocks(para, inCell = false) {
+        const runs = this.paragraphRuns(para);
+        const elements = [this.parseParagraph(para, runs, inCell)];
+        for (const run of runs) {
+            for (const textBox of this.findTextBoxes(run)) {
+                elements.push(...this.parseBlocks(textBox, inCell));
+            }
+        }
         return elements;
     }
 
@@ -1744,6 +2049,22 @@ class DocxParser {
     }
 
     /**
+     * Whether an element is outside mc:AlternateContent, or only in branches that
+     * alternateContentBranch picks to read
+     * @param {Element} element - An element of a parsed part
+     * @returns {boolean}
+     */
+    isInReadBranch(element) {
+        for (let el = element.parentElement; el; el = el.parentElement) {
+            if (el.namespaceURI === MARKUP_COMPATIBILITY_NS && (el.localName === 'Choice' || el.localName === 'Fallback') &&
+                el.parentElement && this.alternateContentBranch(el.parentElement) !== el) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Find the text box contents (w:txbxContent) anchored in an element, once each.
      * Only one branch of mc:AlternateContent is read, and text boxes nested in
      * another text box are left for that text box's own parse.
@@ -1787,6 +2108,9 @@ class DocxParser {
         const own = this.readParagraphProperties(pPr);
         Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, own);
         paragraph.lineSpacing = this.lineSpacing(paragraph);
+
+        // The outline level only locates findings (see headingKind); it isn’t written
+        delete paragraph.outlineLevel;
 
         // Tab stops: each layer adds to or clears the stops of the layers under it
         delete paragraph.tabs;
@@ -1891,34 +2215,62 @@ class DocxParser {
                 items.push({ type: breakType === 'page' ? 'pageBreak' : 'break' });
             } else if (localName === 'cr') {
                 items.push({ type: 'break' });
+            } else if (this.parsingNote) {
+                // In a note, pictures and nested note references are left out (see parseNoteParagraphs)
+                continue;
             } else if (localName === 'footnoteReference' || localName === 'endnoteReference') {
                 const kind = localName === 'footnoteReference' ? 'footnote' : 'endnote';
                 const notes = kind === 'footnote' ? this.footnotes : this.endnotes;
                 const id = child.getAttribute('w:id');
                 // A note with no text is still a note; a reference to a missing one adds nothing
                 if (id && Object.prototype.hasOwnProperty.call(notes, id)) {
+                    // The formatted paragraphs go with a note that has text; an empty one keeps its placeholder
+                    const paragraphs = notes[id] ? this.noteParagraphs[kind][id] : null;
                     items.push({
                         type: `${kind}Ref`,
                         id: id,
-                        content: notes[id] || `[Empty ${kind}]`
+                        content: notes[id] || `[Empty ${kind}]`,
+                        paragraphs: paragraphs || null
                     });
-                    // Footnotes always leave their page; endnotes only when Word places or numbers them per section
-                    if (kind === 'footnote') this.addFinding('notesMoved', shortExample(notes[id]));
-                    else if (this.endnotesMoved) this.addFinding('endnotesMoved', shortExample(notes[id]));
+                    // Located at the reference, and marked as being in the note's text
+                    const inNote = { ...this.location, note: { kind } };
+                    // Footnotes always leave their page; endnotes only when Word places or numbers
+                    // them per section, which is a setting of the whole document
+                    if (kind === 'footnote') this.addFinding('notesMoved', shortExample(notes[id]), inNote);
+                    else if (this.endnotesMoved) this.addFinding('endnotesMoved', shortExample(notes[id]), { kind: 'document' });
                     // The note's text is written once per reference, and its findings with it
-                    for (const [code, example] of this.noteFindings[kind][id] || []) this.addFinding(code, example);
+                    for (const [code, example] of this.noteFindings[kind][id] || []) this.addFinding(code, example, inNote);
                 }
             } else if (localName !== 'rPr') {
-                // w:drawing, or a drawing wrapped in mc:AlternateContent
-                const drawing = localName === 'drawing' ? child
-                    : child.getElementsByTagNameNS(WORD_NS, 'drawing')[0];
-                if (drawing) {
-                    items.push(this.parseDrawing(drawing));
-                }
+                items.push(...this.parsePictures(child));
             }
         }
 
         return items;
+    }
+
+    /**
+     * Parse a run child that may show a picture: w:drawing, a VML w:pict or w:object, or
+     * mc:AlternateContent, of which only the branch alternateContentBranch picks is read, so
+     * a picture written both as DrawingML and as a VML fallback appears once
+     * @param {Element} element - A run child
+     * @returns {Array<Object>} Parsed images (see parseDrawing), in document order
+     */
+    parsePictures(element) {
+        if (element.namespaceURI === MARKUP_COMPATIBILITY_NS && element.localName === 'AlternateContent') {
+            const branch = this.alternateContentBranch(element);
+            return branch ? Array.from(branch.children).flatMap(child => this.parsePictures(child)) : [];
+        }
+        if (element.namespaceURI === WORD_NS && element.localName === 'drawing') {
+            return [this.parseDrawing(element)];
+        }
+        if (element.namespaceURI === WORD_NS && (element.localName === 'pict' || element.localName === 'object')) {
+            const image = this.parseVmlPicture(element);
+            return image ? [image] : [];
+        }
+        // Any other element: a drawing somewhere inside it
+        const drawing = element.getElementsByTagNameNS(WORD_NS, 'drawing')[0];
+        return drawing ? [this.parseDrawing(drawing)] : [];
     }
 
     /**
@@ -1959,6 +2311,11 @@ class DocxParser {
             }
         }
         if (!formatting.color) delete formatting.color;
+        // Word draws highlighting over shading, so the highlight wins; each resolves on its own first
+        const background = formatting.highlight || formatting.shading;
+        delete formatting.highlight;
+        delete formatting.shading;
+        if (background) formatting.background = background;
 
         return formatting;
     }
@@ -1971,8 +2328,8 @@ class DocxParser {
     parseDrawing(drawing) {
         const image = {
             type: 'image',
-            width: 100,
-            height: 100,
+            width: DEFAULT_IMAGE_SIZE,
+            height: DEFAULT_IMAGE_SIZE,
             data: null
         };
 
@@ -1988,24 +2345,67 @@ class DocxParser {
         }
 
         // Get embedded image reference. Pictures inside a text box belong to the
-        // text box's own paragraphs, which are parsed separately.
+        // text box's own paragraphs, which are parsed separately; one in an
+        // mc:AlternateContent branch that isn't read isn't shown (or extracted).
         const blips = Array.from(drawing.getElementsByTagNameNS(DRAWING_NS, 'blip'))
-            .filter(blip => !this.isInTextBox(blip, drawing));
+            .filter(blip => !this.isInTextBox(blip, drawing) && this.isInReadBranch(blip));
         if (blips.length > 0) {
-            const embed = blips[0].getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'embed');
-            const path = embed && this.relationships[embed] && this.relationships[embed].path;
-            if (path && this.images[path]) {
-                image.data = this.images[path];
-                // Embedded as-is, though UDF documents only PNG and JPEG
-                const format = this.imageFormats[path];
-                if (!SUPPORTED_IMAGE_FORMATS.includes(format)) this.addFinding('unsupportedImage', format);
-            } else {
-                // No relationship, or no media part behind it: the generator skips the picture
-                this.addFinding('missingImage', this.nearestParagraphText(drawing));
-            }
+            this.embedPicture(image, blips[0].getAttributeNS(RELATIONSHIPS_NS, 'embed'), drawing);
+        } else if (drawing.getElementsByTagNameNS(WORD_NS, 'txbxContent').length === 0) {
+            // A chart, SmartArt diagram or shape with no picture and no text box to keep
+            this.addFinding('unconvertedDrawing', this.nearestParagraphText(drawing));
         }
 
         return image;
+    }
+
+    /**
+     * Parse a VML picture (w:pict) or OLE object (w:object): the first v:imagedata outside a
+     * text box is embedded, sized by its shape's style. An OLE object is shown by that preview
+     * picture, as in Word; one written with a DrawingML w:drawing instead is parsed as a drawing.
+     * @param {Element} element - The w:pict or w:object element
+     * @returns {Object|null} Parsed image (see parseDrawing), or null when it shows no picture
+     */
+    parseVmlPicture(element) {
+        const imageData = Array.from(element.getElementsByTagNameNS(VML_NS, 'imagedata'))
+            .find(el => el.getAttributeNS(RELATIONSHIPS_NS, 'id') && !this.isInTextBox(el, element) && this.isInReadBranch(el));
+        if (imageData) {
+            const image = { type: 'image', ...vmlShapeSize(imageData.parentElement), data: null };
+            this.embedPicture(image, imageData.getAttributeNS(RELATIONSHIPS_NS, 'id'), element);
+            return image;
+        }
+
+        const drawing = Array.from(element.getElementsByTagNameNS(WORD_NS, 'drawing'))
+            .find(el => !this.isInTextBox(el, element) && this.isInReadBranch(el));
+        if (drawing) return this.parseDrawing(drawing);
+
+        // A shape, line or object with no picture; a text box's paragraphs are kept on their own
+        if (element.getElementsByTagNameNS(WORD_NS, 'txbxContent').length === 0) {
+            this.addFinding('unconvertedDrawing', this.nearestParagraphText(element));
+        }
+        return null;
+    }
+
+    /**
+     * Set a parsed image's data from the picture a relationship points at. A picture that
+     * isn't PNG or JPEG is embedded as-is, though UDF documents only those, and reported as
+     * unsupportedImage; one with no relationship or media part is reported as missingImage
+     * and keeps no data, so the generator skips it.
+     * @param {Object} image - The parsed image
+     * @param {string} relationshipId - r:embed of an a:blip, or r:id of a v:imagedata
+     * @param {Element} element - The picture's element in the main document part, for the location hint
+     */
+    embedPicture(image, relationshipId, element) {
+        const relationship = relationshipId && Object.prototype.hasOwnProperty.call(this.relationships, relationshipId)
+            ? this.relationships[relationshipId] : null;
+        const path = relationship && relationship.path;
+        if (path && this.images[path]) {
+            image.data = this.images[path];
+            const format = this.imageFormats[path];
+            if (!SUPPORTED_IMAGE_FORMATS.includes(format)) this.addFinding('unsupportedImage', format);
+        } else {
+            this.addFinding('missingImage', this.nearestParagraphText(element));
+        }
     }
 
     /**
@@ -2027,9 +2427,11 @@ class DocxParser {
      * as a finding. A nested table is flattened to paragraphs instead, those cells included.
      * @param {Element} tbl - The table element
      * @param {boolean} [nested] - Whether the table is in a cell of another table
+     * @param {function(number, number): void} [enterCell] - Called with a cell's 1-based row and
+     *   w:tc position in that row before its content is parsed (see parseBodyBlocks)
      * @returns {Object} Parsed table
      */
-    parseTable(tbl, nested = false) {
+    parseTable(tbl, nested = false, enterCell = null) {
         const table = {
             type: 'table',
             rows: [],
@@ -2067,22 +2469,41 @@ class DocxParser {
         const merges = verticalMerges(table);
         table.rows.forEach((row, i) => row.cells.forEach((cell, j) => {
             const discarded = !nested && merges[i][j].joinsAbove;
+            if (enterCell) enterCell(i + 1, j + 1);
             if (discarded) this.inDiscardedCell = true;
             try {
                 cell.paragraphs = this.parseCellParagraphs(cellElements[i][j]);
             } finally {
                 if (discarded) this.inDiscardedCell = false;
             }
+            // A nested table is flattened to paragraphs, so its borders aren't written
+            if (!nested && table.border !== 'borderNone') this.checkCellBorders(cell, merges[i][j], discarded);
         }));
 
         return table;
     }
 
     /**
-     * Read which edges a w:tblBorders or w:tcBorders sets, and whether each draws a line
+     * Record a tableBorders finding for a cell whose border attributes can't describe its lines:
+     * a line style with no documented equivalent was approximated as solid, or its edges draw
+     * different lines and the heaviest was written for the whole cell (see cellBorderChoice)
+     * @param {Object} cell - Parsed cell, with its borders and paragraphs
+     * @param {{joinsAbove: boolean, joinsBelow: boolean}} merge - The cell's vertical merge
+     * @param {boolean} discarded - Whether the generator writes the cell empty (it continues a merge)
+     */
+    checkCellBorders(cell, merge, discarded) {
+        const { approximated, mixed } = cellBorderChoice(cell, merge);
+        if (!approximated && !mixed) return;
+        const text = discarded ? '' : cell.paragraphs.map(paragraphText).find(t => t.trim() !== '');
+        this.addFinding('tableBorders', shortExample(text || ''));
+    }
+
+    /**
+     * Read which edges a w:tblBorders or w:tcBorders sets, and the line each draws
      * @param {Element|null} borders - The w:tblBorders or w:tcBorders element
      * @param {Object<string,Array<string>>} edgeNames - Edge -> the element names that set it
-     * @returns {Object<string,boolean>} Only the edges it sets (an element without w:val sets none)
+     * @returns {Object<string,Object|null>} Only the edges it sets (an element without w:val sets
+     *   none): null for no line (none, nil), else the line (see readBorderLine)
      */
     readBorders(borders, edgeNames) {
         const set = {};
@@ -2091,7 +2512,7 @@ class DocxParser {
             for (const name of names) {
                 const border = childElement(borders, name);
                 if (border && border.hasAttribute('w:val')) {
-                    set[edge] = !NO_BORDER_VALUES.includes(border.getAttribute('w:val'));
+                    set[edge] = this.readBorderLine(border);
                 }
             }
         }
@@ -2099,16 +2520,35 @@ class DocxParser {
     }
 
     /**
-     * Which of a table's six edges draw a line: its table style (w:tblStyle, else the default
+     * The line a border element (w:top, w:insideH...) draws
+     * @param {Element} border - A border element with a w:val
+     * @returns {{val: string, size: number, color: string}|null} null when w:val draws no line.
+     *   size: w:sz in eighths of a point, 4 (½ pt) when missing or not a positive whole number.
+     *   color: w:color as RRGGBB (upper case), or 'auto' when it is auto, missing or not a
+     *   hex color. w:themeColor is not resolved.
+     */
+    readBorderLine(border) {
+        const val = border.getAttribute('w:val');
+        if (NO_BORDER_VALUES.includes(val)) return null;
+        const sz = (border.getAttribute('w:sz') || '').trim();
+        const size = /^\d+$/.test(sz) && Number(sz) > 0 ? Number(sz) : DEFAULT_BORDER_LINE.size;
+        const color = (border.getAttribute('w:color') || '').trim();
+        return { val, size, color: /^[0-9A-Fa-f]{6}$/.test(color) ? color.toUpperCase() : 'auto' };
+    }
+
+    /**
+     * The line each of a table's six edges draws: its table style (w:tblStyle, else the default
      * table style) with its w:basedOn chain, then the table's own w:tblBorders. The nearest
      * layer that sets an edge wins, and an edge nothing sets has no line. Without a styles
-     * part the style layer is unknown, so every edge has a line unless the table removes it.
+     * part the style layer is unknown, so every edge has Word's default line (single, ½ pt,
+     * auto) unless the table sets it.
      * The style's cell borders (its w:tcPr/w:tcBorders, through the same chain) are returned
      * apart: they apply to every cell, over the table's edges. Conditional formatting
      * (w:tblStylePr) is not read.
      * @param {Element|null} tblPr - The table's w:tblPr
-     * @returns {{top: boolean, left: boolean, bottom: boolean, right: boolean, insideH: boolean,
-     *   insideV: boolean, cells: Object<string,boolean>}} cells: only the cell edges the style sets
+     * @returns {{top: ?Object, left: ?Object, bottom: ?Object, right: ?Object, insideH: ?Object,
+     *   insideV: ?Object, cells: Object<string,?Object>}} Each edge's line (see readBorderLine), or
+     *   null for none. cells: only the cell edges the style sets
      */
     tableBorders(tblPr) {
         let base;
@@ -2131,26 +2571,29 @@ class DocxParser {
             }
             ({ borders: base, cells } = resolved.get(styleId));
         } else {
-            base = Object.fromEntries(Object.keys(TABLE_EDGES).map(edge => [edge, true]));
+            base = Object.fromEntries(Object.keys(TABLE_EDGES).map(edge => [edge, DEFAULT_BORDER_LINE]));
         }
 
         const own = this.readBorders(tblPr && childElement(tblPr, 'tblBorders'), TABLE_EDGES);
         const edges = Object.assign({}, base, own);
-        for (const edge of Object.keys(TABLE_EDGES)) edges[edge] = Boolean(edges[edge]);
+        for (const edge of Object.keys(TABLE_EDGES)) edges[edge] = edges[edge] || null;
         edges.cells = cells;
         return edges;
     }
 
     /**
-     * Give each cell of a parsed table the four edges that draw a line, as cell.borders.
+     * Give each cell of a parsed table the line each of its four edges draws, as cell.borders
+     * (null for no line).
      * A cell's outer edges come from the table's top, bottom, left and right edges and the
      * edges between cells from insideH and insideV; an edge the table style's cell borders
-     * set overrides that, and an edge the cell's own w:tcBorders sets overrides both. An edge two cells share then has a line when either cell's edge does,
-     * and is set on both. Cells above and below each other share an edge where their grid
-     * columns (w:gridSpan included) overlap; such a line is set on a cell only when it runs
-     * along that cell's whole edge, so it doesn't reach past a narrower cell along a wider one.
+     * set overrides that, and an edge the cell's own w:tcBorders sets overrides both. An edge two
+     * cells share then has a line when either cell's edge does, and the heavier of their lines
+     * is set on both (see heavierBorderLine). Cells above and below each other share an edge
+     * where their grid columns (w:gridSpan included) overlap; such a line is set on a cell only
+     * when it runs along that cell's whole edge, so it doesn't reach past a narrower cell along
+     * a wider one.
      * @param {Object} table - Parsed table, its rows' cells without borders yet
-     * @param {Object<string,boolean>} edges - The table's edges (see tableBorders)
+     * @param {Object<string,?Object>} edges - The table's edges (see tableBorders)
      * @param {Array<Array<Element>>} cellElements - The w:tc element of each cell, row by row
      */
     resolveCellBorders(table, edges, cellElements) {
@@ -2179,16 +2622,19 @@ class DocxParser {
         const own = rows.map(row => row.cells.map(cell => ({ ...cell.borders })));
         rows.forEach((row, i) => row.cells.forEach((cell, j) => {
             const right = row.cells[j + 1];
-            if (right && (own[i][j].right || own[i][j + 1].left)) {
-                cell.borders.right = right.borders.left = true;
+            const shared = right && heavierBorderLine(own[i][j].right, own[i][j + 1].left);
+            if (shared) {
+                cell.borders.right = right.borders.left = shared;
             }
             if (i + 1 === rows.length) return;
             const [start, end] = columns[i][j];
             rows[i + 1].cells.forEach((below, k) => {
                 const [belowStart, belowEnd] = columns[i + 1][k];
-                if (belowStart < end && start < belowEnd && (own[i][j].bottom || own[i + 1][k].top)) {
-                    if (belowStart <= start && end <= belowEnd) cell.borders.bottom = true;
-                    if (start <= belowStart && belowEnd <= end) below.borders.top = true;
+                const shared = belowStart < end && start < belowEnd &&
+                    heavierBorderLine(own[i][j].bottom, own[i + 1][k].top);
+                if (shared) {
+                    if (belowStart <= start && end <= belowEnd) cell.borders.bottom = shared;
+                    if (start <= belowStart && belowEnd <= end) below.borders.top = shared;
                 }
             });
         }));

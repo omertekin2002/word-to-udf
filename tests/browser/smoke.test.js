@@ -10,6 +10,7 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const http = require('node:http');
+const os = require('node:os');
 const path = require('node:path');
 const JSZip = require('jszip');
 const { JSDOM } = require('jsdom');
@@ -197,15 +198,26 @@ test('a whole petition converts and downloads as a .udf holding its text', async
         assert.ok(content.includes(line), `content.xml is missing the check box line ${JSON.stringify(line)}`);
     }
 
-    // The EKLER check boxes get the symbols note, with the conversions as unquoted examples, in both languages
+    // The EKLER check boxes get the symbols note, one location line per box with its conversion
+    // as an unquoted example, in both languages
     const symbolsNote = page.locator('#conversionNotesList > li.conversion-note[data-code="symbols"]');
     assert.equal(await symbolsNote.count(), 1);
-    const examples = symbolsNote.locator('.conversion-note-examples > li');
-    assert.deepEqual(await examples.allTextContents(), ['Wingdings F0FE → ☑', 'Wingdings F0A8 → □']);
-    for (const lang of ['tr', 'en']) {
+    const lines = symbolsNote.locator('.conversion-note-examples > li');
+    const expectedLines = {
+        tr: ['Paragraf 23 · “EKLER” başlığı altında · Wingdings F0FE → ☑', 'Paragraf 24 · “EKLER” başlığı altında · Wingdings F0FE → ☑',
+            'Paragraf 25 · “EKLER” başlığı altında · Wingdings F0A8 → □'],
+        en: ['Paragraph 23 · under “EKLER” · Wingdings F0FE → ☑', 'Paragraph 24 · under “EKLER” · Wingdings F0FE → ☑',
+            'Paragraph 25 · under “EKLER” · Wingdings F0A8 → □']
+    };
+    assert.deepEqual(await lines.allTextContents(), expectedLines.tr);
+    assert.equal(await page.locator('#conversionNotesHelp').isVisible(), true);
+    for (const lang of ['en', 'tr']) {
         await page.locator(`[data-set-lang="${lang}"]`).click();
         assert.equal(await symbolsNote.locator('.conversion-note-text').textContent(),
             await page.evaluate(() => t('notes.symbols')), lang);
+        assert.deepEqual(await lines.allTextContents(), expectedLines[lang], lang);
+        assert.equal(await symbolsNote.locator('.conversion-note-examples-label').textContent(),
+            await page.evaluate(() => t('notes.where')), lang);
     }
     assertClean(problems);
 });
@@ -364,5 +376,190 @@ test('removing the file mid-conversion cancels it, and the next file converts un
     const xml = await (await JSZip.loadAsync(await fs.readFile(await download.path()))).file('content.xml').async('string');
     assert.match(xml, /Dilekçe B/);
     assert.doesNotMatch(xml, /Dilekçe A/);
+    assertClean(problems);
+});
+
+/**
+ * Write a file to a temporary folder with a given last-modified time, so the browser reads
+ * it from disk as it would a real revision. The folder is removed when the test ends.
+ */
+async function revisionOnDisk(t, name, buffer, modified) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'word-to-udf-'));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const file = path.join(dir, name);
+    await fs.writeFile(file, buffer);
+    await fs.utimes(file, modified, modified);
+    return file;
+}
+
+test('"replace source" with a same-name revision clears the old result and shows only the new one', async t => {
+    const { page, problems } = await openPage(t);
+    // Midday UTC, so both are 21 November in any time zone within ±11 hours
+    const first = new Date(Date.UTC(2026, 10, 21, 12, 3, 9));
+    const second = new Date(Date.UTC(2026, 10, 21, 12, 41, 37));
+    const modifiedText = date => page.evaluate(ms => formatParam({ dateTime: ms }), date.getTime());
+
+    const oldPath = await revisionOnDisk(t, 'dilekce.docx',
+        await buildDocx('<w:p><w:r><w:t>Dilekçe eski sürüm</w:t></w:r></w:p><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>gizli</w:t></w:r></w:p>'), first);
+    await page.locator('#fileInput').setInputFiles(oldPath);
+    await page.locator('#convertBtn').click();
+    await page.locator('#downloadSection').waitFor({ state: 'visible' });
+    await page.locator('#conversionNotes').waitFor({ state: 'visible' });
+    const source = page.locator('#resultSourceFile');
+    assert.ok((await source.textContent()).includes(await modifiedText(first)));
+    assert.equal(await page.locator('#resultOutput').textContent(), 'İndirilecek: dilekce.udf');
+
+    // Hold the next parse, so the page can be checked before the new result arrives
+    await page.evaluate(() => {
+        window.heldParses = [];
+        const createParser = window.app.createParser.bind(window.app);
+        window.app.createParser = () => {
+            const parser = createParser();
+            const parse = parser.parse.bind(parser);
+            parser.parse = file => new Promise(resolve => window.heldParses.push(() => resolve(parse(file))));
+            return parser;
+        };
+    });
+
+    // The replace button opens a real file chooser; the keyboard reaches it
+    const newPath = await revisionOnDisk(t, 'dilekce.docx',
+        await buildDocx('<w:p><w:r><w:t>Dilekçe yeni sürüm</w:t></w:r></w:p>'), second);
+    await page.locator('#replaceSource').focus();
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
+    assert.equal(chooser.isMultiple(), false);
+    await chooser.setFiles(newPath);
+
+    await page.waitForFunction(() => window.heldParses.length === 1);
+    assert.equal(await page.locator('#downloadSection').isVisible(), false);
+    assert.equal(await page.locator('#conversionNotes').isVisible(), false);
+    assert.equal(await source.textContent(), '');
+    assert.equal(await page.evaluate(() => window.app.convertedBlob), null);
+    assert.equal(await page.locator('#progressContainer').isVisible(), true);
+
+    await page.evaluate(() => window.heldParses[0]());
+    await page.locator('#downloadSection').waitFor({ state: 'visible' });
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'downloadBtn');
+    assert.equal(await page.locator('#conversionNotes').isVisible(), false);
+    const shown = await source.textContent();
+    assert.ok(shown.includes(await modifiedText(second)), shown);
+    assert.ok(!shown.includes(await modifiedText(first)), shown);
+
+    const [download] = await Promise.all([page.waitForEvent('download'), page.locator('#downloadBtn').click()]);
+    assert.equal(download.suggestedFilename(), 'dilekce.udf');
+    const xml = await (await JSZip.loadAsync(await fs.readFile(await download.path()))).file('content.xml').async('string');
+    assert.match(xml, /Dilekçe yeni sürüm/);
+    assert.doesNotMatch(xml, /eski sürüm/);
+
+    // EN writes the lines again, times included
+    await page.locator('[data-set-lang="en"]').click();
+    assert.match(await source.textContent(), /^Source: dilekce\.docx \(.+, modified 11\/21\/2026, /);
+    assert.equal(await page.locator('#replaceSource').textContent(), 'REPLACE SOURCE');
+    assertClean(problems);
+});
+
+test('on a 390px-wide screen a long source line wraps without scrolling the page sideways', async t => {
+    const { page, problems } = await openPage(t);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const name = 'Asliye-Hukuk-Mahkemesi-Dava-Dilekcesi-Davaci-Vekili-Son-Hali-Revize-3.docx';
+    await convertFile(page, name, await plainDocx());
+    assert.ok((await page.locator('#resultSourceFile').textContent()).includes(name));
+    assert.deepEqual(await page.evaluate(() => ({
+        scroll: document.documentElement.scrollWidth,
+        width: document.documentElement.clientWidth
+    })).then(({ scroll, width }) => scroll <= width), true, 'no horizontal scroll');
+    const box = await page.locator('#resultSource').boundingBox();
+    assert.ok(box.x >= 0 && box.x + box.width <= 390, `source block fits: ${JSON.stringify(box)}`);
+    for (const id of ['replaceSource', 'convertAnother']) {
+        const button = await page.locator(`#${id}`).boundingBox();
+        assert.ok(button.x >= 0 && button.x + button.width <= 390, `${id} fits`);
+    }
+    assertClean(problems);
+});
+
+/**
+ * Press Tab until `id` has focus, checking after every press that focus is on a real control,
+ * never <body>. Returns the ids passed on the way.
+ */
+async function tabTo(page, id, maxPresses = 40) {
+    const passed = [];
+    for (let i = 0; i < maxPresses; i++) {
+        await page.keyboard.press('Tab');
+        const focused = await page.evaluate(() => {
+            const el = document.activeElement;
+            return { body: !el || el === document.body, id: el?.id || el?.localName };
+        });
+        assert.equal(focused.body, false, `Tab ${i + 1} left focus on <body> (after ${passed.join(', ')})`);
+        passed.push(focused.id);
+        if (focused.id === id) return passed;
+    }
+    assert.fail(`Tab never reached #${id}: ${passed.join(', ')}`);
+}
+
+const activeId = page => page.evaluate(() =>
+    (document.activeElement === document.body ? '<body>' : document.activeElement?.id || document.activeElement?.localName));
+
+test('the loop works by keyboard alone: focus follows each step and the result is announced', async t => {
+    const { page, problems } = await openPage(t);
+
+    // From the top of the page to the file input; the upload zone shows the dotted focus ring
+    await tabTo(page, 'fileInput');
+    assert.equal(await page.locator('#uploadZone').evaluate(el => getComputedStyle(el).outlineStyle), 'dotted');
+
+    // The native dialog can't be driven, so the file is set on the focused input
+    await chooseFile(page, 'dilekce.docx', await plainDocx());
+    assert.equal(await activeId(page), 'convertBtn');
+    assert.equal(await page.locator('#uploadZone').isVisible(), false);
+
+    // Record the result status's text when the result is revealed, and every text it holds after
+    await page.evaluate(() => {
+        const section = document.getElementById('downloadSection');
+        const status = document.getElementById('resultStatus');
+        window.__statusAtReveal = null;
+        window.__statusTexts = [];
+        new MutationObserver(() => {
+            if (!section.classList.contains('hidden') && window.__statusAtReveal === null) window.__statusAtReveal = status.textContent;
+        }).observe(section, { attributes: true, attributeFilter: ['class'] });
+        new MutationObserver(() => window.__statusTexts.push(status.textContent))
+            .observe(status, { childList: true, characterData: true, subtree: true });
+    });
+    await page.keyboard.press('Enter');
+    await page.locator('#downloadSection').waitFor({ state: 'visible' });
+    const complete = await page.evaluate(() => t('result.announce'));
+    await page.waitForFunction(text => document.getElementById('resultStatus').textContent === text, complete);
+    assert.equal(await activeId(page), 'downloadBtn');
+    assert.equal(await page.evaluate(() => window.__statusAtReveal), '', 'revealed empty');
+    assert.deepEqual(await page.evaluate(() => window.__statusTexts), [complete], 'filled once');
+    assert.equal(await page.locator('#resultStatus').getAttribute('role'), 'status');
+
+    // Tab reaches KAYNAĞI DEĞİŞTİR, then "convert another"
+    await tabTo(page, 'replaceSource', 3);
+    await tabTo(page, 'convertAnother', 1);
+    await page.keyboard.press('Enter');
+    await page.locator('#uploadZone').waitFor({ state: 'visible' });
+    assert.equal(await activeId(page), 'fileInput');
+    assert.equal(await page.locator('#resultStatus').textContent(), '');
+    assertClean(problems);
+});
+
+test('with notes, the announcement counts them in TR and EN, and the notes are a labelled region', async t => {
+    const { page, problems } = await openPage(t);
+    await chooseFile(page, 'dava-dilekcesi.docx', await petitions[0].build());
+    await page.keyboard.press('Enter');
+    await page.locator('#downloadSection').waitFor({ state: 'visible' });
+    assert.equal(await activeId(page), 'downloadBtn');
+
+    const count = await page.locator('#conversionNotesList > li.conversion-note').count();
+    assert.ok(count >= 1, 'the petition has conversion notes');
+    const expected = await page.evaluate(n => (n === 1 ? t('result.announceOneNote') : t('result.announceNotes', { count: n })), count);
+    assert.match(expected, new RegExp(`^Dönüştürme tamamlandı\\. Bu dönüşümle ilgili ${count} not var\\.$`));
+    await page.waitForFunction(text => document.getElementById('resultStatus').textContent === text, expected);
+
+    await page.locator('[data-set-lang="en"]').click();
+    assert.equal(await page.locator('#resultStatus').textContent(),
+        count === 1 ? 'Conversion complete. 1 note on this conversion.' : `Conversion complete. ${count} notes on this conversion.`);
+
+    const region = page.getByRole('region', { name: await page.evaluate(() => t('notes.title')) });
+    assert.equal(await region.count(), 1);
+    assert.equal(await region.getAttribute('id'), 'conversionNotes');
     assertClean(problems);
 });

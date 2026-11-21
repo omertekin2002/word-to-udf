@@ -20,22 +20,54 @@ const FINDING_KEYS = {
     nestedTables: 'notes.nestedTables',
     missingImage: 'notes.missingImage',
     unsupportedImage: 'notes.unsupportedImage',
+    unconvertedDrawing: 'notes.unconvertedDrawing',
     notesMoved: 'notes.notesMoved',
     endnotesMoved: 'notes.endnotesMoved',
     lineSpacing: 'notes.lineSpacing',
     tabStops: 'notes.tabStops',
-    symbols: 'notes.symbols'
+    symbols: 'notes.symbols',
+    tableBorders: 'notes.tableBorders'
 };
 
 // The conversion's real steps, in order; the bar fills one share per step
 const PROGRESS_STAGES = ['progress.parsing', 'progress.converting', 'progress.complete'];
 
 // Findings whose examples are document text, shown in quotes; the others are format names
-const QUOTED_EXAMPLE_CODES = ['hiddenText', 'nestedTables', 'missingImage', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
+const QUOTED_EXAMPLE_CODES = ['hiddenText', 'nestedTables', 'missingImage', 'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
+
+// What separates the parts of a location line
+const LOCATION_SEPARATOR = ' · ';
+
+/**
+ * The translated parts of a finding location's line, before its example: the note it is in,
+ * where it is, and the heading it is under. A document-wide location has none.
+ * @param {Object} location - See DocxParser.addFinding
+ * @returns {Array<[string, Object]>} [dictionary key, params] pairs, in order
+ */
+function locationParts(location) {
+    const parts = [];
+    if (location.note && (location.note.kind === 'footnote' || location.note.kind === 'endnote')) {
+        parts.push([`notes.location.${location.note.kind}`, {}]);
+    }
+    if (location.kind === 'paragraph') {
+        parts.push(['notes.location.paragraph', { paragraph: location.paragraph }]);
+    } else if (location.kind === 'cell') {
+        parts.push(['notes.location.cell', { table: location.table, row: location.row, cell: location.cell }]);
+    } else if (location.kind === 'header' || location.kind === 'footer') {
+        parts.push([`notes.location.${location.kind}`, {}]);
+    } else {
+        return [];
+    }
+    if (typeof location.heading === 'string' && location.heading !== '') {
+        parts.push(['notes.location.heading', { heading: location.heading }]);
+    }
+    return parts;
+}
 
 class WordToUdfApp {
     constructor() {
         // DOM Elements
+        this.uploadCard = document.getElementById('uploadCard');
         this.uploadZone = document.getElementById('uploadZone');
         this.fileInput = document.getElementById('fileInput');
         this.fileInfo = document.getElementById('fileInfo');
@@ -49,9 +81,16 @@ class WordToUdfApp {
         this.progressText = document.getElementById('progressText');
         this.downloadSection = document.getElementById('downloadSection');
         this.downloadBtn = document.getElementById('downloadBtn');
+        this.resultStatus = document.getElementById('resultStatus');
         this.convertAnother = document.getElementById('convertAnother');
+        this.replaceSourceBtn = document.getElementById('replaceSource');
+        this.replaceInput = document.getElementById('replaceInput');
+        this.resultSourceFile = document.getElementById('resultSourceFile');
+        this.resultConverted = document.getElementById('resultConverted');
+        this.resultOutput = document.getElementById('resultOutput');
         this.conversionNotes = document.getElementById('conversionNotes');
         this.conversionNotesList = document.getElementById('conversionNotesList');
+        this.conversionNotesHelp = document.getElementById('conversionNotesHelp');
         this.errorMessage = document.getElementById('errorMessage');
         this.errorText = document.getElementById('errorText');
 
@@ -91,6 +130,17 @@ class WordToUdfApp {
 
         // Convert another
         this.convertAnother.addEventListener('click', () => this.handleConvertAnother());
+
+        // Replace source: pick a new revision and convert it in place of the current result.
+        // The input is emptied first, so choosing a file of the same name still counts as a change
+        this.replaceSourceBtn.addEventListener('click', () => {
+            this.replaceInput.value = '';
+            this.replaceInput.click();
+        });
+        this.replaceInput.addEventListener('change', (e) => {
+            const files = e.target.files;
+            if (files.length > 0) this.replaceSource(files[0]);
+        });
     }
 
     handleDragOver(e) {
@@ -142,6 +192,8 @@ class WordToUdfApp {
         this.fileInfo.classList.remove('hidden');
         this.convertBtn.disabled = false;
         this.hideError();
+        // The focused file input went with the upload zone; the next step is converting
+        this.focusIfLost(this.convertBtn, this.uploadZone);
     }
 
     /**
@@ -159,11 +211,43 @@ class WordToUdfApp {
         this.convertBtn.classList.remove('hidden');
         this.convertBtn.disabled = true;
         this.hideError();
+        // Choosing a file is the next step, whichever of the now hidden or disabled controls had focus
+        this.focusIfLost(this.fileInput, this.fileInfo, this.progressContainer, this.downloadSection, this.convertBtn);
+    }
+
+    /**
+     * Move focus to `target` when the focused control is gone: focus is on <body>, or inside one
+     * of the parts just hidden. A place the user moved focus to on purpose is left alone.
+     * @param {HTMLElement} target - The control for the next step
+     * @param {...HTMLElement} hiddenParts - What the step hid or disabled
+     */
+    focusIfLost(target, ...hiddenParts) {
+        const focused = window.document.activeElement;
+        if (!focused || focused === window.document.body || hiddenParts.some(part => part.contains(focused))) {
+            target.focus();
+        }
     }
 
     /** Make any conversion still running stale, so nothing it produces is shown */
     cancelConversion() {
         this.conversionRun++;
+    }
+
+    /**
+     * Replace the source of the result on screen with a new file (usually a new revision of
+     * the same document) and convert it straight away. The old download, source line and
+     * notes go at once, before any work; a file that isn't a .docx leaves them in place.
+     * @param {File} file
+     * @returns {Promise<void>|undefined} The conversion, when one starts
+     */
+    replaceSource(file) {
+        if (getFileExtension(file.name) !== 'docx') {
+            this.showError('error.invalidType');
+            return;
+        }
+        this.clearResult();
+        this.processFile(file);
+        return this.handleConvert();
     }
 
     async handleConvert() {
@@ -175,6 +259,13 @@ class WordToUdfApp {
         const run = ++this.conversionRun;
         const isStale = () => run !== this.conversionRun;
         const outputFilename = toUdfFilename(file.name);
+        // What the result will say about its source, read from the file this run converts
+        const source = {
+            name: file.name,
+            size: formatFileSize(file.size),
+            lastModified: Number.isFinite(file.lastModified) ? file.lastModified : null,
+            output: outputFilename
+        };
 
         // The parser reports any failure with an English message (and an error.code for the
         // failures it can name); show the translated message for the step that failed and
@@ -190,7 +281,10 @@ class WordToUdfApp {
             this.progressText.textContent = '';
             this.progressContainer.classList.remove('hidden');
             this.hideError();
-            this.clearNotes();
+            this.clearResult();
+            // KALDIR / REMOVE stays visible and cancels the run, so it takes the focus the
+            // hidden convert button (or replace button, for a replacement) had
+            this.focusIfLost(this.removeFile, this.convertBtn, this.downloadSection);
             await nextFrame();
             if (isStale()) return;
 
@@ -217,12 +311,20 @@ class WordToUdfApp {
             this.updateProgress('progress.complete');
 
             // Show download section, with notes on what the conversion dropped or simplified,
-            // and take keyboard and screen-reader users to the result
+            // and take keyboard and screen-reader users to the result, unless they moved focus
+            // out of the converter while it ran
             this.progressContainer.classList.add('hidden');
             this.fileInfo.classList.add('hidden');
-            this.showNotes(document.findings || []);
+            this.showSource(source, Date.now());
+            const noteCount = this.showNotes(document.findings || []);
             this.downloadSection.classList.remove('hidden');
-            this.downloadBtn.focus();
+            this.focusIfLost(this.downloadBtn, this.uploadCard);
+
+            // Say once that it finished and how many notes follow. Like the progress status,
+            // the region is revealed empty and filled a frame later, so it is announced
+            await nextFrame();
+            if (isStale()) return;
+            this.announceResult(noteCount);
 
         } catch (error) {
             // A conversion of a file that is gone has nothing to report
@@ -236,10 +338,10 @@ class WordToUdfApp {
             this.progressContainer.classList.add('hidden');
             this.convertBtn.classList.remove('hidden');
             this.showError(failureKey);
-            // The role="alert" message announces itself; put focus back on the convert button,
-            // which lost it when it was hidden, unless the user has moved it elsewhere
-            const focused = window.document.activeElement;
-            if (!focused || focused === window.document.body) this.convertBtn.focus();
+            // The role="alert" message announces itself; put focus back on the convert button
+            // (from KALDIR / REMOVE, or from a hidden control), unless the user has moved it
+            // out of the converter
+            this.focusIfLost(this.convertBtn, this.uploadCard);
         }
     }
 
@@ -287,23 +389,81 @@ class WordToUdfApp {
 
     handleConvertAnother() {
         // Drop the result, then reset the file, progress and buttons as removing the file does
-        this.convertedBlob = null;
-        this.downloadSection.classList.add('hidden');
-        this.clearNotes();
+        this.clearResult();
         this.handleRemoveFile();
     }
 
+    /** Drop the result: its download, announcement, source line and notes go together */
+    clearResult() {
+        this.convertedBlob = null;
+        this.downloadSection.classList.add('hidden');
+        this.clearAnnouncement();
+        this.clearSource();
+        this.clearNotes();
+    }
+
     /**
-     * List the parser's findings under the download button; hidden when there are none.
-     * Examples are document text, so they only ever go in through textContent.
-     * @param {Array<{code: string, count: number, examples: Array<string>}>} findings
+     * Fill the result's status region with one sentence: the conversion finished, and how many
+     * notes are listed with it. A language change rewrites it in place.
+     * @param {number} noteCount - The notes listed under the download button
+     */
+    announceResult(noteCount) {
+        if (noteCount === 0) {
+            setTranslatedText(this.resultStatus, 'result.announce');
+        } else if (noteCount === 1) {
+            setTranslatedText(this.resultStatus, 'result.announceOneNote');
+        } else {
+            setTranslatedText(this.resultStatus, 'result.announceNotes', { count: noteCount });
+        }
+    }
+
+    clearAnnouncement() {
+        delete this.resultStatus.dataset.i18n;
+        delete this.resultStatus.dataset.i18nParams;
+        this.resultStatus.textContent = '';
+    }
+
+    /**
+     * Say which file and revision the result came from. The name is the user's, so it only
+     * ever goes in through textContent; the times are written in the page language, and again
+     * on every language change.
+     * @param {{name: string, size: string, lastModified: ?number, output: string}} source
+     * @param {number} convertedAt - When the conversion finished (ms since the epoch)
+     */
+    showSource({ name, size, lastModified, output }, convertedAt) {
+        if (lastModified === null) {
+            setTranslatedText(this.resultSourceFile, 'result.sourceUndated', { name, size });
+        } else {
+            setTranslatedText(this.resultSourceFile, 'result.source', { name, size, modified: { dateTime: lastModified } });
+        }
+        setTranslatedText(this.resultConverted, 'result.converted', { time: { time: convertedAt } });
+        setTranslatedText(this.resultOutput, 'result.output', { output });
+    }
+
+    clearSource() {
+        for (const line of [this.resultSourceFile, this.resultConverted, this.resultOutput]) {
+            delete line.dataset.i18n;
+            delete line.dataset.i18nParams;
+            line.textContent = '';
+        }
+    }
+
+    /**
+     * List the parser's findings under the download button; hidden when there are none. A finding
+     * located somewhere in particular lists where, one line per place with its example; otherwise
+     * its examples are listed. Examples and headings are document text, so they only ever go in
+     * through textContent.
+     * @param {Array<{code: string, count: number, examples: Array<string>,
+     *   occurrences?: Array<{example: string, location: Object}>}>} findings
+     * @returns {number} How many notes are listed
      */
     showNotes(findings) {
         this.clearNotes();
         const known = findings.filter(finding => Object.prototype.hasOwnProperty.call(FINDING_KEYS, finding.code));
-        if (known.length === 0) return;
+        if (known.length === 0) return 0;
 
-        for (const { code, count, examples } of known) {
+        let located = false;
+        for (const { code, count, examples, occurrences = [] } of known) {
             const item = document.createElement('li');
             item.className = 'conversion-note';
             item.dataset.code = code;
@@ -320,29 +480,52 @@ class WordToUdfApp {
                 item.appendChild(countLine);
             }
 
-            if (examples.length > 0) {
+            const shown = text => (QUOTED_EXAMPLE_CODES.includes(code) ? `“${text}”` : text);
+            const places = occurrences
+                .map(({ example, location }) => ({ example, parts: locationParts(location || {}) }))
+                .filter(place => place.parts.length > 0);
+            if (places.length > 0 || examples.length > 0) {
                 const label = document.createElement('p');
                 label.className = 'conversion-note-examples-label';
-                setTranslatedText(label, 'notes.examples');
+                setTranslatedText(label, places.length > 0 ? 'notes.where' : 'notes.examples');
                 item.appendChild(label);
 
                 const list = document.createElement('ul');
                 list.className = 'conversion-note-examples';
-                for (const example of examples) {
-                    const entry = document.createElement('li');
-                    entry.textContent = QUOTED_EXAMPLE_CODES.includes(code) ? `“${example}”` : example;
-                    list.appendChild(entry);
+                if (places.length > 0) {
+                    located = true;
+                    for (const { example, parts } of places) {
+                        const entry = document.createElement('li');
+                        entry.className = 'conversion-note-location';
+                        parts.forEach(([key, params], i) => {
+                            if (i > 0) entry.append(LOCATION_SEPARATOR);
+                            const part = document.createElement('span');
+                            setTranslatedText(part, key, params);
+                            entry.appendChild(part);
+                        });
+                        if (example) entry.append(LOCATION_SEPARATOR + shown(example));
+                        list.appendChild(entry);
+                    }
+                } else {
+                    for (const example of examples) {
+                        const entry = document.createElement('li');
+                        entry.textContent = shown(example);
+                        list.appendChild(entry);
+                    }
                 }
                 item.appendChild(list);
             }
 
             this.conversionNotesList.appendChild(item);
         }
+        this.conversionNotesHelp.classList.toggle('hidden', !located);
         this.conversionNotes.classList.remove('hidden');
+        return known.length;
     }
 
     clearNotes() {
         this.conversionNotesList.replaceChildren();
+        this.conversionNotesHelp.classList.add('hidden');
         this.conversionNotes.classList.add('hidden');
     }
 

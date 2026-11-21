@@ -2,7 +2,9 @@
  * Interface language: Turkish by default, with English available
  * Strings live in the dictionaries below; markup marks them with data-i18n attributes:
  *   data-i18n="key"            - sets the element's text
- *   data-i18n-params='{"n":1}' - values for the {placeholders} of its data-i18n string (JSON)
+ *   data-i18n-params='{"n":1}' - values for the {placeholders} of its data-i18n string (JSON);
+ *                                a value {"dateTime": ms} or {"time": ms} is a moment, written
+ *                                in the active language each time the string is shown
  *   data-i18n-html="key"       - sets the element's markup (dictionary strings only, never user input)
  *   data-i18n-attr="attr:key"  - sets an attribute; separate several pairs with ";"
  */
@@ -45,20 +47,40 @@ const I18N_STRINGS = {
         'download.success': 'Dönüştürme tamamlandı.',
         'download.button': 'UDF DOSYASINI İNDİR',
         'download.another': 'Başka bir dosya dönüştür',
+        'download.replace': 'KAYNAĞI DEĞİŞTİR',
+        'download.replaceInputLabel': 'Yeni kaynak Word belgesini seçin',
+        'result.source': 'Kaynak: {name} ({size}, değiştirilme {modified})',
+        'result.sourceUndated': 'Kaynak: {name} ({size})',
+        'result.converted': 'Dönüştürüldü: {time}',
+        'result.output': 'İndirilecek: {output}',
+        'result.announce': 'Dönüştürme tamamlandı.',
+        'result.announceOneNote': 'Dönüştürme tamamlandı. Bu dönüşümle ilgili 1 not var.',
+        'result.announceNotes': 'Dönüştürme tamamlandı. Bu dönüşümle ilgili {count} not var.',
         'notes.title': 'Bu dönüşümle ilgili notlar',
         'notes.count': 'Sayı: {count}',
         'notes.examples': 'Örnekler:',
+        'notes.where': 'Nerede:',
+        'notes.locationHelp': 'Paragraf numaraları, belgenin gövdesindeki paragrafları baştan sayar: boş satırlar dahil, tablolardaki ve metin kutularındaki paragraflar hariç. Word’de Giriş sekmesindeki ¶ düğmesi her paragrafın sonunu gösterir. Tablolar da baştan sayılır; satırlar yukarıdan aşağıya, hücreler soldan sağa.',
+        'notes.location.paragraph': 'Paragraf {paragraph}',
+        'notes.location.cell': 'Tablo {table}, satır {row}, hücre {cell}',
+        'notes.location.header': 'Üst bilgi',
+        'notes.location.footer': 'Alt bilgi',
+        'notes.location.footnote': 'Dipnot',
+        'notes.location.endnote': 'Son not',
+        'notes.location.heading': '“{heading}” başlığı altında',
         'notes.headersFooters': 'Üst ve alt bilgilerin bir kısmı dönüştürülmedi: ilk sayfa ve çift sayfa üst/alt bilgileri, önceki bölümlerin farklı üst/alt bilgileri, ayrıca son bölümün üst/alt bilgisindeki sayfa numaraları ve diğer alanlar, görseller, metin kutuları ve tablolar. Bu içerik gerekiyorsa Word’de son bölümün ana üst ya da alt bilgisine düz metin olarak yazın veya UYAP editöründe ekleyin.',
         'notes.comments': 'Açıklamalar (yorumlar) dönüştürülmedi. Gerekli bir açıklama varsa metnini Word’de belgenin gövdesine yazın.',
         'notes.hiddenText': 'Gizli metin dönüştürülmedi: Word’de gizli olarak biçimlendirilmiş metin, Word’ün göstermediği ve yazdırmadığı gibi UDF’ye de yazılmadı. Bu metin dilekçede yer almalıysa Word’de seçip Yazı Tipi ayarlarında “Gizli” seçeneğini kaldırın.',
         'notes.nestedTables': 'İç içe tablolar düzleştirildi: içteki tablonun metni, dıştaki tablonun hücresine sırayla yazıldı. Düzen önemliyse Word’de içteki tabloyu ayrı bir tabloya ya da düz metne dönüştürün.',
         'notes.missingImage': 'Verisi belgede bulunmayan görseller atlandı. Bu görselleri Word’de silip Ekle › Resimler ile yeniden ekleyin.',
         'notes.unsupportedImage': 'Bazı görseller PNG ya da JPEG değil; UDF yalnızca bu iki biçimi tanımlar, bu yüzden UYAP’ta görünmeyebilirler. Görselleri PNG ya da JPEG olarak kaydedip Word’de yeniden ekleyin.',
+        'notes.unconvertedDrawing': 'Bazı grafikler, SmartArt diyagramları, şekiller ya da gömülü nesneler dönüştürülemediği için atlandı. Gerekiyorsa Word’de her birini kopyalayıp Özel Yapıştır › Resim (PNG) ile resim olarak yapıştırın ve belgeyi yeniden dönüştürün.',
         'notes.notesMoved': 'Dipnotlar sayfalarının altında değil: metinleri biçimlendirme olmadan, bir sonraki elle eklenmiş sayfa sonundan önceye ya da belgenin sonuna yazıldı. Dönüştürülen dosyada dipnot numaralarını ve yerlerini kontrol edin.',
         'notes.endnotesMoved': 'Belge son notları her bölümün sonuna koyuyor ya da numaralarını yeniden başlatıyor, ancak hepsi belgenin sonuna taşındı ve baştan numaralandı. Dönüştürülen dosyada son not numaralarını ve yerlerini kontrol edin ya da Word’de son notları sürekli numarayla belgenin sonuna alın.',
         'notes.lineSpacing': 'Bazı paragraflarda satır aralığı “Tam” ya da “En az” olarak ayarlı; UDF bunu tanımlamadığı için bu paragraflara tek satır aralığı verildi. Aralık önemliyse Word’ün Paragraf ayarlarında satır aralığı olarak “Tek”, “1,5 satır”, “Çift” ya da “Birden çok” seçin.',
         'notes.tabStops': 'Bazı sekme durakları atlandı ya da sadeleşti: çubuk sekmeleri yazılmadı, alt çizgi ve kalın çizgi öncü karakterleri kaldırıldı. Önemliyse Word’ün Sekmeler ayarlarında nokta ya da tire öncü karakteri seçin.',
         'notes.symbols': 'Sembol yazı tiplerinden eklenen bazı semboller (onay kutuları, işaretler, madde imleri gibi) Unicode karşılıklarıyla yazıldı; örneklerde okun ardından gösterilir. UYAP editörünün yazı tipleri bunları farklı çizebilir, dönüştürülen dosyada kontrol edin. Örneklerde oku olmayan sembollerin karşılığı yok, bu yüzden atlandı: gerekiyorsa Word’de düz metinle değiştirin.',
+        'notes.tableBorders': 'Bazı tablo hücrelerinin kenarlıkları sadeleşti: UDF her hücreye tek bir çizgi stili, kalınlığı ve rengi verir. Kenarları farklı çizgilerle çizilmiş hücrelerin tüm kenarları en kalın çizgiyle yazıldı; düz, noktalı, kesik ve çift çizgi dışındaki stiller (üçlü, dalgalı, kabartma gibi) düz çizgi olarak yazıldı. Bu hücrelerin kenarlıklarını UYAP editöründe kontrol edin ya da Word’ün Kenarlıklar ayarlarında hücrenin tüm kenarlarına aynı düz, noktalı, kesik ya da çift çizgiyi verin.',
         'error.icon': 'HATA',
         'error.default': 'Bir hata oluştu',
         'error.invalidType': 'Lütfen geçerli bir Word belgesi (.docx dosyası) seçin.',
@@ -118,20 +140,40 @@ const I18N_STRINGS = {
         'download.success': 'Conversion complete.',
         'download.button': 'DOWNLOAD UDF FILE',
         'download.another': 'Convert another file',
+        'download.replace': 'REPLACE SOURCE',
+        'download.replaceInputLabel': 'Choose the new source Word document',
+        'result.source': 'Source: {name} ({size}, modified {modified})',
+        'result.sourceUndated': 'Source: {name} ({size})',
+        'result.converted': 'Converted: {time}',
+        'result.output': 'Downloads as: {output}',
+        'result.announce': 'Conversion complete.',
+        'result.announceOneNote': 'Conversion complete. 1 note on this conversion.',
+        'result.announceNotes': 'Conversion complete. {count} notes on this conversion.',
         'notes.title': 'Notes on this conversion',
         'notes.count': 'Count: {count}',
         'notes.examples': 'Examples:',
+        'notes.where': 'Where:',
+        'notes.locationHelp': 'Paragraph numbers count the paragraphs in the body of the document from the start: empty lines included, paragraphs in tables and text boxes not. In Word, the ¶ button on the Home tab marks the end of each paragraph. Tables are counted from the start too; rows top to bottom, cells left to right.',
+        'notes.location.paragraph': 'Paragraph {paragraph}',
+        'notes.location.cell': 'Table {table}, row {row}, cell {cell}',
+        'notes.location.header': 'Header',
+        'notes.location.footer': 'Footer',
+        'notes.location.footnote': 'Footnote',
+        'notes.location.endnote': 'Endnote',
+        'notes.location.heading': 'under “{heading}”',
         'notes.headersFooters': 'Some header and footer content was not converted: first-page and even-page headers and footers, earlier sections’ different headers and footers, and page numbers and other fields, pictures, text boxes and tables in the last section’s header or footer. If it is needed, type it as plain text in the last section’s main header or footer in Word, or add it in the UYAP editor.',
         'notes.comments': 'Comments were not converted. If a comment matters, write its text into the body of the document in Word.',
         'notes.hiddenText': 'Hidden text was left out: text formatted as hidden in Word, which Word neither shows nor prints, was not written into the UDF. If it belongs in the filing, select it in Word and clear “Hidden” in the Font settings.',
         'notes.nestedTables': 'Nested tables were flattened: the inner table’s text was written into the outer table’s cell in reading order. If the layout matters, turn the inner table into a separate table or plain text in Word.',
         'notes.missingImage': 'Pictures whose image data is missing from the document were skipped. Delete them in Word and insert them again with Insert › Pictures.',
         'notes.unsupportedImage': 'Some pictures are not PNG or JPEG, the only formats UDF defines, so they may not show in UYAP. Save them as PNG or JPEG and insert them again in Word.',
+        'notes.unconvertedDrawing': 'Some charts, SmartArt diagrams, shapes or embedded objects could not be converted and were left out. If they matter, copy each one in Word, paste it back as a picture with Paste Special › Picture (PNG), and convert again.',
         'notes.notesMoved': 'Footnotes are no longer at the bottom of their page: their text was written without formatting before the next manual page break, or at the end of the document. Check the note numbers and placement in the converted file.',
         'notes.endnotesMoved': 'The document places endnotes at the end of each section or restarts their numbering, but they were all moved to the end of the document and numbered from the start. Check the endnote numbers and placement in the converted file, or set endnotes to the end of the document with continuous numbering in Word.',
         'notes.lineSpacing': 'Some paragraphs have an “Exactly” or “At least” line spacing, which UDF can’t express, so they got single line spacing. If the spacing matters, choose “Single”, “1.5 lines”, “Double” or “Multiple” as the line spacing in Word’s Paragraph settings.',
         'notes.tabStops': 'Some tab stops were dropped or simplified: bar tab stops were left out, and underline and heavy leaders were removed. If they matter, choose a dot or hyphen leader in Word’s Tabs settings.',
         'notes.symbols': 'Some symbols inserted from symbol fonts (such as check boxes, marks and bullets) were written as their Unicode equivalents, shown after the arrow in the examples. The UYAP editor’s fonts may draw them differently, so check them in the converted file. Symbols with no arrow have no equivalent and were left out: if they matter, replace them with plain text in Word.',
+        'notes.tableBorders': 'Some table cell borders were simplified: UDF gives each cell a single line style, width and color. Cells whose edges are drawn with different lines had all their edges written with the heaviest one, and line styles other than single, dotted, dashed and double (such as triple, wavy or 3-D) were written as solid lines. Check these cells’ borders in the UYAP editor, or give all of a cell’s edges the same single, dotted, dashed or double line in Word’s Borders settings.',
         'error.icon': 'ERROR',
         'error.default': 'An error occurred',
         'error.invalidType': 'Please select a valid Word document (.docx file)',
@@ -159,6 +201,12 @@ const I18N_STRINGS = {
     }
 };
 
+// How moment params ({"dateTime": ms} or {"time": ms}) are written, in the active language
+const I18N_MOMENT_FORMATS = {
+    dateTime: { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' },
+    time: { hour: '2-digit', minute: '2-digit', second: '2-digit' }
+};
+
 let currentLang = I18N_DEFAULT_LANG;
 
 function isSupportedLang(lang) {
@@ -174,7 +222,22 @@ function isSupportedLang(lang) {
 function t(key, params = {}) {
     const dictionary = I18N_STRINGS[currentLang];
     const text = Object.prototype.hasOwnProperty.call(dictionary, key) ? dictionary[key] : key;
-    return text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match));
+    return text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? formatParam(params[name]) : match));
+}
+
+/**
+ * Write a placeholder value: a moment ({dateTime: ms} or {time: ms}) with Intl.DateTimeFormat
+ * in the active language, anything else as a string
+ * @param {*} value
+ * @returns {string}
+ */
+function formatParam(value) {
+    if (value !== null && typeof value === 'object') {
+        for (const [style, options] of Object.entries(I18N_MOMENT_FORMATS)) {
+            if (typeof value[style] === 'number') return new Intl.DateTimeFormat(currentLang, options).format(value[style]);
+        }
+    }
+    return String(value);
 }
 
 /**

@@ -270,4 +270,14 @@ function textOf(el, content) {
     return content.slice(start, start + Number(el.getAttribute('length')));
 }
 
-module.exports = { loadConverter, buildDocx, compoundFile, declareSize, convert, convertBody, assertOffsetsInBounds, textOf };
+/**
+ * A parse's findings as plain data in this realm, without their located occurrences: the code,
+ * count and examples of each, for the tests that check those
+ * @param {Array<Object>} findings - parse().findings
+ * @returns {Array<{code: string, count: number, examples: Array<string>}>}
+ */
+function findingSummaries(findings) {
+    return JSON.parse(JSON.stringify(findings)).map(({ occurrences, ...summary }) => summary);
+}
+
+module.exports = { loadConverter, buildDocx, compoundFile, declareSize, convert, convertBody, assertOffsetsInBounds, textOf, findingSummaries };

@@ -31,6 +31,9 @@ const BORDER_ALL = 15; // top, right, bottom and left
 // Line that sets the footnote and endnote sections off from the text above them
 const NOTE_SEPARATOR = '────────────────────';
 
+// Font size of the note numbers and of note text without formatting, in points
+const NOTE_TEXT_SIZE = 10;
+
 // Roman numeral digits, largest first
 const ROMAN_NUMERALS = [
     [1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'], [100, 'c'], [90, 'xc'],
@@ -227,7 +230,7 @@ class UdfGenerator {
     }
 
     /**
-     * Number a footnote or endnote reference and keep its text for the notes section.
+     * Number a footnote or endnote reference and keep its text and paragraphs for the notes section.
      * Footnotes and endnotes are numbered separately, in reference order (w:id can be
      * non-contiguous): footnotes 1, 2, 3, endnotes in the document's endnote format.
      * @param {Object} run - A footnoteRef or endnoteRef item
@@ -237,10 +240,10 @@ class UdfGenerator {
         let mark;
         if (run.type === 'endnoteRef') {
             mark = this.formatNoteNumber(++this.endnoteCounter, this.endnoteFormat);
-            this.collectedEndnotes.push({ number: mark, text: run.content });
+            this.collectedEndnotes.push({ number: mark, text: run.content, paragraphs: run.paragraphs });
         } else {
             mark = String(++this.footnoteCounter);
-            this.collectedFootnotes.push({ number: mark, text: run.content });
+            this.collectedFootnotes.push({ number: mark, text: run.content, paragraphs: run.paragraphs });
         }
         return mark;
     }
@@ -272,9 +275,13 @@ class UdfGenerator {
     }
 
     /**
-     * Append a notes section: an empty line, the separator line, then one "<mark>. <text>"
-     * paragraph per note
-     * @param {Array<{number: string, text: string}>} notes - Footnotes or endnotes in reference order
+     * Append a notes section: an empty line, the separator line, then each note's paragraphs.
+     * The first starts with the superscript "<mark>. ". Text keeps its run formatting, tabs
+     * become <tab> and line breaks the body's newline; anything else a parsed item holds is
+     * skipped. A note without parsed paragraphs (an empty one's placeholder) is its plain text.
+     * Note paragraphs are left-aligned, without indents.
+     * @param {Array<{number: string, text: string, paragraphs: ?Array<Array<Object>>}>} notes - Footnotes
+     *   or endnotes in reference order
      */
     appendNotesSection(notes) {
         // Empty line before separator (element references this newline)
@@ -283,28 +290,46 @@ class UdfGenerator {
         this.currentOffset += 1;
 
         // Separator line
-        this.elements.push(`<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0"><content startOffset="${this.currentOffset}" length="${NOTE_SEPARATOR.length}" family="Times New Roman" size="10" /></paragraph>`);
+        this.elements.push(`<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0"><content startOffset="${this.currentOffset}" length="${NOTE_SEPARATOR.length}" family="Times New Roman" size="${NOTE_TEXT_SIZE}" /></paragraph>`);
         this.content += NOTE_SEPARATOR;
         this.currentOffset += NOTE_SEPARATOR.length;
 
         for (const note of notes) {
-            // Create paragraph with superscript number and regular text
-            const numPart = note.number + '. ';
-            const textPart = note.text;
+            const paragraphs = note.paragraphs && note.paragraphs.some(items => items.length > 0)
+                ? note.paragraphs
+                : [[{ type: 'text', text: note.text, fontSize: NOTE_TEXT_SIZE }]];
 
-            const paraElements = [];
+            paragraphs.forEach((items, index) => {
+                const paraElements = [];
+                const write = (text, element) => {
+                    paraElements.push(element);
+                    this.content += text;
+                    this.currentOffset += text.length;
+                };
 
-            // Superscript number
-            paraElements.push(`<content startOffset="${this.currentOffset}" length="${numPart.length}" family="Times New Roman" size="10" superscript="true" />`);
-            this.content += numPart;
-            this.currentOffset += numPart.length;
+                // Superscript number
+                if (index === 0) {
+                    const numPart = note.number + '. ';
+                    write(numPart, `<content startOffset="${this.currentOffset}" length="${numPart.length}" family="Times New Roman" size="${NOTE_TEXT_SIZE}" superscript="true" />`);
+                }
 
-            // Note text
-            paraElements.push(`<content startOffset="${this.currentOffset}" length="${textPart.length}" family="Times New Roman" size="10" />`);
-            this.content += textPart;
-            this.currentOffset += textPart.length;
+                for (const item of items) {
+                    if (item.type === 'text' && item.text) {
+                        write(item.text, `<content startOffset="${this.currentOffset}" length="${item.text.length}" ${this.buildContentAttrs(item)} />`);
+                    } else if (item.type === 'tab') {
+                        write('\t', `<tab startOffset="${this.currentOffset}" length="1" />`);
+                    } else if (item.type === 'break') {
+                        write('\n', `<content startOffset="${this.currentOffset}" length="1" family="Times New Roman" size="12" />`);
+                    }
+                }
 
-            this.elements.push(`<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0">${paraElements.join('')}</paragraph>`);
+                // A further paragraph with nothing in it, as an empty body paragraph is written
+                if (paraElements.length === 0) {
+                    write('\u200B', `<content startOffset="${this.currentOffset}" length="1" family="Times New Roman" size="${NOTE_TEXT_SIZE}" />`);
+                }
+
+                this.elements.push(`<paragraph Alignment="0" LeftIndent="0.0" RightIndent="0.0">${paraElements.join('')}</paragraph>`);
+            });
         }
     }
 
@@ -438,6 +463,9 @@ class UdfGenerator {
             attrs.push(`foreground="${rgb}"`);
         }
 
+        // Highlighting or run shading, the documented content background color
+        if (run.background) attrs.push(`background="${this.hexToRgbInt(run.background)}"`);
+
         return attrs.join(' ');
     }
 
@@ -504,6 +532,14 @@ class UdfGenerator {
                     cellAttrs += ' border="borderNone"';
                 } else if (border === 'borderCell' && spec !== BORDER_ALL) {
                     cellAttrs += ` borderSpec="${spec}"`;
+                }
+                // The heaviest line the cell draws, unless it is Word's default line
+                if (border === 'borderCell' && spec !== 0) {
+                    const { line } = cellBorderChoice(cell, merge);
+                    if (line && !isDefaultBorderLine(line)) {
+                        const { borderStyle, borderWidth, borderColor } = cellBorderLine(line);
+                        cellAttrs += ` borderStyle="${borderStyle}" borderWidth="${borderWidth}" borderColor="${borderColor}"`;
+                    }
                 }
 
                 cellElements.push(`<cell${cellAttrs}>${cellContent}</cell>`);
@@ -655,15 +691,6 @@ ${this.elements.join('\n')}
      * @returns {number} RGB integer
      */
     hexToRgbInt(hex) {
-        if (!hex) return -16777216; // Black
-
-        hex = hex.replace('#', '');
-        const r = parseInt(hex.substring(0, 2), 16);
-        const g = parseInt(hex.substring(2, 4), 16);
-        const b = parseInt(hex.substring(4, 6), 16);
-
-        // Java-style signed RGB (0xFFRRGGBB as signed 32-bit)
-        const rgb = (255 << 24) | (r << 16) | (g << 8) | b;
-        return rgb | 0; // Convert to signed 32-bit
+        return hexToRgbInt(hex); // The shared helper in utils.js
     }
 }

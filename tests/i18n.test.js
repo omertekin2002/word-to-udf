@@ -19,7 +19,7 @@ function assertPageIn(document, dictionary, lang) {
     assert.equal(document.documentElement.lang, lang);
     assert.equal(document.title, dictionary['meta.title']);
     for (const el of document.querySelectorAll('[data-i18n]')) {
-        assert.equal(el.textContent, fill(dictionary[el.dataset.i18n], el), `[data-i18n="${el.dataset.i18n}"]`);
+        assert.equal(el.textContent, fill(dictionary[el.dataset.i18n], el, lang), `[data-i18n="${el.dataset.i18n}"]`);
     }
     for (const el of document.querySelectorAll('[data-i18n-html]')) {
         assert.equal(el.innerHTML, dictionary[el.dataset.i18nHtml], `[data-i18n-html="${el.dataset.i18nHtml}"]`);
@@ -31,10 +31,25 @@ function assertPageIn(document, dictionary, lang) {
     }
 }
 
-// A dictionary string with an element's data-i18n-params filled in
-function fill(text, el) {
+// How a moment param is written: {dateTime: ms} as date and time, {time: ms} as the time of day
+const MOMENT_FORMATS = {
+    dateTime: { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' },
+    time: { hour: '2-digit', minute: '2-digit', second: '2-digit' }
+};
+
+function formatValue(value, lang) {
+    if (value !== null && typeof value === 'object') {
+        for (const [style, options] of Object.entries(MOMENT_FORMATS)) {
+            if (typeof value[style] === 'number') return new Intl.DateTimeFormat(lang, options).format(value[style]);
+        }
+    }
+    return String(value);
+}
+
+// A dictionary string with an element's data-i18n-params filled in, in `lang`
+function fill(text, el, lang) {
     const params = el.dataset.i18nParams ? JSON.parse(el.dataset.i18nParams) : {};
-    return text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match));
+    return text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? formatValue(params[name], lang) : match));
 }
 
 function attrPairs(el) {
@@ -72,7 +87,7 @@ test('every key used by index.html and app.js exists in both dictionaries', asyn
         }
     }
     const appSource = fs.readFileSync(path.join(ROOT, 'js/app.js'), 'utf8');
-    const appKeys = [...appSource.matchAll(/'((?:error|progress|notes)\.\w+)'/g)].map(match => match[1]);
+    const appKeys = [...appSource.matchAll(/'((?:error|progress|notes|result)\.\w+)'/g)].map(match => match[1]);
     assert.ok(appKeys.length >= 13, 'app.js message keys found');
     for (const key of appKeys) keys.add(key);
 
@@ -170,6 +185,22 @@ test('t() falls back to the key and fills {placeholders}', async () => {
     assert.equal(run("t('no.such.key')"), 'no.such.key');
     run("I18N_STRINGS.tr['test.greeting'] = 'Merhaba {name}'");
     assert.equal(run("t('test.greeting', { name: 'Dünya' })"), 'Merhaba Dünya');
+});
+
+test('t() writes {dateTime: ms} and {time: ms} params in the active language', async () => {
+    const { run } = await loadPage();
+    // Midday UTC, so the date is 21 November in any time zone within ±11 hours
+    const moment = Date.UTC(2026, 10, 21, 12, 3, 9);
+    run("I18N_STRINGS.tr['test.when'] = I18N_STRINGS.en['test.when'] = '{at}|{clock}'");
+    const shown = () => run(`t('test.when', { at: { dateTime: ${moment} }, clock: { time: ${moment} } })`);
+    for (const lang of ['tr', 'en']) {
+        run(`applyLanguage('${lang}')`);
+        assert.equal(shown(), formatValue({ dateTime: moment }, lang) + '|' + formatValue({ time: moment }, lang), lang);
+    }
+    run("applyLanguage('tr')");
+    assert.match(shown(), /^21\.11\.2026 \d\d:\d\d:09\|\d\d:\d\d:09$/);
+    run("applyLanguage('en')");
+    assert.match(shown(), /^11\/21\/2026, \d\d:\d\d:09 [AP]M\|\d\d:\d\d:09 [AP]M$/);
 });
 
 test('a non-.docx file gets a translated error, which follows a language change', async () => {
@@ -274,7 +305,7 @@ test('every finding code the parser reports has a TR and an EN message, and app.
     const { strings, run } = await loadPage({ app: true });
     const codes = run('FINDING_CODES');
     assert.deepEqual([...codes], ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
-        'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols']);
+        'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders']);
     const keys = run('FINDING_KEYS');
     assert.deepEqual(Object.keys(keys).sort(), [...codes].sort());
     for (const code of codes) {
@@ -283,7 +314,7 @@ test('every finding code the parser reports has a TR and an EN message, and app.
             assert.ok(strings[lang][`notes.${code}`], `${lang} message for ${code}`);
         }
     }
-    for (const key of ['notes.title', 'notes.count', 'notes.examples']) {
+    for (const key of ['notes.title', 'notes.count', 'notes.examples', 'notes.where', 'notes.locationHelp']) {
         assert.ok(strings.tr[key] && strings.en[key], key);
     }
     assert.match(strings.tr['notes.count'], /\{count\}/);
@@ -310,6 +341,13 @@ async function docxWithFindings() {
     });
 }
 
+/** A location line's text in a language: the dictionary strings named, filled in and joined by " · " */
+function where(dictionary, ...parts) {
+    return parts.map(part => (typeof part === 'string' ? part
+        : Object.entries(part[1] || {}).reduce((text, [name, value]) => text.replace(`{${name}}`, value),
+            dictionary[`notes.location.${part[0]}`]))).join(' · ');
+}
+
 function noteItems(document) {
     return [...document.querySelectorAll('#conversionNotesList > li')].map(item => ({
         code: item.dataset.code,
@@ -327,14 +365,17 @@ test('a conversion with findings lists them under the download button, translate
     assert.ok(visible(document.getElementById('downloadSection')));
     const notes = document.getElementById('conversionNotes');
     assert.ok(visible(notes));
-    assert.equal(notes.getAttribute('role'), 'status');
+    assert.equal(notes.getAttribute('role'), 'region');
     assert.ok(notes.contains(document.getElementById('conversionNotesTitle')));
 
+    // The header and comments are document-wide, so they list no place
     const expected = lang => [
         { code: 'headersFooters', text: strings[lang]['notes.headersFooters'], count: null, examples: [] },
         { code: 'comments', text: strings[lang]['notes.comments'], count: strings[lang]['notes.count'].replace('{count}', '2'), examples: [] },
-        { code: 'nestedTables', text: strings[lang]['notes.nestedTables'], count: null, examples: ['“<img src=x> iç tablo”'] },
-        { code: 'unsupportedImage', text: strings[lang]['notes.unsupportedImage'], count: null, examples: ['GIF'] }
+        { code: 'nestedTables', text: strings[lang]['notes.nestedTables'], count: null,
+            examples: [where(strings[lang], ['cell', { table: 1, row: 1, cell: 1 }], '“<img src=x> iç tablo”')] },
+        { code: 'unsupportedImage', text: strings[lang]['notes.unsupportedImage'], count: null,
+            examples: [where(strings[lang], ['paragraph', { paragraph: 2 }], 'GIF')] }
     ];
     assert.deepEqual(noteItems(document), expected('tr'));
     assert.equal(document.getElementById('conversionNotesTitle').textContent, strings.tr['notes.title']);
@@ -388,17 +429,29 @@ test('hidden text, moved notes, lost line heights and lost tab stops are listed 
     window.app.processFile(fileOf('dilekce.docx', docx));
     await window.app.handleConvert();
 
+    // Moved endnotes are a setting of the whole document, so their examples are listed without a place
     const expected = lang => [
-        { code: 'hiddenText', text: strings[lang]['notes.hiddenText'], count: null, examples: ['“Gizli not”'] },
-        { code: 'notesMoved', text: strings[lang]['notes.notesMoved'], count: null, examples: ['“Dipnot metni”'] },
+        { code: 'hiddenText', text: strings[lang]['notes.hiddenText'], count: null,
+            examples: [where(strings[lang], ['paragraph', { paragraph: 2 }], '“Gizli not”')] },
+        { code: 'notesMoved', text: strings[lang]['notes.notesMoved'], count: null,
+            examples: [where(strings[lang], ['footnote'], ['paragraph', { paragraph: 3 }], '“Dipnot metni”')] },
         { code: 'endnotesMoved', text: strings[lang]['notes.endnotesMoved'], count: null, examples: ['“Son not metni”'] },
-        { code: 'lineSpacing', text: strings[lang]['notes.lineSpacing'], count: null, examples: ['“Tam satır”'] },
-        { code: 'tabStops', text: strings[lang]['notes.tabStops'], count: null, examples: ['“Çubuk sekme”'] }
+        { code: 'lineSpacing', text: strings[lang]['notes.lineSpacing'], count: null,
+            examples: [where(strings[lang], ['paragraph', { paragraph: 5 }], '“Tam satır”')] },
+        { code: 'tabStops', text: strings[lang]['notes.tabStops'], count: null,
+            examples: [where(strings[lang], ['paragraph', { paragraph: 6 }], '“Çubuk sekme”')] }
     ];
+    const labels = lang => [strings[lang]['notes.where'], strings[lang]['notes.where'], strings[lang]['notes.examples'],
+        strings[lang]['notes.where'], strings[lang]['notes.where']];
+    const labelTexts = () => [...document.querySelectorAll('.conversion-note-examples-label')].map(label => label.textContent);
     assert.ok(visible(document.getElementById('conversionNotes')));
+    assert.ok(visible(document.getElementById('conversionNotesHelp')), 'how paragraphs are counted');
     assert.deepEqual(noteItems(document), expected('tr'));
+    assert.deepEqual(labelTexts(), labels('tr'));
     document.querySelector('[data-set-lang="en"]').click();
     assert.deepEqual(noteItems(document), expected('en'));
+    assert.deepEqual(labelTexts(), labels('en'));
+    assert.equal(document.getElementById('conversionNotesHelp').textContent, strings.en['notes.locationHelp']);
     assert.notEqual(strings.tr['notes.tabStops'], strings.en['notes.tabStops']);
 });
 
@@ -415,6 +468,7 @@ test('converted and left-out symbols are listed in both languages, with unquoted
         text: strings[lang]['notes.symbols'],
         count: strings[lang]['notes.count'].replace('{count}', '3'),
         examples: ['Wingdings F0FE → ☑', 'Wingdings F0A8 → □', 'Webdings F021']
+            .map(example => where(strings[lang], ['paragraph', { paragraph: 1 }], example))
     }];
     assert.ok(visible(document.getElementById('conversionNotes')));
     assert.deepEqual(noteItems(document), expected('tr'));
