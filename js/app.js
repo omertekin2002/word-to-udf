@@ -66,6 +66,7 @@ function locationParts(location) {
 class WordToUdfApp {
     constructor() {
         // DOM Elements
+        this.uploadCard = document.getElementById('uploadCard');
         this.uploadZone = document.getElementById('uploadZone');
         this.fileInput = document.getElementById('fileInput');
         this.fileInfo = document.getElementById('fileInfo');
@@ -79,6 +80,7 @@ class WordToUdfApp {
         this.progressText = document.getElementById('progressText');
         this.downloadSection = document.getElementById('downloadSection');
         this.downloadBtn = document.getElementById('downloadBtn');
+        this.resultStatus = document.getElementById('resultStatus');
         this.convertAnother = document.getElementById('convertAnother');
         this.replaceSourceBtn = document.getElementById('replaceSource');
         this.replaceInput = document.getElementById('replaceInput');
@@ -189,6 +191,8 @@ class WordToUdfApp {
         this.fileInfo.classList.remove('hidden');
         this.convertBtn.disabled = false;
         this.hideError();
+        // The focused file input went with the upload zone; the next step is converting
+        this.focusIfLost(this.convertBtn, this.uploadZone);
     }
 
     /**
@@ -206,6 +210,21 @@ class WordToUdfApp {
         this.convertBtn.classList.remove('hidden');
         this.convertBtn.disabled = true;
         this.hideError();
+        // Choosing a file is the next step, whichever of the now hidden or disabled controls had focus
+        this.focusIfLost(this.fileInput, this.fileInfo, this.progressContainer, this.downloadSection, this.convertBtn);
+    }
+
+    /**
+     * Move focus to `target` when the focused control is gone: focus is on <body>, or inside one
+     * of the parts just hidden. A place the user moved focus to on purpose is left alone.
+     * @param {HTMLElement} target - The control for the next step
+     * @param {...HTMLElement} hiddenParts - What the step hid or disabled
+     */
+    focusIfLost(target, ...hiddenParts) {
+        const focused = window.document.activeElement;
+        if (!focused || focused === window.document.body || hiddenParts.some(part => part.contains(focused))) {
+            target.focus();
+        }
     }
 
     /** Make any conversion still running stale, so nothing it produces is shown */
@@ -262,6 +281,9 @@ class WordToUdfApp {
             this.progressContainer.classList.remove('hidden');
             this.hideError();
             this.clearResult();
+            // KALDIR / REMOVE stays visible and cancels the run, so it takes the focus the
+            // hidden convert button (or replace button, for a replacement) had
+            this.focusIfLost(this.removeFile, this.convertBtn, this.downloadSection);
             await nextFrame();
             if (isStale()) return;
 
@@ -288,13 +310,20 @@ class WordToUdfApp {
             this.updateProgress('progress.complete');
 
             // Show download section, with notes on what the conversion dropped or simplified,
-            // and take keyboard and screen-reader users to the result
+            // and take keyboard and screen-reader users to the result, unless they moved focus
+            // out of the converter while it ran
             this.progressContainer.classList.add('hidden');
             this.fileInfo.classList.add('hidden');
             this.showSource(source, Date.now());
-            this.showNotes(document.findings || []);
+            const noteCount = this.showNotes(document.findings || []);
             this.downloadSection.classList.remove('hidden');
-            this.downloadBtn.focus();
+            this.focusIfLost(this.downloadBtn, this.uploadCard);
+
+            // Say once that it finished and how many notes follow. Like the progress status,
+            // the region is revealed empty and filled a frame later, so it is announced
+            await nextFrame();
+            if (isStale()) return;
+            this.announceResult(noteCount);
 
         } catch (error) {
             // A conversion of a file that is gone has nothing to report
@@ -308,13 +337,10 @@ class WordToUdfApp {
             this.progressContainer.classList.add('hidden');
             this.convertBtn.classList.remove('hidden');
             this.showError(failureKey);
-            // The role="alert" message announces itself; put focus back on the convert button,
-            // which lost it when it was hidden, unless the user has moved it elsewhere. Focus
-            // left in the hidden result (the replace button that started this run) is lost too
-            const focused = window.document.activeElement;
-            if (!focused || focused === window.document.body || this.downloadSection.contains(focused)) {
-                this.convertBtn.focus();
-            }
+            // The role="alert" message announces itself; put focus back on the convert button
+            // (from KALDIR / REMOVE, or from a hidden control), unless the user has moved it
+            // out of the converter
+            this.focusIfLost(this.convertBtn, this.uploadCard);
         }
     }
 
@@ -366,12 +392,34 @@ class WordToUdfApp {
         this.handleRemoveFile();
     }
 
-    /** Drop the result: its download, source line and notes go together */
+    /** Drop the result: its download, announcement, source line and notes go together */
     clearResult() {
         this.convertedBlob = null;
         this.downloadSection.classList.add('hidden');
+        this.clearAnnouncement();
         this.clearSource();
         this.clearNotes();
+    }
+
+    /**
+     * Fill the result's status region with one sentence: the conversion finished, and how many
+     * notes are listed with it. A language change rewrites it in place.
+     * @param {number} noteCount - The notes listed under the download button
+     */
+    announceResult(noteCount) {
+        if (noteCount === 0) {
+            setTranslatedText(this.resultStatus, 'result.announce');
+        } else if (noteCount === 1) {
+            setTranslatedText(this.resultStatus, 'result.announceOneNote');
+        } else {
+            setTranslatedText(this.resultStatus, 'result.announceNotes', { count: noteCount });
+        }
+    }
+
+    clearAnnouncement() {
+        delete this.resultStatus.dataset.i18n;
+        delete this.resultStatus.dataset.i18nParams;
+        this.resultStatus.textContent = '';
     }
 
     /**
@@ -406,11 +454,12 @@ class WordToUdfApp {
      * through textContent.
      * @param {Array<{code: string, count: number, examples: Array<string>,
      *   occurrences?: Array<{example: string, location: Object}>}>} findings
+     * @returns {number} How many notes are listed
      */
     showNotes(findings) {
         this.clearNotes();
         const known = findings.filter(finding => Object.prototype.hasOwnProperty.call(FINDING_KEYS, finding.code));
-        if (known.length === 0) return;
+        if (known.length === 0) return 0;
 
         let located = false;
         for (const { code, count, examples, occurrences = [] } of known) {
@@ -470,6 +519,7 @@ class WordToUdfApp {
         }
         this.conversionNotesHelp.classList.toggle('hidden', !located);
         this.conversionNotes.classList.remove('hidden');
+        return known.length;
     }
 
     clearNotes() {

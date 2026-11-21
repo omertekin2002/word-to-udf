@@ -110,7 +110,7 @@
                   <p class="file-name" id="fileName">document.docx</p>
                   <p class="file-size" id="fileSize">0 KB</p>
                 </div>
-                <button class="remove-file" id="removeFile" aria-label="Dosyayı kaldır" data-i18n="file.remove" data-i18n-attr="aria-label:file.removeLabel">KALDIR</button>
+                <button type="button" class="remove-file" id="removeFile" aria-label="Dosyayı kaldır" data-i18n="file.remove" data-i18n-attr="aria-label:file.removeLabel">KALDIR</button>
               </div>
 
               <div class="progress-container hidden" id="progressContainer">
@@ -121,27 +121,30 @@
                 <p class="progress-text" id="progressText" role="status" data-i18n="progress.parsing">Word belgesi okunuyor...</p>
               </div>
 
-              <button class="btn btn-primary convert-btn" id="convertBtn" disabled data-i18n="convert.button">UDF’YE DÖNÜŞTÜR &rarr;</button>
+              <button type="button" class="btn btn-primary convert-btn" id="convertBtn" disabled data-i18n="convert.button">UDF’YE DÖNÜŞTÜR &rarr;</button>
 
               <div class="download-section hidden" id="downloadSection">
                 <span class="new-burst" aria-hidden="true" data-i18n="download.burst">TAMAM!</span>
                 <svg class="success-icon" aria-hidden="true"><use href="#i-floppy"/></svg>
-                <p class="success-text" data-i18n="download.success">Dönüştürme tamamlandı.</p>
+                <!-- Screen readers get the sentence below instead, which also counts the notes -->
+                <p class="success-text" aria-hidden="true" data-i18n="download.success">Dönüştürme tamamlandı.</p>
+                <!-- Announces the result once: revealed empty, filled by app.js a frame later -->
+                <p class="visually-hidden" id="resultStatus" role="status"></p>
                 <!-- Which file and revision this result belongs to; filled by app.js through textContent -->
                 <div class="result-source" id="resultSource">
                   <p class="result-source-file" id="resultSourceFile"></p>
                   <p class="result-source-time" id="resultConverted"></p>
                   <p class="result-source-output" id="resultOutput"></p>
                 </div>
-                <button class="btn btn-primary download-btn" id="downloadBtn" data-i18n="download.button">UDF DOSYASINI İNDİR</button>
-                <div class="conversion-notes hidden" id="conversionNotes" role="status" aria-labelledby="conversionNotesTitle">
+                <button type="button" class="btn btn-primary download-btn" id="downloadBtn" data-i18n="download.button">UDF DOSYASINI İNDİR</button>
+                <div class="conversion-notes hidden" id="conversionNotes" role="region" aria-labelledby="conversionNotesTitle">
                   <h4 class="conversion-notes-title" id="conversionNotesTitle" data-i18n="notes.title">Bu dönüşümle ilgili notlar</h4>
                   <p class="conversion-notes-help hidden" id="conversionNotesHelp" data-i18n="notes.locationHelp">Paragraf numaraları, belgenin gövdesindeki paragrafları baştan sayar: boş satırlar dahil, tablolardaki ve metin kutularındaki paragraflar hariç. Word’de Giriş sekmesindeki ¶ düğmesi her paragrafın sonunu gösterir. Tablolar da baştan sayılır; satırlar yukarıdan aşağıya, hücreler soldan sağa.</p>
                   <ul class="conversion-notes-list" id="conversionNotesList"></ul>
                 </div>
                 <div class="result-actions">
                   <button type="button" class="btn replace-source" id="replaceSource" data-i18n="download.replace">KAYNAĞI DEĞİŞTİR</button>
-                  <button class="convert-another" id="convertAnother" data-i18n="download.another">Başka bir dosya dönüştür</button>
+                  <button type="button" class="convert-another" id="convertAnother" data-i18n="download.another">Başka bir dosya dönüştür</button>
                 </div>
                 <input type="file" id="replaceInput" accept=".docx" class="hidden" aria-label="Yeni kaynak Word belgesini seçin" data-i18n-attr="aria-label:download.replaceInputLabel">
               </div>

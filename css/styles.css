@@ -474,6 +474,12 @@ p {
   border-style: solid;
 }
 
+/* The file input is invisible, so the zone shows the page's focus ring for it */
+.upload-zone:has(.file-input:focus-visible) {
+  outline: 2px dotted var(--ink);
+  outline-offset: 2px;
+}
+
 .file-input {
   position: absolute;
   inset: 0;
@@ -714,6 +720,20 @@ p {
 
 .hidden {
   display: none !important;
+}
+
+/* Read by screen readers, not shown */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ---------- Footer ---------- */
