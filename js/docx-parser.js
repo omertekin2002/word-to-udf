@@ -241,6 +241,17 @@ const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables
 const MAX_FINDING_EXAMPLES = 3;
 const MAX_EXAMPLE_LENGTH = 40;
 
+// How many located occurrences (an example and where it is) a finding keeps
+const MAX_FINDING_OCCURRENCES = 5;
+
+// Outline levels (w:outlineLvl w:val) that make a paragraph a heading: 0 to 8 are Word's
+// heading levels 1 to 9, and 9 is body text
+const MAX_HEADING_OUTLINE_LEVEL = 8;
+
+// Longest text a paragraph without an outline level may have and still count as a heading
+// when it is all bold or all upper case (see isPetitionHeading)
+const MAX_PETITION_HEADING_LENGTH = 80;
+
 // Picture formats, told apart by their leading bytes rather than the part's file extension.
 // UDF documents only PNG and JPEG. EMF starts with an EMR_HEADER record (type 1) whose
 // signature " EMF" sits at byte 40; WMF either starts with a placeable header or with a
@@ -374,6 +385,32 @@ function vmlShapeSize(shape) {
         if (Number.isFinite(rounded) && rounded > 0) size[name] = rounded;
     }
     return size;
+}
+
+/**
+ * Whether a parsed body paragraph reads as a petition's heading though no outline level makes it
+ * one: non-empty text of at most MAX_PETITION_HEADING_LENGTH characters in which every text run
+ * with visible text is bold, or every letter is upper case ("AÇIKLAMALAR :", "SONUÇ VE İSTEM")
+ * @param {Object} paragraph - A parsed paragraph
+ * @returns {boolean}
+ */
+function isPetitionHeading(paragraph) {
+    const text = paragraphText(paragraph).trim();
+    if (text === '' || text.length > MAX_PETITION_HEADING_LENGTH) return false;
+    const visibleRuns = paragraph.runs.filter(run => run.type === 'text' && run.text.trim() !== '');
+    if (visibleRuns.every(run => run.bold)) return true;
+    return /\p{L}/u.test(text) && !/\p{Ll}/u.test(text);
+}
+
+/**
+ * A copy of a finding's location, so the caller can't change the one the parser keeps
+ * @param {Object} location - See DocxParser.addFinding
+ * @returns {Object}
+ */
+function copyLocation(location) {
+    const copy = { ...location };
+    if (location.note) copy.note = { ...location.note };
+    return copy;
 }
 
 /**
@@ -624,6 +661,10 @@ class DocxParser {
         this.styles = this.emptyStyles();
         this.findings = {};
         this.inDiscardedCell = false;
+        // Where findings are recorded now (see addFinding), and the body's paragraph and table counts
+        // and last heading so far (see parseBodyBlocks)
+        this.location = { kind: 'document' };
+        this.body = { paragraphs: 0, tables: 0, headings: { outline: null, petition: null } };
         this.documentParagraphs = null;
         this.endnotesMoved = false;
         // Decompression limits, in bytes; tests lower them instead of building huge files
@@ -650,6 +691,8 @@ class DocxParser {
             this.styles = this.emptyStyles();
             this.findings = {};
             this.inDiscardedCell = false;
+            this.location = { kind: 'document' };
+            this.body = { paragraphs: 0, tables: 0, headings: { outline: null, petition: null } };
             this.documentParagraphs = null;
             this.endnotesMoved = false;
             this.partBytes = new Map();
@@ -852,29 +895,43 @@ class DocxParser {
     }
 
     /**
-     * Record one occurrence of a conversion finding. Nothing is recorded while parsing a
-     * cell the generator writes empty (see parseTable): its content is never converted.
+     * Record one occurrence of a conversion finding, where it is: at this.location unless the
+     * caller gives one. Nothing is recorded while parsing a cell the generator writes empty (see
+     * parseTable): its content is never converted.
      * @param {string} code - A FINDING_CODES value
-     * @param {string} [example] - A short location hint; blank and repeated ones aren't kept
+     * @param {string} [example] - A short location hint; blank and repeated ones aren't kept as examples
+     * @param {Object} [location] - Where it is: { kind: 'paragraph', paragraph, heading? },
+     *   { kind: 'cell', table, row, cell, heading? }, { kind: 'header' }, { kind: 'footer' } or
+     *   { kind: 'document' }; a note's text adds note: { kind: 'footnote' | 'endnote' }
      */
-    addFinding(code, example = '') {
+    addFinding(code, example = '', location = this.location) {
         if (this.inDiscardedCell) return;
-        const finding = this.findings[code] || (this.findings[code] = { code, count: 0, examples: [] });
+        const finding = this.findings[code] ||
+            (this.findings[code] = { code, count: 0, examples: [], occurrences: [], places: new Set() });
         finding.count++;
         if (example && finding.examples.length < MAX_FINDING_EXAMPLES && !finding.examples.includes(example)) {
             finding.examples.push(example);
+        }
+        const place = JSON.stringify([example, location]);
+        if (finding.occurrences.length < MAX_FINDING_OCCURRENCES && !finding.places.has(place)) {
+            finding.places.add(place);
+            finding.occurrences.push({ example, location: copyLocation(location) });
         }
     }
 
     /**
      * The findings recorded during this parse, in FINDING_CODES order
-     * @returns {Array<{code: string, count: number, examples: Array<string>}>} Empty when nothing applies
+     * @returns {Array<{code: string, count: number, examples: Array<string>,
+     *   occurrences: Array<{example: string, location: Object}>}>} Empty when nothing applies.
+     *   occurrences lists up to MAX_FINDING_OCCURRENCES places in the order they were found,
+     *   each example and location pair once (see addFinding).
      */
     listFindings() {
         return FINDING_CODES.filter(code => this.findings[code]).map(code => ({
             code,
             count: this.findings[code].count,
-            examples: [...this.findings[code].examples]
+            examples: [...this.findings[code].examples],
+            occurrences: this.findings[code].occurrences.map(({ example, location }) => ({ example, location: copyLocation(location) }))
         }));
     }
 
@@ -955,9 +1012,15 @@ class DocxParser {
         let lost = false;
         for (const kind of ['header', 'footer']) {
             if (!converted[kind]) continue;
-            const { paragraphs, dropped } = await this.parseHeaderFooterPart(converted[kind], kind);
-            result[kind] = paragraphs;
-            lost = lost || dropped;
+            // What the part's own paragraphs report is located in it
+            this.location = { kind };
+            try {
+                const { paragraphs, dropped } = await this.parseHeaderFooterPart(converted[kind], kind);
+                result[kind] = paragraphs;
+                lost = lost || dropped;
+            } finally {
+                this.location = { kind: 'document' };
+            }
         }
 
         const checked = new Set();
@@ -968,7 +1031,7 @@ class DocxParser {
             lost = await this.partHasText(path);
         }
 
-        if (lost) this.addFinding('headersFooters');
+        if (lost) this.addFinding('headersFooters', '', { kind: 'document' });
         return result;
     }
 
@@ -1064,7 +1127,7 @@ class DocxParser {
             for (const comment of commentsDoc.getElementsByTagNameNS(WORD_NS, 'comment')) {
                 const hasText = Array.from(comment.getElementsByTagNameNS(WORD_NS, 't'))
                     .some(t => (t.textContent || '').trim() !== '');
-                if (hasText) this.addFinding('comments');
+                if (hasText) this.addFinding('comments', '', { kind: 'document' });
             }
         } catch (error) {
             rethrowFatal(error);
@@ -1597,6 +1660,11 @@ class DocxParser {
         const tabs = this.readTabs(childElement(pPr, 'tabs'));
         if (tabs.length > 0) props.tabs = tabs;
 
+        // The outline level, which makes a paragraph a heading (see MAX_HEADING_OUTLINE_LEVEL)
+        const outlineLvl = childElement(pPr, 'outlineLvl');
+        const outlineLevel = outlineLvl ? parseInt(outlineLvl.getAttribute('w:val'), 10) : NaN;
+        if (Number.isInteger(outlineLevel)) props.outlineLevel = outlineLevel;
+
         return props;
     }
 
@@ -1739,7 +1807,68 @@ class DocxParser {
         const body = this.document.getElementsByTagNameNS(WORD_NS, 'body')[0];
         if (!body) return [];
 
-        return this.parseBlocks(body);
+        try {
+            return this.parseBodyBlocks(body);
+        } finally {
+            this.location = { kind: 'document' };
+        }
+    }
+
+    /**
+     * Parse the body's own paragraphs and tables, keeping this.location on the one being parsed,
+     * so its findings say where they are. Body paragraphs and tables are numbered from 1 in
+     * document order, empty paragraphs included; a cell is located by its table, its row and its
+     * w:tc position in that row. Text boxes and nested tables aren't counted: their findings take
+     * the location of the paragraph that anchors the text box, or of the outer table's cell. Each
+     * location names the last heading before it with an outline level, else the last petition
+     * heading before it (see headingKind).
+     * @param {Element} body - The w:body element
+     * @returns {Array<Object>} Parsed paragraphs and tables in document order (see parseBlocks)
+     */
+    parseBodyBlocks(body) {
+        const elements = [];
+        const headingOf = () => {
+            const { outline, petition } = this.body.headings;
+            const heading = outline !== null ? outline : petition;
+            return heading === null ? {} : { heading };
+        };
+
+        for (const child of this.contentChildren(body)) {
+            if (child.localName === 'p') {
+                this.location = { kind: 'paragraph', paragraph: ++this.body.paragraphs, ...headingOf() };
+                const paragraphs = this.parseParagraphBlocks(child);
+                elements.push(...paragraphs);
+                // A heading names the places after it, not its own
+                const kind = this.headingKind(child, paragraphs[0]);
+                if (kind) this.body.headings[kind] = shortExample(paragraphText(paragraphs[0]));
+            } else if (child.localName === 'tbl') {
+                const table = ++this.body.tables;
+                const heading = headingOf();
+                elements.push(this.parseTable(child, false, (row, cell) => {
+                    this.location = { kind: 'cell', table, row, cell, ...heading };
+                }));
+            }
+        }
+
+        return elements;
+    }
+
+    /**
+     * Whether a body paragraph is a heading, and of which kind: 'outline' when its outline level,
+     * from its own w:pPr else its paragraph style chain, is one of Word's heading levels (built-in
+     * Heading 1-9 styles set one), else 'petition' when it reads as a petition heading (see
+     * isPetitionHeading). A paragraph with no text is never one.
+     * @param {Element} para - The w:p element
+     * @param {Object} paragraph - Its parsed paragraph
+     * @returns {'outline'|'petition'|null}
+     */
+    headingKind(para, paragraph) {
+        if (paragraphText(paragraph).trim() === '') return null;
+        const pPr = childElement(para, 'pPr');
+        const own = this.readParagraphProperties(pPr).outlineLevel;
+        const level = own !== undefined ? own : this.paragraphStyle(pPr).paragraph.outlineLevel;
+        if (level >= 0 && level <= MAX_HEADING_OUTLINE_LEVEL) return 'outline';
+        return isPetitionHeading(paragraph) ? 'petition' : null;
     }
 
     /**
@@ -1783,19 +1912,29 @@ class DocxParser {
             const localName = child.localName;
 
             if (localName === 'p') {
-                const runs = this.paragraphRuns(child);
-                elements.push(this.parseParagraph(child, runs, inCell));
-                // Text boxes anchored in the paragraph follow it as their own blocks
-                for (const run of runs) {
-                    for (const textBox of this.findTextBoxes(run)) {
-                        elements.push(...this.parseBlocks(textBox, inCell));
-                    }
-                }
+                elements.push(...this.parseParagraphBlocks(child, inCell));
             } else if (localName === 'tbl') {
                 elements.push(this.parseTable(child, inCell));
             }
         }
 
+        return elements;
+    }
+
+    /**
+     * Parse a paragraph, then the blocks of the text boxes anchored in it, which follow it
+     * @param {Element} para - The w:p element
+     * @param {boolean} [inCell] - Whether the content ends up in a table cell
+     * @returns {Array<Object>} The parsed paragraph first, then the text boxes' paragraphs and tables
+     */
+    parseParagraphBlocks(para, inCell = false) {
+        const runs = this.paragraphRuns(para);
+        const elements = [this.parseParagraph(para, runs, inCell)];
+        for (const run of runs) {
+            for (const textBox of this.findTextBoxes(run)) {
+                elements.push(...this.parseBlocks(textBox, inCell));
+            }
+        }
         return elements;
     }
 
@@ -1906,6 +2045,9 @@ class DocxParser {
         const own = this.readParagraphProperties(pPr);
         Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, own);
         paragraph.lineSpacing = this.lineSpacing(paragraph);
+
+        // The outline level only locates findings (see headingKind); it isn’t written
+        delete paragraph.outlineLevel;
 
         // Tab stops: each layer adds to or clears the stops of the layers under it
         delete paragraph.tabs;
@@ -2021,11 +2163,14 @@ class DocxParser {
                         id: id,
                         content: notes[id] || `[Empty ${kind}]`
                     });
-                    // Footnotes always leave their page; endnotes only when Word places or numbers them per section
-                    if (kind === 'footnote') this.addFinding('notesMoved', shortExample(notes[id]));
-                    else if (this.endnotesMoved) this.addFinding('endnotesMoved', shortExample(notes[id]));
+                    // Located at the reference, and marked as being in the note's text
+                    const inNote = { ...this.location, note: { kind } };
+                    // Footnotes always leave their page; endnotes only when Word places or numbers
+                    // them per section, which is a setting of the whole document
+                    if (kind === 'footnote') this.addFinding('notesMoved', shortExample(notes[id]), inNote);
+                    else if (this.endnotesMoved) this.addFinding('endnotesMoved', shortExample(notes[id]), { kind: 'document' });
                     // The note's text is written once per reference, and its findings with it
-                    for (const [code, example] of this.noteFindings[kind][id] || []) this.addFinding(code, example);
+                    for (const [code, example] of this.noteFindings[kind][id] || []) this.addFinding(code, example, inNote);
                 }
             } else if (localName !== 'rPr') {
                 items.push(...this.parsePictures(child));
@@ -2213,9 +2358,11 @@ class DocxParser {
      * as a finding. A nested table is flattened to paragraphs instead, those cells included.
      * @param {Element} tbl - The table element
      * @param {boolean} [nested] - Whether the table is in a cell of another table
+     * @param {function(number, number): void} [enterCell] - Called with a cell's 1-based row and
+     *   w:tc position in that row before its content is parsed (see parseBodyBlocks)
      * @returns {Object} Parsed table
      */
-    parseTable(tbl, nested = false) {
+    parseTable(tbl, nested = false, enterCell = null) {
         const table = {
             type: 'table',
             rows: [],
@@ -2253,6 +2400,7 @@ class DocxParser {
         const merges = verticalMerges(table);
         table.rows.forEach((row, i) => row.cells.forEach((cell, j) => {
             const discarded = !nested && merges[i][j].joinsAbove;
+            if (enterCell) enterCell(i + 1, j + 1);
             if (discarded) this.inDiscardedCell = true;
             try {
                 cell.paragraphs = this.parseCellParagraphs(cellElements[i][j]);

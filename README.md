@@ -149,7 +149,7 @@ A paragraph's list comes from `w:numPr`, read from the paragraph style and its `
 - Not read: conditional table-style formatting (`w:tblStylePr`, e.g. first-row borders), cell spacing, conflict rules by border weight, and border style, width and color. How the UYAP editor draws `borderSpec` on cells outside a vertical merge has not been checked in the official editor yet.
 
 ### Conversion notes
-`DocxParser.parse()` also returns `findings`: one `{ code, count, examples }` entry per kind of content the conversion drops or simplifies, in a fixed order, and `[]` when nothing applies. `examples` holds up to 3 short location hints (at most about 40 characters each). The page shows them under the download button as "Bu dönüşümle ilgili notlar" / "Notes on this conversion", each with a sentence in Turkish or English saying what happened and what to change in Word. These constructs are reported:
+`DocxParser.parse()` also returns `findings`: one `{ code, count, examples, occurrences }` entry per kind of content the conversion drops or simplifies, in a fixed order, and `[]` when nothing applies. `examples` holds up to 3 short location hints (at most about 40 characters each). `occurrences` holds up to 5 `{ example, location }` entries, in the order they were found, each pair of example and location once (see [Locations](#locations)). The page shows them under the download button as "Bu dönüşümle ilgili notlar" / "Notes on this conversion", each with a sentence in Turkish or English saying what happened and what to change in Word. These constructs are reported:
 
 | Code | Reported when | Examples |
 | --- | --- | --- |
@@ -169,6 +169,20 @@ A paragraph's list comes from `w:numPr`, read from the paragraph style and its `
 `lineSpacing` and `tabStops` count the paragraphs that are written as paragraphs. A body paragraph that holds only manual page breaks becomes the page breaks alone, so it is not counted; in a table cell a page break is a line break, and such a paragraph is written and counted. Nothing is reported for the content of a cell that continues a vertical merge, which is written empty.
 
 The notes only report: the converted `.udf` is the same with or without them.
+
+#### Locations
+Each occurrence says where it is, so the user can find it in Word. `location` is one of:
+
+- `{ kind: 'paragraph', paragraph: 12, heading: 'AÇIKLAMALAR' }`: the 12th paragraph of the body. Body paragraphs are counted from 1 in document order, empty ones included, so the number matches the ¶ marks Word shows; content controls (`w:sdt`), custom XML and `mc:AlternateContent` are looked through. Paragraphs in table cells and text boxes are not counted: what a text box reports takes the place of the body paragraph that anchors it.
+- `{ kind: 'cell', table: 2, row: 3, cell: 1, heading: 'DELİLLER' }`: the 2nd table of the body, its 3rd row (`w:tr`) and the 1st cell (`w:tc`) of that row, all counted from 1. What a nested table reports takes the place of the outer table's cell.
+- `{ kind: 'header' }` or `{ kind: 'footer' }`: the converted header or footer.
+- `{ kind: 'document' }`: the whole document. `headersFooters`, `comments` and `endnotesMoved` have no single place and always use it.
+
+What a footnote's or endnote's text reports (`symbols`, `hiddenText`), and `notesMoved`, takes the place of the note's reference, plus `note: { kind: 'footnote' }` or `note: { kind: 'endnote' }`. A picture's `missingImage` or `unconvertedDrawing` takes the place of the paragraph or cell holding it, and keeps the nearest paragraph's text as its example.
+
+`heading` is the text (shortened like an example) of the last body paragraph before the place that is a heading, and is left out when there is none. A body paragraph with text is a heading when its outline level (`w:outlineLvl`, from the paragraph's own `w:pPr`, else its paragraph style chain, as the built-in Heading 1–9 styles set it) is 0 to 8. Without such a paragraph before the place, a short petition heading is used instead: a body paragraph of at most 80 characters whose text runs are all bold, or whose letters are all upper case (`AÇIKLAMALAR :`, `SONUÇ VE İSTEM`). Paragraphs in tables are never headings, and a heading's own findings name the heading before it. The bold and upper-case rule is a hint and may name a line that isn't a heading; the paragraph or cell number is exact.
+
+The page lists a note's places, one line each, under "Nerede:" / "Where:", e.g. `Paragraf 12 · “AÇIKLAMALAR” başlığı altında · “metin örneği”` / `Paragraph 12 · under “AÇIKLAMALAR” · “text excerpt”`, `Tablo 2, satır 3, hücre 1` / `Table 2, row 3, cell 1`, `Üst bilgi` / `Header`, `Dipnot · Paragraf 7` / `Footnote · Paragraph 7`. Document-wide places are not listed; a note with no other place lists its examples as before. A sentence under the notes title explains how paragraphs are counted. "Sayı: N" / "Count: N" still gives the total, which can be more than the places listed.
 
 ### Conversion Pipeline
 1. **Parse DOCX**: Extract and parse `word/document.xml`

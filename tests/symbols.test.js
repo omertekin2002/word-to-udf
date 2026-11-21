@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { convertBody, textOf } = require('./helpers');
+const { convertBody, textOf, findingSummaries } = require('./helpers');
 
 const p = (runs, pPr = '') => `<w:p>${pPr ? `<w:pPr>${pPr}</w:pPr>` : ''}${runs}</w:p>`;
 const r = (text, rPr = '') => `<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ''}<w:t xml:space="preserve">${text}</w:t></w:r>`;
@@ -23,7 +23,7 @@ const references = '<w:headerReference w:type="default" r:id="rIdHeader1"/><w:fo
 
 // The parser runs in its own realm; copy its values into this one so deepEqual can compare them
 const plain = value => JSON.parse(JSON.stringify(value));
-const findingsOf = parsed => plain(parsed.findings);
+const findingsOf = parsed => findingSummaries(parsed.findings);
 
 /** Text of each body paragraph (header, footer and table paragraphs excluded), from the CDATA pool */
 const bodyParagraphs = (doc, content) => [...doc.querySelectorAll('elements > paragraph')]

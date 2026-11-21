@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { convertBody, textOf } = require('./helpers');
+const { convertBody, textOf, findingSummaries } = require('./helpers');
 
 const p = (runs, pPr = '') => `<w:p>${pPr ? `<w:pPr>${pPr}</w:pPr>` : ''}${runs}</w:p>`;
 const r = (text, rPr = '') => `<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ''}<w:t xml:space="preserve">${text}</w:t></w:r>`;
@@ -22,7 +22,7 @@ const bodyParagraphs = (doc, content) => [...doc.querySelectorAll('elements > pa
 const cellParagraphs = (doc, content) => [...doc.querySelectorAll('cell paragraph')]
     .map(el => [...el.querySelectorAll('[startOffset]')].map(piece => textOf(piece, content)).join(''));
 
-const findingsOf = parsed => plain(parsed.findings);
+const findingsOf = parsed => findingSummaries(parsed.findings);
 
 // What the generator writes for a paragraph with no text
 const EMPTY_PARAGRAPH = '\u200B';

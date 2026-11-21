@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { buildDocx, convert, convertBody, textOf } = require('./helpers');
+const { buildDocx, convert, convertBody, textOf, findingSummaries } = require('./helpers');
 
 const p = (runs, pPr = '') => `<w:p>${pPr ? `<w:pPr>${pPr}</w:pPr>` : ''}${runs}</w:p>`;
 const r = (text, rPr = '') => `<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ''}<w:t xml:space="preserve">${text}</w:t></w:r>`;
@@ -81,7 +81,7 @@ test('a default header and footer are written as the first and last elements, ea
     assert.equal(footer.attributes.length, 0);
     assert.equal(header.attributes.length, 0);
 
-    assert.deepEqual(plain(parsed.findings), []);
+    assert.deepEqual(findingSummaries(parsed.findings), []);
     assert.equal(parsed.header.length, 1);
     assert.equal(parsed.footer.length, 1);
 });
@@ -179,7 +179,7 @@ test('fields are left out of the converted footer, their results too, and noted'
     assert.deepEqual(texts(footerEl, content), [FOOTER_TEXT + ' — Sayfa ', ' / ']);
     assert.ok(!/[79]/.test(content), 'no stale field result');
     assert.ok(!content.includes('PAGE'));
-    assert.deepEqual(plain(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
 });
 
 test('a field spanning paragraphs and nested fields are left out up to their matching end', async () => {
@@ -205,7 +205,7 @@ test('text sharing a run with a field boundary is kept; only the field is left o
     });
     assert.deepEqual(texts(topLevel(doc).at(-1), content), ['Önce ', ` ${FOOTER_TEXT}`]);
     assert.ok(!content.includes('4'));
-    assert.deepEqual(plain(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
 });
 
 test('a footer holding only a page number field writes no footer, and is noted', async () => {
@@ -216,7 +216,7 @@ test('a footer holding only a page number field writes no footer, and is noted',
     assert.deepEqual(topLevel(doc).map(el => el.localName), ['paragraph']);
     assert.ok(!xml.includes('<footer'));
     assert.equal(parsed.footer, null);
-    assert.deepEqual(plain(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
 });
 
 for (const [name, inner] of [['a picture', p(r(HEADER_TEXT) + picture)], ['a text box', p(r(HEADER_TEXT) + textBox)],
@@ -232,7 +232,7 @@ for (const [name, inner] of [['a picture', p(r(HEADER_TEXT) + picture)], ['a tex
         assert.equal(doc.querySelectorAll('image').length, 0);
         assert.ok(!content.includes('Kutu metni') && !content.includes('Tablo hücresi'));
         // The picture's relationship is the header part's, not the document's: no missingImage
-        assert.deepEqual(plain(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
+        assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
     });
 }
 
@@ -269,7 +269,7 @@ test('an empty or whitespace-only default header and footer write nothing and ch
     assert.equal(withEmpty.xml, without.xml);
     assert.equal(withEmpty.parsed.header, null);
     assert.equal(withEmpty.parsed.footer, null);
-    assert.deepEqual(plain(withEmpty.parsed.findings), []);
+    assert.deepEqual(findingSummaries(withEmpty.parsed.findings), []);
 });
 
 test('a document with only a header still gets a body paragraph, between header and footer', async () => {
@@ -292,7 +292,7 @@ test('the final section uses the previous section\'s default header when it has 
     });
     assert.equal(topLevel(doc)[0].localName, 'header');
     assert.ok(content.startsWith(HEADER_TEXT + 'Bölüm 1'));
-    assert.deepEqual(plain(parsed.findings), []);
+    assert.deepEqual(findingSummaries(parsed.findings), []);
 });
 
 test('the final section\'s own header wins over an earlier section\'s, which is noted', async () => {
@@ -303,7 +303,7 @@ test('the final section\'s own header wins over an earlier section\'s, which is 
     });
     assert.deepEqual(texts(topLevel(doc)[0], content), [HEADER_TEXT]);
     assert.ok(!content.includes('Eski bölüm başlığı'));
-    assert.deepEqual(plain(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
 });
 
 test('first-page and even-page headers are not converted; the default one is', async () => {
@@ -313,7 +313,7 @@ test('first-page and even-page headers are not converted; the default one is', a
     });
     assert.deepEqual(topLevel(doc).map(el => el.localName), ['header', 'paragraph']);
     assert.equal(content, HEADER_TEXT + 'Gövde');
-    assert.deepEqual(plain(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
 });
 
 test('a missing or malformed header part writes nothing', async () => {

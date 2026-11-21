@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const JSZip = require('jszip');
 const { JSDOM } = require('jsdom');
-const { convert, assertOffsetsInBounds, textOf } = require('./helpers');
+const { convert, assertOffsetsInBounds, textOf, findingSummaries } = require('./helpers');
 const { petitions } = require('./fixtures/petitions');
 
 const [dava, itiraz, tablo, cevap] = petitions;
@@ -390,6 +390,6 @@ test('dava dilekçesi: the EKLER check boxes become ☑ and □ at the start of 
         assert.equal(textOf(pieces[0], content), line[0], `${JSON.stringify(line)}: the box is the paragraph's first text`);
         assert.equal(Number(pieces[0].getAttribute('startOffset')), at);
     }
-    const symbols = JSON.parse(JSON.stringify(parsed.findings)).find(finding => finding.code === 'symbols');
+    const symbols = findingSummaries(parsed.findings).find(finding => finding.code === 'symbols');
     assert.deepEqual(symbols, { code: 'symbols', count: 3, examples: ['Wingdings F0FE → ☑', 'Wingdings F0A8 → □'] });
 });
