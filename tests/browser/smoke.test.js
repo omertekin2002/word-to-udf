@@ -475,3 +475,91 @@ test('on a 390px-wide screen a long source line wraps without scrolling the page
     }
     assertClean(problems);
 });
+
+/**
+ * Press Tab until `id` has focus, checking after every press that focus is on a real control,
+ * never <body>. Returns the ids passed on the way.
+ */
+async function tabTo(page, id, maxPresses = 40) {
+    const passed = [];
+    for (let i = 0; i < maxPresses; i++) {
+        await page.keyboard.press('Tab');
+        const focused = await page.evaluate(() => {
+            const el = document.activeElement;
+            return { body: !el || el === document.body, id: el?.id || el?.localName };
+        });
+        assert.equal(focused.body, false, `Tab ${i + 1} left focus on <body> (after ${passed.join(', ')})`);
+        passed.push(focused.id);
+        if (focused.id === id) return passed;
+    }
+    assert.fail(`Tab never reached #${id}: ${passed.join(', ')}`);
+}
+
+const activeId = page => page.evaluate(() =>
+    (document.activeElement === document.body ? '<body>' : document.activeElement?.id || document.activeElement?.localName));
+
+test('the loop works by keyboard alone: focus follows each step and the result is announced', async t => {
+    const { page, problems } = await openPage(t);
+
+    // From the top of the page to the file input; the upload zone shows the dotted focus ring
+    await tabTo(page, 'fileInput');
+    assert.equal(await page.locator('#uploadZone').evaluate(el => getComputedStyle(el).outlineStyle), 'dotted');
+
+    // The native dialog can't be driven, so the file is set on the focused input
+    await chooseFile(page, 'dilekce.docx', await plainDocx());
+    assert.equal(await activeId(page), 'convertBtn');
+    assert.equal(await page.locator('#uploadZone').isVisible(), false);
+
+    // Record the result status's text when the result is revealed, and every text it holds after
+    await page.evaluate(() => {
+        const section = document.getElementById('downloadSection');
+        const status = document.getElementById('resultStatus');
+        window.__statusAtReveal = null;
+        window.__statusTexts = [];
+        new MutationObserver(() => {
+            if (!section.classList.contains('hidden') && window.__statusAtReveal === null) window.__statusAtReveal = status.textContent;
+        }).observe(section, { attributes: true, attributeFilter: ['class'] });
+        new MutationObserver(() => window.__statusTexts.push(status.textContent))
+            .observe(status, { childList: true, characterData: true, subtree: true });
+    });
+    await page.keyboard.press('Enter');
+    await page.locator('#downloadSection').waitFor({ state: 'visible' });
+    const complete = await page.evaluate(() => t('result.announce'));
+    await page.waitForFunction(text => document.getElementById('resultStatus').textContent === text, complete);
+    assert.equal(await activeId(page), 'downloadBtn');
+    assert.equal(await page.evaluate(() => window.__statusAtReveal), '', 'revealed empty');
+    assert.deepEqual(await page.evaluate(() => window.__statusTexts), [complete], 'filled once');
+    assert.equal(await page.locator('#resultStatus').getAttribute('role'), 'status');
+
+    // Tab reaches KAYNAĞI DEĞİŞTİR, then "convert another"
+    await tabTo(page, 'replaceSource', 3);
+    await tabTo(page, 'convertAnother', 1);
+    await page.keyboard.press('Enter');
+    await page.locator('#uploadZone').waitFor({ state: 'visible' });
+    assert.equal(await activeId(page), 'fileInput');
+    assert.equal(await page.locator('#resultStatus').textContent(), '');
+    assertClean(problems);
+});
+
+test('with notes, the announcement counts them in TR and EN, and the notes are a labelled region', async t => {
+    const { page, problems } = await openPage(t);
+    await chooseFile(page, 'dava-dilekcesi.docx', await petitions[0].build());
+    await page.keyboard.press('Enter');
+    await page.locator('#downloadSection').waitFor({ state: 'visible' });
+    assert.equal(await activeId(page), 'downloadBtn');
+
+    const count = await page.locator('#conversionNotesList > li.conversion-note').count();
+    assert.ok(count >= 1, 'the petition has conversion notes');
+    const expected = await page.evaluate(n => (n === 1 ? t('result.announceOneNote') : t('result.announceNotes', { count: n })), count);
+    assert.match(expected, new RegExp(`^Dönüştürme tamamlandı\\. Bu dönüşümle ilgili ${count} not var\\.$`));
+    await page.waitForFunction(text => document.getElementById('resultStatus').textContent === text, expected);
+
+    await page.locator('[data-set-lang="en"]').click();
+    assert.equal(await page.locator('#resultStatus').textContent(),
+        count === 1 ? 'Conversion complete. 1 note on this conversion.' : `Conversion complete. ${count} notes on this conversion.`);
+
+    const region = page.getByRole('region', { name: await page.evaluate(() => t('notes.title')) });
+    assert.equal(await region.count(), 1);
+    assert.equal(await region.getAttribute('id'), 'conversionNotes');
+    assertClean(problems);
+});

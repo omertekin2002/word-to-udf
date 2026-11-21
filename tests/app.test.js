@@ -352,6 +352,223 @@ test('a failed conversion shows the alert and leaves focus on the convert button
     assert.equal(document.activeElement, document.getElementById('convertBtn'));
 });
 
+/** Choose `file` through the file input, the way the browse dialog does */
+function chooseFile(window, document, file) {
+    const input = document.getElementById('fileInput');
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] });
+    input.dispatchEvent(new window.Event('change'));
+}
+
+/** Drop `file` onto the upload zone */
+function dropFile(window, document, file) {
+    const drop = new window.Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, 'dataTransfer', { value: { files: [file] } });
+    document.getElementById('uploadZone').dispatchEvent(drop);
+}
+
+test('choosing a valid file, by the file input or by a drop, moves focus to the convert button', async () => {
+    const { window, document } = await loadPage({ app: true });
+    const input = document.getElementById('fileInput');
+    input.focus();
+    chooseFile(window, document, fileOf('dilekce.docx', await docxWith('Dilekçe metni')));
+    assert.ok(!visible(document.getElementById('uploadZone')));
+    assert.equal(document.activeElement, document.getElementById('convertBtn'));
+
+    // A file that isn't a .docx keeps the upload zone, and focus with it
+    document.getElementById('removeFile').click();
+    assert.equal(document.activeElement, input);
+    chooseFile(window, document, fileOf('notlar.txt', 'metin'));
+    assert.ok(visible(document.getElementById('uploadZone')));
+    assert.equal(document.activeElement, input);
+
+    // A drop moves no focus of its own; the page was on <body>
+    input.blur();
+    assert.equal(document.activeElement, document.body);
+    dropFile(window, document, fileOf('dilekce.docx', await docxWith('Dilekçe metni')));
+    assert.ok(visible(document.getElementById('fileInfo')));
+    assert.equal(document.activeElement, document.getElementById('convertBtn'));
+});
+
+test('KALDIR / REMOVE, before or during a conversion, moves focus to the file input; during one, focus is on it', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document } = page;
+    const parser = stubParser(page);
+    const input = document.getElementById('fileInput');
+    const remove = document.getElementById('removeFile');
+
+    // Before a conversion
+    chooseFile(window, document, fileOf('a.docx', await docxWith('Dilekçe A')));
+    remove.focus();
+    remove.click();
+    assert.equal(document.activeElement, input);
+
+    // During one: the hidden convert button hands focus to KALDIR, which cancels the run
+    chooseFile(window, document, fileOf('a.docx', await docxWith('Dilekçe A')));
+    assert.equal(document.activeElement, document.getElementById('convertBtn'));
+    const conversion = window.app.handleConvert();
+    assert.equal(document.activeElement, remove);
+    const call = await parser.called(1);
+    assert.equal(document.activeElement, remove, 'still there while the parse runs');
+    remove.click();
+    assert.equal(document.activeElement, input);
+
+    call.resolve(await parser.real(call.file));
+    await conversion;
+    await settle();
+    assert.equal(document.activeElement, input, 'the dropped result moves nothing');
+});
+
+test('"convert another" moves focus to the file input', async () => {
+    const { window, document } = await loadPage({ app: true });
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe metni')));
+    await window.app.handleConvert();
+    const another = document.getElementById('convertAnother');
+    another.focus();
+    another.click();
+    assert.equal(document.activeElement, document.getElementById('fileInput'));
+});
+
+test('focus moved out of the converter during a conversion stays there when it succeeds or fails', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document } = page;
+    const parser = stubParser(page);
+    const toggle = document.querySelector('[data-set-lang="en"]');
+
+    window.app.processFile(fileOf('a.docx', await docxWith('Dilekçe A')));
+    let conversion = window.app.handleConvert();
+    let call = await parser.called(1);
+    toggle.focus();
+    call.resolve(await parser.real(call.file));
+    await conversion;
+    assert.ok(visible(document.getElementById('downloadSection')));
+    assert.equal(document.activeElement, toggle, 'success leaves it on the toggle');
+
+    // Moved there before the run (a replacement started with focus elsewhere) counts too
+    window.app.handleConvertAnother();
+    window.app.processFile(fileOf('b.docx', await docxWith('Dilekçe B')));
+    toggle.focus();
+    conversion = window.app.handleConvert();
+    assert.equal(document.activeElement, toggle);
+    call = await parser.called(2);
+    call.reject(new Error('bozuk'));
+    await conversion;
+    assert.ok(visible(document.getElementById('errorMessage')));
+    assert.equal(document.activeElement, toggle, 'failure leaves it on the toggle');
+});
+
+/**
+ * Convert with the stub parser returning `findings`, recording the result status's text at the
+ * moment the result section is revealed
+ */
+async function convertWithFindings(page, findings) {
+    const { window, document } = page;
+    const status = document.getElementById('resultStatus');
+    const section = document.getElementById('downloadSection');
+    const parser = stubParser(page);
+    const atReveal = [];
+    const observer = new window.MutationObserver(() => {
+        if (visible(section) && atReveal.length === 0) atReveal.push(status.textContent);
+    });
+    observer.observe(section, { attributes: true, attributeFilter: ['class'] });
+
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe metni')));
+    const conversion = window.app.handleConvert();
+    const call = await parser.called(1);
+    call.resolve(await parsedWith(parser, call, findings));
+    await conversion;
+    observer.disconnect();
+    return { status, atReveal };
+}
+
+const FINDINGS = [
+    { code: 'comments', count: 2, examples: [] },
+    { code: 'hiddenText', count: 1, examples: ['gizli'] },
+    { code: 'headersFooters', count: 1, examples: [] }
+];
+
+test('success is announced once: the result status is revealed empty and filled a frame later, with the number of notes', async () => {
+    const page = await loadPage({ app: true });
+    const { document, strings } = page;
+    const { status, atReveal } = await convertWithFindings(page, FINDINGS);
+
+    assert.equal(status.getAttribute('role'), 'status');
+    assert.ok(document.getElementById('downloadSection').contains(status));
+    assert.deepEqual(atReveal, [''], 'empty when revealed');
+    assert.equal(status.textContent, 'Dönüştürme tamamlandı. Bu dönüşümle ilgili 3 not var.');
+    assert.equal(document.querySelectorAll('#conversionNotesList > li').length, 3);
+    assert.equal(document.activeElement, document.getElementById('downloadBtn'));
+
+    // The language toggle rewrites the sentence in one step, never emptying the region
+    const seen = [];
+    const observer = new page.window.MutationObserver(() => seen.push(status.textContent));
+    observer.observe(status, { childList: true, characterData: true, subtree: true });
+    document.querySelector('[data-set-lang="en"]').click();
+    await settle();
+    observer.disconnect();
+    assert.equal(status.textContent, 'Conversion complete. 3 notes on this conversion.');
+    assert.deepEqual(seen, [strings.en['result.announceNotes'].replace('{count}', '3')]);
+
+    // The visible success line is not read a second time
+    assert.equal(document.querySelector('#downloadSection .success-text').getAttribute('aria-hidden'), 'true');
+
+    // Dropping the result empties the status, so the next result is announced again
+    document.getElementById('convertAnother').click();
+    assert.equal(status.textContent, '');
+    assert.equal(status.dataset.i18n, undefined);
+});
+
+test('the announcement names one note in the singular, and a clean conversion says just that it is complete', async () => {
+    const one = await loadPage({ url: `${PAGE_URL}?lang=en`, app: true });
+    const single = await convertWithFindings(one, [FINDINGS[0]]);
+    assert.deepEqual(single.atReveal, ['']);
+    assert.equal(single.status.textContent, 'Conversion complete. 1 note on this conversion.');
+    one.document.querySelector('[data-set-lang="tr"]').click();
+    assert.equal(single.status.textContent, 'Dönüştürme tamamlandı. Bu dönüşümle ilgili 1 not var.');
+
+    const clean = await loadPage({ app: true });
+    const none = await convertWithFindings(clean, []);
+    assert.deepEqual(none.atReveal, ['']);
+    assert.equal(none.status.textContent, 'Dönüştürme tamamlandı.');
+    clean.document.querySelector('[data-set-lang="en"]').click();
+    assert.equal(none.status.textContent, 'Conversion complete.');
+});
+
+test('a result dropped in the frame before its announcement is never announced', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document } = page;
+    const parser = stubParser(page);
+    const status = document.getElementById('resultStatus');
+    const section = document.getElementById('downloadSection');
+    const observer = new window.MutationObserver(() => {
+        if (visible(section)) window.app.handleConvertAnother();
+    });
+    observer.observe(section, { attributes: true, attributeFilter: ['class'] });
+
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe metni')));
+    const conversion = window.app.handleConvert();
+    const call = await parser.called(1);
+    call.resolve(await parsedWith(parser, call, FINDINGS));
+    await conversion;
+    observer.disconnect();
+    assert.equal(status.textContent, '');
+    assertEmptyUploadState(document);
+});
+
+test('the notes are a labelled region, in no live region, and the loop\'s buttons are type="button"', async () => {
+    const { document, strings } = await loadPage({ app: true });
+    const notes = document.getElementById('conversionNotes');
+    assert.equal(notes.getAttribute('role'), 'region');
+    assert.equal(notes.getAttribute('aria-labelledby'), 'conversionNotesTitle');
+    assert.equal(document.getElementById('conversionNotesTitle').textContent, strings.tr['notes.title']);
+    for (let el = notes; el; el = el.parentElement) {
+        assert.ok(!['status', 'alert', 'log'].includes(el.getAttribute('role')), `${el.id || el.localName} has no live role`);
+        assert.ok(!el.hasAttribute('aria-live'), `${el.id || el.localName} has no aria-live`);
+    }
+    for (const id of ['removeFile', 'convertBtn', 'downloadBtn', 'convertAnother', 'replaceSource']) {
+        assert.equal(document.getElementById(id).getAttribute('type'), 'button', id);
+    }
+});
+
 // Source lines of the result, as shown
 const sourceLines = document => ['resultSourceFile', 'resultConverted', 'resultOutput']
     .map(id => document.getElementById(id).textContent);

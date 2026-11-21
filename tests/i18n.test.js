@@ -365,7 +365,7 @@ test('a conversion with findings lists them under the download button, translate
     assert.ok(visible(document.getElementById('downloadSection')));
     const notes = document.getElementById('conversionNotes');
     assert.ok(visible(notes));
-    assert.equal(notes.getAttribute('role'), 'status');
+    assert.equal(notes.getAttribute('role'), 'region');
     assert.ok(notes.contains(document.getElementById('conversionNotesTitle')));
 
     // The header and comments are document-wide, so they list no place
