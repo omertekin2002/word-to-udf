@@ -33,8 +33,7 @@ const { DOMParser } = new JSDOM('').window;
  * - <footer pageNumber-*>: the pageNumber-spec format isn't documented well enough to
  *   produce (see the README's "Headers and footers").
  * - <paragraph family size description> (only in the <header> example), SecListTypeLevel1,
- *   <tab family size>, <row border height>, <cell borderStyle borderWidth borderColor>:
- *   not written, the editor's defaults apply.
+ *   <tab family size>, <row border height>: not written, the editor's defaults apply.
  *
  * Left out of the allowlist on purpose: the hypothetical ("Varsayımsal") <data> section
  * and <field> element, whose structure the documentation itself only guesses at. The XML
@@ -88,10 +87,7 @@ const DOCUMENTED = {
     // "Tablo", "Satır" and "Hücre"
     table: { written: ['tableName', 'columnCount', 'columnSpans', 'border'] },
     row: { written: ['rowName', 'rowType'], unused: ['border', 'height'] },
-    cell: {
-        written: ['colspan', 'align', 'fillColor', 'border', 'borderSpec'],
-        unused: ['borderStyle', 'borderWidth', 'borderColor']
-    },
+    cell: { written: ['colspan', 'align', 'fillColor', 'border', 'borderSpec', 'borderStyle', 'borderWidth', 'borderColor'] },
     // "Boşluk"
     space: { notWritten: true, written: [], unused: ['startOffset', 'length'] },
     // "Sayfa Sonu"
@@ -189,6 +185,16 @@ const FEATURES = [
         body: `<w:tbl><w:tblPr>${borders('tblBorders', 'nil', ...ALL_EDGES)}</w:tblPr>${grid(2)}` +
             `<w:tr>${cell('Top and left', borders('tcBorders', 'single', 'top', 'left'))}${cell('Unbordered')}</w:tr>` +
             '</w:tbl>' + p(r('After the table'))
+    },
+    {
+        // A double red frame and dotted grey grid lines: every cell writes its heaviest line as
+        // borderStyle, borderWidth and borderColor
+        name: 'table with styled border lines',
+        body: '<w:tbl><w:tblPr><w:tblBorders>' +
+            ['top', 'left', 'bottom', 'right'].map(edge => `<w:${edge} w:val="double" w:sz="6" w:space="0" w:color="FF0000"/>`).join('') +
+            ['insideH', 'insideV'].map(edge => `<w:${edge} w:val="dotted" w:sz="4" w:space="0" w:color="808080"/>`).join('') +
+            `</w:tblBorders></w:tblPr>${grid(2)}` +
+            `<w:tr>${cell('Frame')}${cell('Lines')}</w:tr></w:tbl>` + p(r('After the table'))
     },
     {
         // No grid (equal column widths), no edges (border="borderNone" on the table), and a cell

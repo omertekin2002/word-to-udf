@@ -508,6 +508,14 @@ class UdfGenerator {
                 } else if (border === 'borderCell' && spec !== BORDER_ALL) {
                     cellAttrs += ` borderSpec="${spec}"`;
                 }
+                // The heaviest line the cell draws, unless it is Word's default line
+                if (border === 'borderCell' && spec !== 0) {
+                    const { line } = cellBorderChoice(cell, merge);
+                    if (line && !isDefaultBorderLine(line)) {
+                        const { borderStyle, borderWidth, borderColor } = cellBorderLine(line);
+                        cellAttrs += ` borderStyle="${borderStyle}" borderWidth="${borderWidth}" borderColor="${borderColor}"`;
+                    }
+                }
 
                 cellElements.push(`<cell${cellAttrs}>${cellContent}</cell>`);
             }
@@ -658,15 +666,6 @@ ${this.elements.join('\n')}
      * @returns {number} RGB integer
      */
     hexToRgbInt(hex) {
-        if (!hex) return -16777216; // Black
-
-        hex = hex.replace('#', '');
-        const r = parseInt(hex.substring(0, 2), 16);
-        const g = parseInt(hex.substring(2, 4), 16);
-        const b = parseInt(hex.substring(4, 6), 16);
-
-        // Java-style signed RGB (0xFFRRGGBB as signed 32-bit)
-        const rgb = (255 << 24) | (r << 16) | (g << 8) | b;
-        return rgb | 0; // Convert to signed 32-bit
+        return hexToRgbInt(hex); // The shared helper in utils.js
     }
 }
