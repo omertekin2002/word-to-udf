@@ -10,6 +10,7 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const http = require('node:http');
+const os = require('node:os');
 const path = require('node:path');
 const JSZip = require('jszip');
 const { JSDOM } = require('jsdom');
@@ -364,5 +365,102 @@ test('removing the file mid-conversion cancels it, and the next file converts un
     const xml = await (await JSZip.loadAsync(await fs.readFile(await download.path()))).file('content.xml').async('string');
     assert.match(xml, /Dilekçe B/);
     assert.doesNotMatch(xml, /Dilekçe A/);
+    assertClean(problems);
+});
+
+/**
+ * Write a file to a temporary folder with a given last-modified time, so the browser reads
+ * it from disk as it would a real revision. The folder is removed when the test ends.
+ */
+async function revisionOnDisk(t, name, buffer, modified) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'word-to-udf-'));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const file = path.join(dir, name);
+    await fs.writeFile(file, buffer);
+    await fs.utimes(file, modified, modified);
+    return file;
+}
+
+test('"replace source" with a same-name revision clears the old result and shows only the new one', async t => {
+    const { page, problems } = await openPage(t);
+    // Midday UTC, so both are 21 November in any time zone within ±11 hours
+    const first = new Date(Date.UTC(2026, 10, 21, 12, 3, 9));
+    const second = new Date(Date.UTC(2026, 10, 21, 12, 41, 37));
+    const modifiedText = date => page.evaluate(ms => formatParam({ dateTime: ms }), date.getTime());
+
+    const oldPath = await revisionOnDisk(t, 'dilekce.docx',
+        await buildDocx('<w:p><w:r><w:t>Dilekçe eski sürüm</w:t></w:r></w:p><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>gizli</w:t></w:r></w:p>'), first);
+    await page.locator('#fileInput').setInputFiles(oldPath);
+    await page.locator('#convertBtn').click();
+    await page.locator('#downloadSection').waitFor({ state: 'visible' });
+    await page.locator('#conversionNotes').waitFor({ state: 'visible' });
+    const source = page.locator('#resultSourceFile');
+    assert.ok((await source.textContent()).includes(await modifiedText(first)));
+    assert.equal(await page.locator('#resultOutput').textContent(), 'İndirilecek: dilekce.udf');
+
+    // Hold the next parse, so the page can be checked before the new result arrives
+    await page.evaluate(() => {
+        window.heldParses = [];
+        const createParser = window.app.createParser.bind(window.app);
+        window.app.createParser = () => {
+            const parser = createParser();
+            const parse = parser.parse.bind(parser);
+            parser.parse = file => new Promise(resolve => window.heldParses.push(() => resolve(parse(file))));
+            return parser;
+        };
+    });
+
+    // The replace button opens a real file chooser; the keyboard reaches it
+    const newPath = await revisionOnDisk(t, 'dilekce.docx',
+        await buildDocx('<w:p><w:r><w:t>Dilekçe yeni sürüm</w:t></w:r></w:p>'), second);
+    await page.locator('#replaceSource').focus();
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
+    assert.equal(chooser.isMultiple(), false);
+    await chooser.setFiles(newPath);
+
+    await page.waitForFunction(() => window.heldParses.length === 1);
+    assert.equal(await page.locator('#downloadSection').isVisible(), false);
+    assert.equal(await page.locator('#conversionNotes').isVisible(), false);
+    assert.equal(await source.textContent(), '');
+    assert.equal(await page.evaluate(() => window.app.convertedBlob), null);
+    assert.equal(await page.locator('#progressContainer').isVisible(), true);
+
+    await page.evaluate(() => window.heldParses[0]());
+    await page.locator('#downloadSection').waitFor({ state: 'visible' });
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'downloadBtn');
+    assert.equal(await page.locator('#conversionNotes').isVisible(), false);
+    const shown = await source.textContent();
+    assert.ok(shown.includes(await modifiedText(second)), shown);
+    assert.ok(!shown.includes(await modifiedText(first)), shown);
+
+    const [download] = await Promise.all([page.waitForEvent('download'), page.locator('#downloadBtn').click()]);
+    assert.equal(download.suggestedFilename(), 'dilekce.udf');
+    const xml = await (await JSZip.loadAsync(await fs.readFile(await download.path()))).file('content.xml').async('string');
+    assert.match(xml, /Dilekçe yeni sürüm/);
+    assert.doesNotMatch(xml, /eski sürüm/);
+
+    // EN writes the lines again, times included
+    await page.locator('[data-set-lang="en"]').click();
+    assert.match(await source.textContent(), /^Source: dilekce\.docx \(.+, modified 11\/21\/2026, /);
+    assert.equal(await page.locator('#replaceSource').textContent(), 'REPLACE SOURCE');
+    assertClean(problems);
+});
+
+test('on a 390px-wide screen a long source line wraps without scrolling the page sideways', async t => {
+    const { page, problems } = await openPage(t);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const name = 'Asliye-Hukuk-Mahkemesi-Dava-Dilekcesi-Davaci-Vekili-Son-Hali-Revize-3.docx';
+    await convertFile(page, name, await plainDocx());
+    assert.ok((await page.locator('#resultSourceFile').textContent()).includes(name));
+    assert.deepEqual(await page.evaluate(() => ({
+        scroll: document.documentElement.scrollWidth,
+        width: document.documentElement.clientWidth
+    })).then(({ scroll, width }) => scroll <= width), true, 'no horizontal scroll');
+    const box = await page.locator('#resultSource').boundingBox();
+    assert.ok(box.x >= 0 && box.x + box.width <= 390, `source block fits: ${JSON.stringify(box)}`);
+    for (const id of ['replaceSource', 'convertAnother']) {
+        const button = await page.locator(`#${id}`).boundingBox();
+        assert.ok(button.x >= 0 && button.x + button.width <= 390, `${id} fits`);
+    }
     assertClean(problems);
 });

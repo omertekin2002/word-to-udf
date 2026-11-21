@@ -2,7 +2,9 @@
  * Interface language: Turkish by default, with English available
  * Strings live in the dictionaries below; markup marks them with data-i18n attributes:
  *   data-i18n="key"            - sets the element's text
- *   data-i18n-params='{"n":1}' - values for the {placeholders} of its data-i18n string (JSON)
+ *   data-i18n-params='{"n":1}' - values for the {placeholders} of its data-i18n string (JSON);
+ *                                a value {"dateTime": ms} or {"time": ms} is a moment, written
+ *                                in the active language each time the string is shown
  *   data-i18n-html="key"       - sets the element's markup (dictionary strings only, never user input)
  *   data-i18n-attr="attr:key"  - sets an attribute; separate several pairs with ";"
  */
@@ -45,6 +47,12 @@ const I18N_STRINGS = {
         'download.success': 'Dönüştürme tamamlandı.',
         'download.button': 'UDF DOSYASINI İNDİR',
         'download.another': 'Başka bir dosya dönüştür',
+        'download.replace': 'KAYNAĞI DEĞİŞTİR',
+        'download.replaceInputLabel': 'Yeni kaynak Word belgesini seçin',
+        'result.source': 'Kaynak: {name} ({size}, değiştirilme {modified})',
+        'result.sourceUndated': 'Kaynak: {name} ({size})',
+        'result.converted': 'Dönüştürüldü: {time}',
+        'result.output': 'İndirilecek: {output}',
         'notes.title': 'Bu dönüşümle ilgili notlar',
         'notes.count': 'Sayı: {count}',
         'notes.examples': 'Örnekler:',
@@ -119,6 +127,12 @@ const I18N_STRINGS = {
         'download.success': 'Conversion complete.',
         'download.button': 'DOWNLOAD UDF FILE',
         'download.another': 'Convert another file',
+        'download.replace': 'REPLACE SOURCE',
+        'download.replaceInputLabel': 'Choose the new source Word document',
+        'result.source': 'Source: {name} ({size}, modified {modified})',
+        'result.sourceUndated': 'Source: {name} ({size})',
+        'result.converted': 'Converted: {time}',
+        'result.output': 'Downloads as: {output}',
         'notes.title': 'Notes on this conversion',
         'notes.count': 'Count: {count}',
         'notes.examples': 'Examples:',
@@ -161,6 +175,12 @@ const I18N_STRINGS = {
     }
 };
 
+// How moment params ({"dateTime": ms} or {"time": ms}) are written, in the active language
+const I18N_MOMENT_FORMATS = {
+    dateTime: { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' },
+    time: { hour: '2-digit', minute: '2-digit', second: '2-digit' }
+};
+
 let currentLang = I18N_DEFAULT_LANG;
 
 function isSupportedLang(lang) {
@@ -176,7 +196,22 @@ function isSupportedLang(lang) {
 function t(key, params = {}) {
     const dictionary = I18N_STRINGS[currentLang];
     const text = Object.prototype.hasOwnProperty.call(dictionary, key) ? dictionary[key] : key;
-    return text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match));
+    return text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? formatParam(params[name]) : match));
+}
+
+/**
+ * Write a placeholder value: a moment ({dateTime: ms} or {time: ms}) with Intl.DateTimeFormat
+ * in the active language, anything else as a string
+ * @param {*} value
+ * @returns {string}
+ */
+function formatParam(value) {
+    if (value !== null && typeof value === 'object') {
+        for (const [style, options] of Object.entries(I18N_MOMENT_FORMATS)) {
+            if (typeof value[style] === 'number') return new Intl.DateTimeFormat(currentLang, options).format(value[style]);
+        }
+    }
+    return String(value);
 }
 
 /**

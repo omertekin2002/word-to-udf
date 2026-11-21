@@ -45,7 +45,8 @@ async function loadPage({ url = PAGE_URL, storage = {}, app = false } = {}) {
 }
 
 // The app reads files through JSZip, which takes a Buffer in Node; give it the File fields app.js uses
-const fileOf = (name, bytes) => Object.assign(Buffer.from(bytes), { name, size: bytes.length });
+const fileOf = (name, bytes, lastModified) =>
+    Object.assign(Buffer.from(bytes), { name, size: bytes.length }, lastModified === undefined ? {} : { lastModified });
 
 const visible = el => !el.classList.contains('hidden');
 

@@ -351,3 +351,309 @@ test('a failed conversion shows the alert and leaves focus on the convert button
     assert.ok(visible(document.getElementById('convertBtn')));
     assert.equal(document.activeElement, document.getElementById('convertBtn'));
 });
+
+// Source lines of the result, as shown
+const sourceLines = document => ['resultSourceFile', 'resultConverted', 'resultOutput']
+    .map(id => document.getElementById(id).textContent);
+
+const MOMENT_OPTIONS = {
+    dateTime: { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' },
+    time: { hour: '2-digit', minute: '2-digit', second: '2-digit' }
+};
+const moment = (style, ms, lang) => new Intl.DateTimeFormat(lang, MOMENT_OPTIONS[style]).format(ms);
+
+// Midday UTC, so these are 21 November in any time zone within ±11 hours
+const REVISION_1 = Date.UTC(2026, 10, 21, 12, 3, 9);
+const REVISION_2 = Date.UTC(2026, 10, 21, 12, 41, 37);
+const CONVERTED_AT = Date.UTC(2026, 10, 21, 12, 45, 2);
+
+/** A stub-parser result for `call`: the real parse of its file, with the given findings */
+async function parsedWith(parser, call, findings) {
+    return { ...(await parser.real(call.file)), findings };
+}
+
+/** Choose `file` in the replace picker, the way the browser does after the button opens it */
+function pickReplacement(window, document, file) {
+    const input = document.getElementById('replaceInput');
+    Object.defineProperty(input, 'files', { configurable: true, value: file ? [file] : [] });
+    input.dispatchEvent(new window.Event('change'));
+}
+
+test('the result names its source file, size, last-modified time, conversion time and .udf name, in TR and then EN', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document, strings, run } = page;
+    run(`Date.now = () => ${CONVERTED_AT}`);
+    const docx = await docxWith('Dilekçe metni');
+
+    window.app.processFile(fileOf('dilekce.docx', docx, REVISION_1));
+    await window.app.handleConvert();
+    assert.ok(visible(document.getElementById('downloadSection')));
+
+    const expected = lang => [
+        strings[lang]['result.source']
+            .replace('{name}', 'dilekce.docx')
+            .replace('{size}', run(`formatFileSize(${docx.length})`))
+            .replace('{modified}', moment('dateTime', REVISION_1, lang)),
+        strings[lang]['result.converted'].replace('{time}', moment('time', CONVERTED_AT, lang)),
+        strings[lang]['result.output'].replace('{output}', 'dilekce.udf')
+    ];
+    assert.deepEqual(sourceLines(document), expected('tr'));
+    assert.match(sourceLines(document)[0], /^Kaynak: dilekce\.docx \(.+ KB, değiştirilme 21\.11\.2026 \d\d:\d\d:09\)$/);
+    assert.equal(sourceLines(document)[2], 'İndirilecek: dilekce.udf');
+
+    // The language toggle writes the lines, and their times, again while the result is shown
+    document.querySelector('[data-set-lang="en"]').click();
+    assert.deepEqual(sourceLines(document), expected('en'));
+    assert.match(sourceLines(document)[0], /^Source: dilekce\.docx \(.+ KB, modified 11\/21\/2026, \d\d:\d\d:09 [AP]M\)$/);
+    document.querySelector('[data-set-lang="tr"]').click();
+    assert.deepEqual(sourceLines(document), expected('tr'));
+
+    // Plain text read with the result, in no live region of its own
+    const source = document.getElementById('resultSource');
+    assert.ok(document.getElementById('downloadSection').contains(source));
+    for (let el = source; el; el = el.parentElement) {
+        assert.ok(!el.hasAttribute('role') && !el.hasAttribute('aria-live'), `${el.id || el.localName} is no live region`);
+    }
+});
+
+test('the values come from the file the run converted, not the file selected when the result shows', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document } = page;
+    const parser = stubParser(page);
+
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe metni'), REVISION_1));
+    const conversion = window.app.handleConvert();
+    const call = await parser.called(1);
+    // Mid-run, the app's selected file is swapped without a new run (no UI does this; it checks the capture)
+    window.app.selectedFile = fileOf('baska.docx', await docxWith('Başka'), REVISION_2);
+    call.resolve(await parser.real(call.file));
+    await conversion;
+    assert.match(sourceLines(document)[0], /dilekce\.docx/);
+    assert.match(sourceLines(document)[0], new RegExp(moment('dateTime', REVISION_1, 'tr').replace(/\./g, '\\.')));
+    assert.equal(sourceLines(document)[2], 'İndirilecek: dilekce.udf');
+});
+
+test('a file without a last-modified time gets a source line without one', async () => {
+    const { window, document, strings } = await loadPage({ app: true });
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe metni')));
+    await window.app.handleConvert();
+    assert.match(sourceLines(document)[0], /^Kaynak: dilekce\.docx \([^,]+\)$/);
+    assert.equal(document.getElementById('resultSourceFile').dataset.i18n, 'result.sourceUndated');
+    assert.ok(strings.en['result.sourceUndated']);
+});
+
+test('a file name with markup in it is shown as literal text', async () => {
+    const { window, document } = await loadPage({ app: true });
+    const name = '<img src=x onerror=alert(1)>.docx';
+    window.app.processFile(fileOf(name, await docxWith('Dilekçe metni'), REVISION_1));
+    await window.app.handleConvert();
+
+    assert.ok(visible(document.getElementById('downloadSection')));
+    assert.ok(sourceLines(document)[0].includes(name));
+    assert.equal(sourceLines(document)[2], 'İndirilecek: <img src=x onerror=alert(1)>.udf');
+    assert.equal(document.querySelectorAll('#downloadSection img').length, 0);
+    document.querySelector('[data-set-lang="en"]').click();
+    assert.ok(sourceLines(document)[0].includes(name));
+    assert.equal(document.querySelectorAll('#downloadSection img').length, 0);
+});
+
+test('"replace source" with a same-name revision drops the old download and notes at once, then shows only the new one', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document } = page;
+    const parser = stubParser(page);
+    const downloads = captureDownloads(page);
+
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe eski sürüm'), REVISION_1));
+    const first = window.app.handleConvert();
+    const call1 = await parser.called(1);
+    call1.resolve(await parsedWith(parser, call1, [{ code: 'comments', count: 2, examples: [] }]));
+    await first;
+    assert.ok(visible(document.getElementById('conversionNotes')));
+    const oldSource = sourceLines(document)[0];
+
+    // The revision: same name, new text, later last-modified time, chosen through the picker
+    pickReplacement(window, document, fileOf('dilekce.docx', await docxWith('Dilekçe yeni sürüm'), REVISION_2));
+
+    // Before the new conversion resolves, nothing of the old result is left
+    const call2 = await parser.called(2);
+    assert.equal(call2.file.lastModified, REVISION_2);
+    assert.ok(!visible(document.getElementById('downloadSection')), 'old download gone');
+    assert.equal(window.app.convertedBlob, null);
+    assert.ok(!visible(document.getElementById('conversionNotes')), 'old notes gone');
+    assert.equal(document.querySelectorAll('#conversionNotesList > li').length, 0);
+    assert.deepEqual(sourceLines(document), ['', '', ''], 'old source line gone');
+    assert.ok(visible(document.getElementById('progressContainer')), 'the new conversion runs with its progress');
+    assert.ok(!visible(document.getElementById('convertBtn')));
+    assert.equal(document.getElementById('fileName').textContent, 'dilekce.docx');
+
+    call2.resolve(await parsedWith(parser, call2, []));
+    await settle();
+    assert.ok(visible(document.getElementById('downloadSection')));
+    assert.equal(document.activeElement, document.getElementById('downloadBtn'));
+    assert.ok(!visible(document.getElementById('conversionNotes')), 'the new result has no notes');
+    assert.notEqual(sourceLines(document)[0], oldSource);
+    assert.ok(sourceLines(document)[0].includes(moment('dateTime', REVISION_2, 'tr')));
+    assert.ok(!sourceLines(document)[0].includes(moment('dateTime', REVISION_1, 'tr')));
+
+    document.getElementById('downloadBtn').click();
+    assert.equal(downloads.length, 1);
+    assert.equal(downloads[0].filename, 'dilekce.udf');
+    const xml = await udfText(downloads[0].blob);
+    assert.match(xml, /Dilekçe yeni sürüm/);
+    assert.doesNotMatch(xml, /eski sürüm/);
+    assert.deepEqual(page.errors, []);
+});
+
+test('the replace button empties its picker before opening it, so the same file name counts as a new choice', async () => {
+    const { window, document } = await loadPage({ app: true });
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe metni'), REVISION_1));
+    await window.app.handleConvert();
+
+    const input = document.getElementById('replaceInput');
+    let opened = 0;
+    input.click = () => { opened++; };
+    let cleared = false;
+    Object.defineProperty(input, 'value', { configurable: true, get: () => '', set: value => { cleared = value === ''; } });
+    document.getElementById('replaceSource').click();
+    assert.equal(opened, 1);
+    assert.ok(cleared);
+    assert.equal(input.getAttribute('type'), 'file');
+    assert.equal(input.getAttribute('accept'), '.docx');
+});
+
+test('replacing with a file whose conversion fails shows the error and none of the old result', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document, strings } = page;
+
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe metni'), REVISION_1));
+    await window.app.handleConvert();
+    assert.ok(visible(document.getElementById('downloadSection')));
+
+    // word/document.xml cut off mid-run
+    const zip = await JSZip.loadAsync(await docxWith('Dilekçe metni'));
+    zip.file('word/document.xml', '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Dilek');
+    const broken = await zip.generateAsync({ type: 'nodebuffer' });
+    await window.app.replaceSource(fileOf('dilekce.docx', broken, REVISION_2));
+
+    assert.ok(visible(document.getElementById('errorMessage')));
+    assert.equal(document.getElementById('errorText').textContent, strings.tr['error.corrupt']);
+    assert.ok(!visible(document.getElementById('downloadSection')));
+    assert.equal(window.app.convertedBlob, null);
+    assert.deepEqual(sourceLines(document), ['', '', '']);
+    assert.ok(visible(document.getElementById('convertBtn')));
+    assert.equal(document.getElementById('convertBtn').disabled, false);
+    assert.ok(visible(document.getElementById('fileInfo')), 'the new file stays selected');
+    assert.equal(window.app.selectedFile.lastModified, REVISION_2);
+    assert.equal(document.activeElement, document.getElementById('convertBtn'));
+});
+
+test('cancelling the replace picker leaves the result alone; a non-.docx replacement keeps it and says why', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document, strings } = page;
+    const downloads = captureDownloads(page);
+
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe metni'), REVISION_1));
+    await window.app.handleConvert();
+    const blob = window.app.convertedBlob;
+    const lines = sourceLines(document);
+
+    // The picker opens and is closed with no file: no change event, or one with no files
+    document.getElementById('replaceSource').click();
+    pickReplacement(window, document, null);
+    assert.ok(visible(document.getElementById('downloadSection')));
+    assert.equal(window.app.convertedBlob, blob);
+    assert.deepEqual(sourceLines(document), lines);
+    assert.ok(!visible(document.getElementById('errorMessage')));
+
+    pickReplacement(window, document, fileOf('notlar.txt', 'düz metin', REVISION_2));
+    await settle();
+    assert.ok(visible(document.getElementById('errorMessage')));
+    assert.equal(document.getElementById('errorText').textContent, strings.tr['error.invalidType']);
+    assert.ok(visible(document.getElementById('downloadSection')));
+    assert.equal(window.app.convertedBlob, blob);
+    assert.deepEqual(sourceLines(document), lines);
+    document.getElementById('downloadBtn').click();
+    assert.equal(downloads[0].filename, 'dilekce.udf');
+    assert.match(await udfText(downloads[0].blob), /Dilekçe metni/);
+});
+
+test('replacing again while a replacement still converts drops the earlier one', async () => {
+    const page = await loadPage({ app: true });
+    const { window, document } = page;
+    const parser = stubParser(page);
+    const downloads = captureDownloads(page);
+
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe A'), REVISION_1));
+    const first = window.app.handleConvert();
+    const callA = await parser.called(1);
+    callA.resolve(await parser.real(callA.file));
+    await first;
+
+    window.app.replaceSource(fileOf('dilekce.docx', await docxWith('Dilekçe B'), REVISION_2));
+    const callB = await parser.called(2);
+    window.app.replaceSource(fileOf('dilekce.docx', await docxWith('Dilekçe C'), CONVERTED_AT));
+    const callC = await parser.called(3);
+
+    // B finishes first: it is stale and shows nothing
+    callB.resolve(await parsedWith(parser, callB, [{ code: 'comments', count: 1, examples: [] }]));
+    await settle();
+    assert.ok(!visible(document.getElementById('downloadSection')));
+    assert.equal(window.app.convertedBlob, null);
+    assert.deepEqual(sourceLines(document), ['', '', '']);
+    assert.ok(visible(document.getElementById('progressContainer')), 'C still converts');
+
+    callC.resolve(await parsedWith(parser, callC, []));
+    await settle();
+    assert.ok(visible(document.getElementById('downloadSection')));
+    assert.ok(!visible(document.getElementById('conversionNotes')), 'B\'s notes never show');
+    assert.ok(sourceLines(document)[0].includes(moment('dateTime', CONVERTED_AT, 'tr')));
+    document.getElementById('downloadBtn').click();
+    assert.equal(downloads.length, 1);
+    const xml = await udfText(downloads[0].blob);
+    assert.match(xml, /Dilekçe C/);
+    assert.doesNotMatch(xml, /Dilekçe [AB]/);
+
+    // A failing stale run reports nothing either
+    window.app.replaceSource(fileOf('dilekce.docx', await docxWith('Dilekçe D'), REVISION_1));
+    const callD = await parser.called(4);
+    window.app.replaceSource(fileOf('dilekce.docx', await docxWith('Dilekçe E'), REVISION_2));
+    const callE = await parser.called(5);
+    callD.reject(Object.assign(new Error('Invalid or corrupted DOCX file'), { code: 'corrupt' }));
+    await settle();
+    assert.ok(!visible(document.getElementById('errorMessage')));
+    callE.resolve(await parser.real(callE.file));
+    await settle();
+    assert.ok(visible(document.getElementById('downloadSection')));
+    assert.deepEqual(page.errors, []);
+});
+
+test('"convert another" clears the source line along with the rest of the result', async () => {
+    const { window, document } = await loadPage({ app: true });
+    window.app.processFile(fileOf('dilekce.docx', await docxWith('Dilekçe metni'), REVISION_1));
+    await window.app.handleConvert();
+    assert.notEqual(sourceLines(document)[0], '');
+
+    document.getElementById('convertAnother').click();
+    assertEmptyUploadState(document);
+    assert.deepEqual(sourceLines(document), ['', '', '']);
+    for (const id of ['resultSourceFile', 'resultConverted', 'resultOutput']) {
+        assert.equal(document.getElementById(id).dataset.i18n, undefined, `${id} is not re-filled on a language change`);
+    }
+    document.querySelector('[data-set-lang="en"]').click();
+    assert.deepEqual(sourceLines(document), ['', '', '']);
+});
+
+test('the replace button is a keyboard-reachable button named in TR and EN', async () => {
+    const { document, strings } = await loadPage({ app: true });
+    const button = document.getElementById('replaceSource');
+    assert.equal(button.localName, 'button');
+    assert.equal(button.getAttribute('type'), 'button');
+    assert.ok(!button.hasAttribute('tabindex') && !button.disabled && !button.hasAttribute('aria-hidden'));
+    assert.ok(document.getElementById('downloadSection').contains(button));
+    assert.ok(strings.tr['download.replace'] && strings.en['download.replace']);
+    assert.notEqual(strings.tr['download.replace'], strings.en['download.replace']);
+    assert.equal(button.textContent, strings.tr['download.replace']);
+    document.querySelector('[data-set-lang="en"]').click();
+    assert.equal(button.textContent, strings.en['download.replace']);
+    assert.equal(document.getElementById('replaceInput').getAttribute('aria-label'), strings.en['download.replaceInputLabel']);
+});

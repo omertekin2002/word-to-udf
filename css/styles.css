@@ -607,6 +607,38 @@ p {
   font-size: 14px;
 }
 
+/* The source file and revision the result belongs to: small print under the success line */
+.result-source {
+  align-self: stretch;
+  font: 12px/1.4 var(--font-ui);
+  overflow-wrap: anywhere;
+}
+
+.result-source p {
+  margin: 0;
+}
+
+.result-source-file {
+  font-weight: 700;
+}
+
+.result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.replace-source {
+  background: var(--white);
+  color: var(--ink);
+}
+
+.replace-source:hover {
+  background: var(--yellow);
+}
+
 /* What the conversion dropped or simplified: a boxed memo under the download button */
 .conversion-notes {
   align-self: stretch;

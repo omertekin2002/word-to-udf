@@ -19,7 +19,7 @@ function assertPageIn(document, dictionary, lang) {
     assert.equal(document.documentElement.lang, lang);
     assert.equal(document.title, dictionary['meta.title']);
     for (const el of document.querySelectorAll('[data-i18n]')) {
-        assert.equal(el.textContent, fill(dictionary[el.dataset.i18n], el), `[data-i18n="${el.dataset.i18n}"]`);
+        assert.equal(el.textContent, fill(dictionary[el.dataset.i18n], el, lang), `[data-i18n="${el.dataset.i18n}"]`);
     }
     for (const el of document.querySelectorAll('[data-i18n-html]')) {
         assert.equal(el.innerHTML, dictionary[el.dataset.i18nHtml], `[data-i18n-html="${el.dataset.i18nHtml}"]`);
@@ -31,10 +31,25 @@ function assertPageIn(document, dictionary, lang) {
     }
 }
 
-// A dictionary string with an element's data-i18n-params filled in
-function fill(text, el) {
+// How a moment param is written: {dateTime: ms} as date and time, {time: ms} as the time of day
+const MOMENT_FORMATS = {
+    dateTime: { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' },
+    time: { hour: '2-digit', minute: '2-digit', second: '2-digit' }
+};
+
+function formatValue(value, lang) {
+    if (value !== null && typeof value === 'object') {
+        for (const [style, options] of Object.entries(MOMENT_FORMATS)) {
+            if (typeof value[style] === 'number') return new Intl.DateTimeFormat(lang, options).format(value[style]);
+        }
+    }
+    return String(value);
+}
+
+// A dictionary string with an element's data-i18n-params filled in, in `lang`
+function fill(text, el, lang) {
     const params = el.dataset.i18nParams ? JSON.parse(el.dataset.i18nParams) : {};
-    return text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match));
+    return text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? formatValue(params[name], lang) : match));
 }
 
 function attrPairs(el) {
@@ -72,7 +87,7 @@ test('every key used by index.html and app.js exists in both dictionaries', asyn
         }
     }
     const appSource = fs.readFileSync(path.join(ROOT, 'js/app.js'), 'utf8');
-    const appKeys = [...appSource.matchAll(/'((?:error|progress|notes)\.\w+)'/g)].map(match => match[1]);
+    const appKeys = [...appSource.matchAll(/'((?:error|progress|notes|result)\.\w+)'/g)].map(match => match[1]);
     assert.ok(appKeys.length >= 13, 'app.js message keys found');
     for (const key of appKeys) keys.add(key);
 
@@ -170,6 +185,22 @@ test('t() falls back to the key and fills {placeholders}', async () => {
     assert.equal(run("t('no.such.key')"), 'no.such.key');
     run("I18N_STRINGS.tr['test.greeting'] = 'Merhaba {name}'");
     assert.equal(run("t('test.greeting', { name: 'Dünya' })"), 'Merhaba Dünya');
+});
+
+test('t() writes {dateTime: ms} and {time: ms} params in the active language', async () => {
+    const { run } = await loadPage();
+    // Midday UTC, so the date is 21 November in any time zone within ±11 hours
+    const moment = Date.UTC(2026, 10, 21, 12, 3, 9);
+    run("I18N_STRINGS.tr['test.when'] = I18N_STRINGS.en['test.when'] = '{at}|{clock}'");
+    const shown = () => run(`t('test.when', { at: { dateTime: ${moment} }, clock: { time: ${moment} } })`);
+    for (const lang of ['tr', 'en']) {
+        run(`applyLanguage('${lang}')`);
+        assert.equal(shown(), formatValue({ dateTime: moment }, lang) + '|' + formatValue({ time: moment }, lang), lang);
+    }
+    run("applyLanguage('tr')");
+    assert.match(shown(), /^21\.11\.2026 \d\d:\d\d:09\|\d\d:\d\d:09$/);
+    run("applyLanguage('en')");
+    assert.match(shown(), /^11\/21\/2026, \d\d:\d\d:09 [AP]M\|\d\d:\d\d:09 [AP]M$/);
 });
 
 test('a non-.docx file gets a translated error, which follows a language change', async () => {
