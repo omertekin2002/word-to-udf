@@ -235,7 +235,7 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 // Codes of the conversion findings parse() reports, in the order it lists them: content the
 // conversion drops or simplifies, so the user can fix it in Word before filing
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
-    'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols'];
+    'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders'];
 
 // How many location hints a finding keeps, and how long each may be
 const MAX_FINDING_EXAMPLES = 3;
@@ -2407,16 +2407,34 @@ class DocxParser {
             } finally {
                 if (discarded) this.inDiscardedCell = false;
             }
+            // A nested table is flattened to paragraphs, so its borders aren't written
+            if (!nested && table.border !== 'borderNone') this.checkCellBorders(cell, merges[i][j], discarded);
         }));
 
         return table;
     }
 
     /**
-     * Read which edges a w:tblBorders or w:tcBorders sets, and whether each draws a line
+     * Record a tableBorders finding for a cell whose border attributes can't describe its lines:
+     * a line style with no documented equivalent was approximated as solid, or its edges draw
+     * different lines and the heaviest was written for the whole cell (see cellBorderChoice)
+     * @param {Object} cell - Parsed cell, with its borders and paragraphs
+     * @param {{joinsAbove: boolean, joinsBelow: boolean}} merge - The cell's vertical merge
+     * @param {boolean} discarded - Whether the generator writes the cell empty (it continues a merge)
+     */
+    checkCellBorders(cell, merge, discarded) {
+        const { approximated, mixed } = cellBorderChoice(cell, merge);
+        if (!approximated && !mixed) return;
+        const text = discarded ? '' : cell.paragraphs.map(paragraphText).find(t => t.trim() !== '');
+        this.addFinding('tableBorders', shortExample(text || ''));
+    }
+
+    /**
+     * Read which edges a w:tblBorders or w:tcBorders sets, and the line each draws
      * @param {Element|null} borders - The w:tblBorders or w:tcBorders element
      * @param {Object<string,Array<string>>} edgeNames - Edge -> the element names that set it
-     * @returns {Object<string,boolean>} Only the edges it sets (an element without w:val sets none)
+     * @returns {Object<string,Object|null>} Only the edges it sets (an element without w:val sets
+     *   none): null for no line (none, nil), else the line (see readBorderLine)
      */
     readBorders(borders, edgeNames) {
         const set = {};
@@ -2425,7 +2443,7 @@ class DocxParser {
             for (const name of names) {
                 const border = childElement(borders, name);
                 if (border && border.hasAttribute('w:val')) {
-                    set[edge] = !NO_BORDER_VALUES.includes(border.getAttribute('w:val'));
+                    set[edge] = this.readBorderLine(border);
                 }
             }
         }
@@ -2433,16 +2451,35 @@ class DocxParser {
     }
 
     /**
-     * Which of a table's six edges draw a line: its table style (w:tblStyle, else the default
+     * The line a border element (w:top, w:insideH...) draws
+     * @param {Element} border - A border element with a w:val
+     * @returns {{val: string, size: number, color: string}|null} null when w:val draws no line.
+     *   size: w:sz in eighths of a point, 4 (½ pt) when missing or not a positive whole number.
+     *   color: w:color as RRGGBB (upper case), or 'auto' when it is auto, missing or not a
+     *   hex color. w:themeColor is not resolved.
+     */
+    readBorderLine(border) {
+        const val = border.getAttribute('w:val');
+        if (NO_BORDER_VALUES.includes(val)) return null;
+        const sz = (border.getAttribute('w:sz') || '').trim();
+        const size = /^\d+$/.test(sz) && Number(sz) > 0 ? Number(sz) : DEFAULT_BORDER_LINE.size;
+        const color = (border.getAttribute('w:color') || '').trim();
+        return { val, size, color: /^[0-9A-Fa-f]{6}$/.test(color) ? color.toUpperCase() : 'auto' };
+    }
+
+    /**
+     * The line each of a table's six edges draws: its table style (w:tblStyle, else the default
      * table style) with its w:basedOn chain, then the table's own w:tblBorders. The nearest
      * layer that sets an edge wins, and an edge nothing sets has no line. Without a styles
-     * part the style layer is unknown, so every edge has a line unless the table removes it.
+     * part the style layer is unknown, so every edge has Word's default line (single, ½ pt,
+     * auto) unless the table sets it.
      * The style's cell borders (its w:tcPr/w:tcBorders, through the same chain) are returned
      * apart: they apply to every cell, over the table's edges. Conditional formatting
      * (w:tblStylePr) is not read.
      * @param {Element|null} tblPr - The table's w:tblPr
-     * @returns {{top: boolean, left: boolean, bottom: boolean, right: boolean, insideH: boolean,
-     *   insideV: boolean, cells: Object<string,boolean>}} cells: only the cell edges the style sets
+     * @returns {{top: ?Object, left: ?Object, bottom: ?Object, right: ?Object, insideH: ?Object,
+     *   insideV: ?Object, cells: Object<string,?Object>}} Each edge's line (see readBorderLine), or
+     *   null for none. cells: only the cell edges the style sets
      */
     tableBorders(tblPr) {
         let base;
@@ -2465,26 +2502,29 @@ class DocxParser {
             }
             ({ borders: base, cells } = resolved.get(styleId));
         } else {
-            base = Object.fromEntries(Object.keys(TABLE_EDGES).map(edge => [edge, true]));
+            base = Object.fromEntries(Object.keys(TABLE_EDGES).map(edge => [edge, DEFAULT_BORDER_LINE]));
         }
 
         const own = this.readBorders(tblPr && childElement(tblPr, 'tblBorders'), TABLE_EDGES);
         const edges = Object.assign({}, base, own);
-        for (const edge of Object.keys(TABLE_EDGES)) edges[edge] = Boolean(edges[edge]);
+        for (const edge of Object.keys(TABLE_EDGES)) edges[edge] = edges[edge] || null;
         edges.cells = cells;
         return edges;
     }
 
     /**
-     * Give each cell of a parsed table the four edges that draw a line, as cell.borders.
+     * Give each cell of a parsed table the line each of its four edges draws, as cell.borders
+     * (null for no line).
      * A cell's outer edges come from the table's top, bottom, left and right edges and the
      * edges between cells from insideH and insideV; an edge the table style's cell borders
-     * set overrides that, and an edge the cell's own w:tcBorders sets overrides both. An edge two cells share then has a line when either cell's edge does,
-     * and is set on both. Cells above and below each other share an edge where their grid
-     * columns (w:gridSpan included) overlap; such a line is set on a cell only when it runs
-     * along that cell's whole edge, so it doesn't reach past a narrower cell along a wider one.
+     * set overrides that, and an edge the cell's own w:tcBorders sets overrides both. An edge two
+     * cells share then has a line when either cell's edge does, and the heavier of their lines
+     * is set on both (see heavierBorderLine). Cells above and below each other share an edge
+     * where their grid columns (w:gridSpan included) overlap; such a line is set on a cell only
+     * when it runs along that cell's whole edge, so it doesn't reach past a narrower cell along
+     * a wider one.
      * @param {Object} table - Parsed table, its rows' cells without borders yet
-     * @param {Object<string,boolean>} edges - The table's edges (see tableBorders)
+     * @param {Object<string,?Object>} edges - The table's edges (see tableBorders)
      * @param {Array<Array<Element>>} cellElements - The w:tc element of each cell, row by row
      */
     resolveCellBorders(table, edges, cellElements) {
@@ -2513,16 +2553,19 @@ class DocxParser {
         const own = rows.map(row => row.cells.map(cell => ({ ...cell.borders })));
         rows.forEach((row, i) => row.cells.forEach((cell, j) => {
             const right = row.cells[j + 1];
-            if (right && (own[i][j].right || own[i][j + 1].left)) {
-                cell.borders.right = right.borders.left = true;
+            const shared = right && heavierBorderLine(own[i][j].right, own[i][j + 1].left);
+            if (shared) {
+                cell.borders.right = right.borders.left = shared;
             }
             if (i + 1 === rows.length) return;
             const [start, end] = columns[i][j];
             rows[i + 1].cells.forEach((below, k) => {
                 const [belowStart, belowEnd] = columns[i + 1][k];
-                if (belowStart < end && start < belowEnd && (own[i][j].bottom || own[i + 1][k].top)) {
-                    if (belowStart <= start && end <= belowEnd) cell.borders.bottom = true;
-                    if (start <= belowStart && belowEnd <= end) below.borders.top = true;
+                const shared = belowStart < end && start < belowEnd &&
+                    heavierBorderLine(own[i][j].bottom, own[i + 1][k].top);
+                if (shared) {
+                    if (belowStart <= start && end <= belowEnd) cell.borders.bottom = shared;
+                    if (start <= belowStart && belowEnd <= end) below.borders.top = shared;
                 }
             });
         }));

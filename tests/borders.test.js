@@ -255,8 +255,10 @@ test('parsed cells carry their resolved edges', async () => {
     const parsed = await new DocxParser().parse(await buildDocx(
         table([[['A1'], ['B1']]], style('Rules')), { styles: STYLES }));
     const [a1, b1] = parsed.elements[0].rows[0].cells;
-    assert.deepEqual({ ...a1.borders }, { top: true, right: false, bottom: true, left: false });
-    assert.deepEqual({ ...b1.borders }, { top: true, right: false, bottom: true, left: false });
+    // Each drawn edge is its line (see tests/borders-style.test.js), each other edge null
+    const line = { val: 'single', size: 4, color: 'auto' };
+    assert.deepEqual(JSON.parse(JSON.stringify(a1.borders)), { top: line, right: null, bottom: line, left: null });
+    assert.deepEqual(JSON.parse(JSON.stringify(b1.borders)), { top: line, right: null, bottom: line, left: null });
 });
 
 test('a reused parser does not carry table styles into a document without a styles part', async () => {

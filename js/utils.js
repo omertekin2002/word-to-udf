@@ -218,6 +218,134 @@ function verticalMerges(table) {
 }
 
 /**
+ * Convert a hex color to a Java-style signed ARGB integer with full alpha
+ * @param {string} hex - Hex color (e.g. "#FF0000" or "FF0000")
+ * @returns {number} Signed 32-bit ARGB; black (-16777216) for an empty value
+ */
+function hexToRgbInt(hex) {
+  if (!hex) return -16777216; // Black
+
+  hex = hex.replace('#', '');
+  const r = parseInt(hex.substring(0, 2), 16);
+  const g = parseInt(hex.substring(2, 4), 16);
+  const b = parseInt(hex.substring(4, 6), 16);
+
+  // Java-style signed RGB (0xFFRRGGBB as signed 32-bit)
+  const rgb = (255 << 24) | (r << 16) | (g << 8) | b;
+  return rgb | 0; // Convert to signed 32-bit
+}
+
+// <cell borderStyle> for the Word border styles (ST_Border w:val) that have a documented
+// equivalent. Any other line style (triple, thinThick*, wave, 3-D and art borders...) is
+// approximated as solid.
+const CELL_BORDER_STYLES = new Map([
+  ['single', 'borderStyle-solid'],
+  ['thick', 'borderStyle-solid'],
+  ['dotted', 'borderStyle-dotted'],
+  ['dashed', 'borderStyle-dashed'],
+  ['dashSmallGap', 'borderStyle-dashed'],
+  ['dotDash', 'borderStyle-dashed'],
+  ['dotDotDash', 'borderStyle-dashed'],
+  ['dashDotStroked', 'borderStyle-dashed'],
+  ['double', 'borderStyle-double']
+]);
+
+// How heavy each <cell borderStyle> is, for lines of equal width: double > solid > dashed > dotted
+const CELL_BORDER_STYLE_WEIGHTS = new Map([
+  ['borderStyle-dotted', 1],
+  ['borderStyle-dashed', 2],
+  ['borderStyle-solid', 3],
+  ['borderStyle-double', 4]
+]);
+
+// Word's default table line: single, ½ pt (4 eighths of a point), automatic (black) color
+const DEFAULT_BORDER_LINE = Object.freeze({ val: 'single', size: 4, color: 'auto' });
+
+/**
+ * The <cell> border attributes of a parsed border line (see DocxParser.readBorders)
+ * @param {{val: string, size: number, color: string}} line - Word's w:val, w:sz in eighths
+ *   of a point, and w:color ('auto' or RRGGBB)
+ * @returns {{borderStyle: string, borderWidth: string, borderColor: number, documented: boolean}}
+ *   documented is false when the style has no documented equivalent and was approximated as solid.
+ *   borderWidth is in points, with at least one decimal place ("0.5", "1.0", "2.25").
+ */
+function cellBorderLine(line) {
+  const style = CELL_BORDER_STYLES.get(line.val);
+  const points = line.size / 8;
+  return {
+    borderStyle: style || 'borderStyle-solid',
+    borderWidth: Number.isInteger(points * 10) ? points.toFixed(1) : String(points),
+    borderColor: line.color === 'auto' ? -16777216 : hexToRgbInt(line.color),
+    documented: Boolean(style)
+  };
+}
+
+/**
+ * Whether a parsed border line is Word's default line (single, ½ pt, automatic or black), which
+ * the generator leaves to the editor's own default line: no <cell> border attributes
+ * @param {{val: string, size: number, color: string}} line
+ * @returns {boolean}
+ */
+function isDefaultBorderLine(line) {
+  return line.val === DEFAULT_BORDER_LINE.val && line.size === DEFAULT_BORDER_LINE.size &&
+    cellBorderLine(line).borderColor === cellBorderLine(DEFAULT_BORDER_LINE).borderColor;
+}
+
+/**
+ * The heavier of two border lines: the wider one, else the one whose <cell borderStyle> is
+ * heavier (double > solid > dashed > dotted), else the first. A simplified form of Word's
+ * conflict rule for a shared edge. Either may be null or undefined (no line).
+ * @param {Object|null|undefined} a - A parsed border line
+ * @param {Object|null|undefined} b - A parsed border line
+ * @returns {Object|null} The heavier line, or null when neither draws one
+ */
+function heavierBorderLine(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  if (a.size !== b.size) return a.size > b.size ? a : b;
+  const weight = line => CELL_BORDER_STYLE_WEIGHTS.get(cellBorderLine(line).borderStyle);
+  return weight(b) > weight(a) ? b : a;
+}
+
+/**
+ * The border lines a parsed cell draws in the UDF: its resolved edges (cell.borders), less the
+ * edges a vertical merge joins it by
+ * @param {Object} cell - Parsed cell; a cell without parsed edges draws none here
+ * @param {{joinsAbove: boolean, joinsBelow: boolean}} merge - The cell's vertical merge (see verticalMerges)
+ * @returns {{top: Object|null, right: Object|null, bottom: Object|null, left: Object|null}}
+ */
+function drawnCellEdges(cell, merge) {
+  const edges = cell.borders || {};
+  return {
+    top: merge.joinsAbove ? null : edges.top || null,
+    right: edges.right || null,
+    bottom: merge.joinsBelow ? null : edges.bottom || null,
+    left: edges.left || null
+  };
+}
+
+/**
+ * The one line a cell's border attributes describe, since the format has one style, width and
+ * color per cell: the heaviest of the lines it draws (see heavierBorderLine). The parser and the
+ * generator both use this, so the tableBorders note matches what is written.
+ * @param {Object} cell - Parsed cell
+ * @param {{joinsAbove: boolean, joinsBelow: boolean}} merge - The cell's vertical merge
+ * @returns {{line: Object|null, approximated: boolean, mixed: boolean}} line: null when the cell
+ *   draws no edge. approximated: a drawn line's style has no documented equivalent. mixed: the
+ *   drawn lines differ in written style, width or color, so one was chosen for the whole cell.
+ */
+function cellBorderChoice(cell, merge) {
+  const lines = Object.values(drawnCellEdges(cell, merge)).filter(Boolean);
+  const written = lines.map(cellBorderLine);
+  const key = attrs => `${attrs.borderStyle} ${attrs.borderWidth} ${attrs.borderColor}`;
+  return {
+    line: lines.reduce(heavierBorderLine, null),
+    approximated: written.some(attrs => !attrs.documented),
+    mixed: new Set(written.map(key)).size > 1
+  };
+}
+
+/**
  * Whether the generator writes a parsed paragraph as a paragraph. In the document body it
  * doesn't when the paragraph holds manual page breaks and nothing that becomes text: only
  * the page breaks are written, and the paragraph's own formatting goes nowhere. A picture
