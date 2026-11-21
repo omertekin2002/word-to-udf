@@ -230,6 +230,20 @@ const FEATURES = [
         }
     },
     {
+        name: 'formatted two-paragraph footnote and endnote',
+        body: p(r('Cited') + footnoteRef(1) +
+            '<w:r><w:rPr><w:rStyle w:val="EndnoteReference"/></w:rPr><w:endnoteReference w:id="1"/></w:r>'),
+        options: {
+            footnotes: {
+                1: p('<w:r><w:footnoteRef/></w:r>' + r(' ') + r('Court', '<w:b/>') + r(' case', '<w:i/><w:u w:val="single"/>') +
+                    '<w:r><w:br/></w:r>' + r('E. 2020/1', '<w:strike/><w:color w:val="1F4E79"/>') + '<w:r><w:tab/></w:r>' +
+                    r('K. 2021/2', '<w:highlight w:val="yellow"/><w:rFonts w:ascii="Arial"/><w:sz w:val="18"/>')) +
+                    p(r('Second paragraph', '<w:shd w:val="clear" w:fill="FFF2CC"/>')) + p('')
+            },
+            endnotes: { 1: p('<w:r><w:endnoteRef/></w:r>' + r('Endnote', '<w:b/>')) + p(r('more', '<w:i/>')) }
+        }
+    },
+    {
         name: 'header and footer',
         body: p(r('Body')),
         options: {

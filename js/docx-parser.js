@@ -65,6 +65,12 @@ const SEPARATOR_NOTE_TYPES = ['separator', 'continuationSeparator', 'continuatio
 // Run children of a footnote or endnote that stand for whitespace: a tab or a line break
 const NOTE_WHITESPACE_ELEMENTS = ['tab', 'ptab', 'br', 'cr'];
 
+// Parsed run items a note paragraph keeps: page breaks, pictures and note references have no place there
+const NOTE_RUN_TYPES = ['text', 'tab', 'break'];
+
+// Font size of note text, in points, when neither the document defaults nor a style or the run gives one
+const NOTE_FONT_SIZE = 10;
+
 // Unicode text of the symbols Word writes as w:sym (Insert > Symbol, and check boxes), by
 // lower-case font name and character code. Word writes w:char as hex, usually in the private
 // use range F020-F0FF and sometimes as the plain 0020-00FF; both are looked up by the low byte.
@@ -657,10 +663,16 @@ class DocxParser {
         this.endnotes = {};
         // The [code, example] findings of each note's text, recorded when a reference to it is converted
         this.noteFindings = { footnote: {}, endnote: {} };
+        // The formatted paragraphs of each note (see parseNoteParagraphs), keyed like footnotes and endnotes
+        this.noteParagraphs = { footnote: {}, endnote: {} };
         this.numbering = {};
         this.styles = this.emptyStyles();
         this.findings = {};
         this.inDiscardedCell = false;
+        // Whether a note's paragraphs are being parsed (see parseNoteParagraphs): addFinding records
+        // nothing, since noteText's findings are recorded once per reference instead, and parseRun
+        // leaves out pictures and note references
+        this.parsingNote = false;
         // Where findings are recorded now (see addFinding), and the body's paragraph and table counts
         // and last heading so far (see parseBodyBlocks)
         this.location = { kind: 'document' };
@@ -687,10 +699,12 @@ class DocxParser {
             this.footnotes = {};
             this.endnotes = {};
             this.noteFindings = { footnote: {}, endnote: {} };
+            this.noteParagraphs = { footnote: {}, endnote: {} };
             this.numbering = {};
             this.styles = this.emptyStyles();
             this.findings = {};
             this.inDiscardedCell = false;
+            this.parsingNote = false;
             this.location = { kind: 'document' };
             this.body = { paragraphs: 0, tables: 0, headings: { outline: null, petition: null } };
             this.documentParagraphs = null;
@@ -897,7 +911,7 @@ class DocxParser {
     /**
      * Record one occurrence of a conversion finding, where it is: at this.location unless the
      * caller gives one. Nothing is recorded while parsing a cell the generator writes empty (see
-     * parseTable): its content is never converted.
+     * parseTable): its content is never converted. Nor while a note's paragraphs are parsed.
      * @param {string} code - A FINDING_CODES value
      * @param {string} [example] - A short location hint; blank and repeated ones aren't kept as examples
      * @param {Object} [location] - Where it is: { kind: 'paragraph', paragraph, heading? },
@@ -905,7 +919,7 @@ class DocxParser {
      *   { kind: 'document' }; a note's text adds note: { kind: 'footnote' | 'endnote' }
      */
     addFinding(code, example = '', location = this.location) {
-        if (this.inDiscardedCell) return;
+        if (this.inDiscardedCell || this.parsingNote) return;
         const finding = this.findings[code] ||
             (this.findings[code] = { code, count: 0, examples: [], occurrences: [], places: new Set() });
         finding.count++;
@@ -1166,7 +1180,8 @@ class DocxParser {
     /**
      * Parse the notes of the footnotes part (word/footnotes.xml) or the endnotes part
      * (word/endnotes.xml) into plain text keyed by w:id. Word's separator notes are left out.
-     * The findings of each note's text (its symbols and hidden text) go into noteFindings.
+     * The findings of each note's text (its symbols and hidden text) go into noteFindings, and
+     * its formatted paragraphs into noteParagraphs.
      * @param {'footnote'|'endnote'} type - The note element's local name
      * @returns {Promise<Object<string, string>>}
      */
@@ -1187,6 +1202,7 @@ class DocxParser {
                 const findings = [];
                 notes[id] = this.noteText(note, findings);
                 this.noteFindings[type][id] = findings;
+                this.noteParagraphs[type][id] = this.parseNoteParagraphs(note);
             }
         } catch (error) {
             rethrowFatal(error);
@@ -1237,6 +1253,53 @@ class DocxParser {
             text += ' ';
         }
         return text.trim();
+    }
+
+    /**
+     * The paragraphs of a footnote or endnote, each a list of the parsed items (see parseRun) it
+     * shows: formatted text, tabs and line breaks. Runs are parsed as in the body, through the
+     * document defaults and the paragraph and character styles (e.g. FootnoteText), so hidden
+     * text, All Caps, symbols and non-breaking hyphens behave as they do there. Word's note mark
+     * (w:footnoteRef, w:endnoteRef) adds nothing, and the spaces or the one tab Word puts after it
+     * at the start of the first paragraph are dropped. Page breaks, pictures and nested note
+     * references are left out. A run whose size nothing sets is NOTE_FONT_SIZE points.
+     * Findings are left to noteText, which records them for each reference to the note.
+     * @param {Element} note - The w:footnote or w:endnote element
+     * @returns {Array<Array<Object>>} One list of items per w:p, in document order
+     */
+    parseNoteParagraphs(note) {
+        const paragraphs = [];
+        const parsingNote = this.parsingNote;
+        this.parsingNote = true;
+        try {
+            for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
+                const style = this.paragraphStyle(childElement(para, 'pPr'));
+                const paragraphRun = 'fontSize' in this.styles.defaults.run ? style.run : { fontSize: NOTE_FONT_SIZE, ...style.run };
+                paragraphs.push(this.paragraphRuns(para)
+                    .flatMap(run => this.parseRun(run, paragraphRun))
+                    .filter(item => NOTE_RUN_TYPES.includes(item.type)));
+            }
+        } finally {
+            this.parsingNote = parsingNote;
+        }
+
+        // The whitespace after the note mark: leading spaces, and at most one tab
+        const first = paragraphs[0] || [];
+        let tabDropped = false;
+        while (first.length > 0) {
+            const item = first[0];
+            if (item.type === 'tab' && !tabDropped) {
+                tabDropped = true;
+                first.shift();
+            } else if (item.type === 'text' && item.text.startsWith(' ')) {
+                const rest = item.text.replace(/^ +/, '');
+                if (rest) first[0] = { ...item, text: rest };
+                else first.shift();
+            } else {
+                break;
+            }
+        }
+        return paragraphs;
     }
 
     /**
@@ -2152,16 +2215,22 @@ class DocxParser {
                 items.push({ type: breakType === 'page' ? 'pageBreak' : 'break' });
             } else if (localName === 'cr') {
                 items.push({ type: 'break' });
+            } else if (this.parsingNote) {
+                // In a note, pictures and nested note references are left out (see parseNoteParagraphs)
+                continue;
             } else if (localName === 'footnoteReference' || localName === 'endnoteReference') {
                 const kind = localName === 'footnoteReference' ? 'footnote' : 'endnote';
                 const notes = kind === 'footnote' ? this.footnotes : this.endnotes;
                 const id = child.getAttribute('w:id');
                 // A note with no text is still a note; a reference to a missing one adds nothing
                 if (id && Object.prototype.hasOwnProperty.call(notes, id)) {
+                    // The formatted paragraphs go with a note that has text; an empty one keeps its placeholder
+                    const paragraphs = notes[id] ? this.noteParagraphs[kind][id] : null;
                     items.push({
                         type: `${kind}Ref`,
                         id: id,
-                        content: notes[id] || `[Empty ${kind}]`
+                        content: notes[id] || `[Empty ${kind}]`,
+                        paragraphs: paragraphs || null
                     });
                     // Located at the reference, and marked as being in the note's text
                     const inNote = { ...this.location, note: { kind } };

@@ -418,9 +418,9 @@ test('an endnote reference in a table cell is numbered and its text appended aft
     assert.equal(content, `CelliOtherAfterii\n${SEPARATOR}i. In a cellii. In the body`);
 });
 
-test('a tab or line break inside a note becomes a space instead of joining the words around it', async () => {
+test('a tab or line break inside a note is written as one, and its plain text keeps a space instead', async () => {
     const noteWith = (ref, inner) => p(`<w:r><w:${ref}/></w:r><w:r><w:tab/><w:t>Source A</w:t>${inner}<w:t>Source B</w:t></w:r>`);
-    for (const inner of ['<w:br/>', '<w:cr/>', '<w:tab/>', '</w:r><w:r><w:br/></w:r><w:r>']) {
+    for (const [inner, written] of [['<w:br/>', '\n'], ['<w:cr/>', '\n'], ['<w:tab/>', '\t'], ['</w:r><w:r><w:br/></w:r><w:r>', '\n']]) {
         const { parsed, content } = await convertBody(
             p(run('A') + footnoteRef(1) + run('B') + endnoteRef(1)),
             {
@@ -430,7 +430,8 @@ test('a tab or line break inside a note becomes a space instead of joining the w
 
         assert.equal(parsed.footnotes[1], 'Source A Source B', inner);
         assert.equal(parsed.endnotes[1], 'Source A Source B', inner);
-        assert.equal(content, `A1Bi\n${SEPARATOR}1. Source A Source B\n${SEPARATOR}i. Source A Source B`, inner);
+        // The tab Word puts after the note mark is dropped
+        assert.equal(content, `A1Bi\n${SEPARATOR}1. Source A${written}Source B\n${SEPARATOR}i. Source A${written}Source B`, inner);
     }
 });
 
