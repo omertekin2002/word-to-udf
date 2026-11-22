@@ -148,6 +148,9 @@ test('dava dilekçesi: heading, party block, footnotes and signature keep their 
         assert.equal(el.closest('paragraph').querySelectorAll('tab').length, 2, `${label} line keeps its tabs`);
         // PARTY_TABS: left stops at 1985 and 2268 twips line up the colon and the value
         assert.equal(el.closest('paragraph').getAttribute('TabSet'), '99.3:0:0,113.4:0:0', `${label} line keeps its tab stops`);
+        // w:left="2268" w:hanging="2268": the label starts at the margin, wrapped lines under the value
+        assert.equal(el.closest('paragraph').getAttribute('LeftIndent'), '113.0', `${label} line's left indent`);
+        assert.equal(el.closest('paragraph').getAttribute('FirstLineIndent'), '-113.0', `${label} line hangs`);
     }
 
     for (const number of ['1', '2']) {

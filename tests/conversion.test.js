@@ -794,7 +794,7 @@ test('paragraph alignment and indents come from the paragraph style unless set d
     };
     assert.deepEqual(para('From style'), ['1', '36.0', '0.0', '18.0']);
     assert.deepEqual(para('Direct'), ['2', '72.0', '0.0', '18.0']);
-    assert.deepEqual(para('Hanging'), ['1', '36.0', '0.0', null]);
+    assert.deepEqual(para('Hanging'), ['1', '36.0', '0.0', '-18.0']);
     assert.deepEqual(para('Default style'), ['3', '0.0', '0.0', null]);
     assert.deepEqual(para('Unknown style'), ['3', '0.0', '0.0', null]);
 });
