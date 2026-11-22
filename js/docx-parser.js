@@ -251,7 +251,17 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 // conversion drops or simplifies, so the user can fix it in Word before filing
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
     'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
-    'equations', 'embeddedContent', 'trackedChanges'];
+    'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout'];
+
+// Section start types (a w:sectPr's w:type, which says how that section starts after the previous
+// one) that start the section on a new page. A missing w:type means nextPage. oddPage and evenPage
+// are written as a plain page break and reported (sectionLayout): Word may add a blank page there.
+const PAGE_SECTION_STARTS = ['nextPage', 'oddPage', 'evenPage'];
+const PARITY_SECTION_STARTS = ['oddPage', 'evenPage'];
+
+// The w:pgSz and w:pgMar attributes a section's page setup is compared on (see sectionLayoutDiffers)
+const PAGE_SIZE_ATTRIBUTES = ['w:w', 'w:h'];
+const PAGE_MARGIN_ATTRIBUTES = ['w:top', 'w:right', 'w:bottom', 'w:left'];
 
 // Track Changes revision marks inside a paragraph, its runs and its paragraph mark: inserted, deleted
 // and moved content (w:ins, w:del, w:moveTo, w:moveFrom, which also mark a paragraph mark in
@@ -486,6 +496,38 @@ function copyLocation(location) {
     const copy = { ...location };
     if (location.note) copy.note = { ...location.note };
     return copy;
+}
+
+/**
+ * The w:sectPr of a section break: the one in a paragraph's w:pPr, which ends a section there
+ * @param {Element} para - The w:p element
+ * @returns {Element|null}
+ */
+function sectionBreakOf(para) {
+    const pPr = childElement(para, 'pPr');
+    return (pPr && childElement(pPr, 'sectPr')) || null;
+}
+
+/**
+ * How a section starts after the previous one: its w:type, nextPage when it has none
+ * (the w:type default). A missing final w:sectPr is a section with nothing set.
+ * @param {Element|null} sectPr - The section's w:sectPr
+ * @returns {string} e.g. 'nextPage', 'continuous', 'oddPage'
+ */
+function sectionStart(sectPr) {
+    const type = sectPr && childElement(sectPr, 'type');
+    return (type && type.getAttribute('w:val')) || 'nextPage';
+}
+
+/**
+ * Whether a section has more than one text column: w:cols with w:num above 1, or more than one w:col
+ * @param {Element} sectPr - The section's w:sectPr
+ * @returns {boolean}
+ */
+function hasColumns(sectPr) {
+    const cols = childElement(sectPr, 'cols');
+    if (!cols) return false;
+    return parseInt(cols.getAttribute('w:num'), 10) > 1 || childElements(cols, 'col').length > 1;
 }
 
 /**
@@ -1934,6 +1976,10 @@ class DocxParser {
         const outlineLevel = outlineLvl ? parseInt(outlineLvl.getAttribute('w:val'), 10) : NaN;
         if (Number.isInteger(outlineLevel)) props.outlineLevel = outlineLevel;
 
+        // Page break before (w:pageBreakBefore), which starts a body paragraph on a new page (see bodyPageBreakBefore)
+        const pageBreakBefore = childElement(pPr, 'pageBreakBefore');
+        if (pageBreakBefore) props.pageBreakBefore = this.isOn(pageBreakBefore);
+
         return props;
     }
 
@@ -2107,11 +2153,30 @@ class DocxParser {
             return heading === null ? {} : { heading };
         };
 
-        for (const child of this.contentChildren(body)) {
+        // Each section break's w:sectPr, and the w:sectPr of the section that starts after it, whose
+        // w:type says whether that section starts on a new page
+        const children = this.contentChildren(body);
+        const finalSection = childElements(body, 'sectPr').pop() || null;
+        const breaks = children.map(child => child.localName === 'p' ? sectionBreakOf(child) : null).filter(Boolean);
+        const nextSection = new Map(breaks.map((sectPr, i) => [sectPr, i + 1 < breaks.length ? breaks[i + 1] : finalSection]));
+
+        for (const child of children) {
             if (child.localName === 'p') {
                 this.location = { kind: 'paragraph', paragraph: ++this.body.paragraphs, ...headingOf() };
                 const { paragraph, blocks } = this.parseParagraphBlocks(child);
+                // Page breaks are block-level pageBreak items between the paragraphs and tables: the
+                // generator writes one only when something follows it, and never two in a row
+                if (paragraph && this.bodyPageBreakBefore(child)) elements.push({ type: 'pageBreak' });
                 elements.push(...blocks);
+                const sectPr = sectionBreakOf(child);
+                if (paragraph && sectPr) {
+                    const start = sectionStart(nextSection.get(sectPr));
+                    if (PAGE_SECTION_STARTS.includes(start)) elements.push({ type: 'pageBreak' });
+                    if (PARITY_SECTION_STARTS.includes(start) || this.sectionLayoutDiffers(sectPr, finalSection) ||
+                        hasColumns(sectPr)) {
+                        this.addFinding('sectionLayout', shortExample(paragraphText(paragraph)));
+                    }
+                }
                 // A heading names the places after it, not its own. A paragraph left out isn't one.
                 const kind = paragraph && this.headingKind(child, paragraph);
                 if (kind) this.body.headings[kind] = shortExample(paragraphText(paragraph));
@@ -2129,7 +2194,52 @@ class DocxParser {
             }
         }
 
+        // The final section's columns: the <pageFormat> is written from its page setup, but not its columns
+        if (finalSection && hasColumns(finalSection)) this.addFinding('sectionLayout', '', { kind: 'document' });
+
         return elements;
+    }
+
+    /**
+     * Whether a body paragraph starts on a new page (w:pageBreakBefore): its own w:pPr, else its
+     * paragraph style chain, else the document defaults. An explicit off turns an inherited one off.
+     * @param {Element} para - The w:p element
+     * @returns {boolean}
+     */
+    bodyPageBreakBefore(para) {
+        const pPr = childElement(para, 'pPr');
+        const layers = [this.readParagraphProperties(pPr), this.paragraphStyle(pPr).paragraph, this.styles.defaults.paragraph];
+        const layer = layers.find(props => props.pageBreakBefore !== undefined);
+        return layer ? layer.pageBreakBefore : false;
+    }
+
+    /**
+     * Whether a section's page setup differs from the final section's, which the <pageFormat> is
+     * written from: its orientation, its page width or height (w:pgSz), or its top, right, bottom
+     * or left margin (w:pgMar). Values are compared as parsed, in twips, so one written in other
+     * units isn't a difference. Only values both sections set are compared: one either leaves out, or that can't
+     * be read, isn't a known difference. The orientation is compared when both have a w:pgSz.
+     * @param {Element} sectPr - The section's w:sectPr
+     * @param {Element|null} finalSection - The body's final w:sectPr
+     * @returns {boolean}
+     */
+    sectionLayoutDiffers(sectPr, finalSection) {
+        const setup = section => {
+            const pgSz = section && childElement(section, 'pgSz');
+            const pgMar = section && childElement(section, 'pgMar');
+            // To the twip, so the same length written in other units compares equal
+            const read = (el, attribute) => {
+                const points = el ? this.measureToPoints(el.getAttribute(attribute)) : null;
+                return points === null ? null : Math.round(points * 20);
+            };
+            const [width, height] = PAGE_SIZE_ATTRIBUTES.map(attribute => read(pgSz, attribute));
+            const landscape = pgSz ? pgSz.getAttribute('w:orient') === 'landscape' ||
+                (width !== null && height !== null && width > height) : null;
+            return [landscape, width, height, ...PAGE_MARGIN_ATTRIBUTES.map(attribute => read(pgMar, attribute))];
+        };
+        const own = setup(sectPr);
+        const final = setup(finalSection);
+        return own.some((value, i) => value !== null && final[i] !== null && value !== final[i]);
     }
 
     /**
@@ -2360,8 +2470,10 @@ class DocxParser {
         Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, own);
         paragraph.lineSpacing = this.lineSpacing(paragraph);
 
-        // The outline level only locates findings (see headingKind); it isn’t written
+        // The outline level only locates findings (see headingKind); it isn’t written. Page break
+        // before is written as a page break ahead of a body paragraph (see bodyPageBreakBefore).
         delete paragraph.outlineLevel;
+        delete paragraph.pageBreakBefore;
 
         // Tab stops: each layer adds to or clears the stops of the layers under it
         delete paragraph.tabs;
