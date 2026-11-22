@@ -1284,7 +1284,13 @@ class DocxParser {
         });
         const hasPicture = shownRuns.some(run => PICTURE_ELEMENTS.some(name => Array.from(run.getElementsByTagNameNS(WORD_NS, name))
             .some(element => this.isInReadBranch(element) && !this.isInTextBox(element, run))));
-        if (!hasText && !hasPicture) return { paragraphs: null, dropped };
+        if (!hasText && !hasPicture) {
+            // Nothing is left to parse, but a part emptied by unaccepted deletions still has changes to report
+            for (const para of paragraphs) {
+                if (this.hasRevisions(para)) this.addFinding('trackedChanges');
+            }
+            return { paragraphs: null, dropped };
+        }
 
         // The pictures those runs show, through the part's own relationships: a header's r:embed
         // ids name entries of its _rels/header1.xml.rels, not of the document's
@@ -2074,6 +2080,10 @@ class DocxParser {
             return this.parseBodyBlocks(body);
         } finally {
             this.location = { kind: 'document' };
+            // A change to the final section's properties (margins, orientation, headers), which
+            // are converted as they now are, belongs to the whole document
+            const sectPr = childElement(body, 'sectPr');
+            if (sectPr && childElement(sectPr, 'sectPrChange')) this.addFinding('trackedChanges', '', { kind: 'document' });
         }
     }
 

@@ -334,6 +334,28 @@ test('in the converted header, a deleted paragraph is left out and changes are r
     assert.equal(content, accepted.content);
 });
 
+test('a converted header emptied by unaccepted deletions is reported, and nothing of it is written', async () => {
+    const { doc, parsed } = await convertBody(p(r('Gövde')),
+        { parts: [headerPart(deletedParagraph('Eski büro adı') + p(del('Eski adres')))], sectPr: HEADER_REFERENCE });
+    assert.equal(doc.querySelector('header'), null);
+    assert.deepEqual(finding(parsed), {
+        code: 'trackedChanges', count: 2, examples: [],
+        occurrences: [{ example: '', location: { kind: 'header' } }]
+    });
+});
+
+test('a change to the final section\'s properties is reported for the whole document', async () => {
+    const sectPr = '<w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1418" w:right="1418" w:bottom="1418" w:left="1418"/>' +
+        `<w:sectPrChange w:id="18" ${REV}><w:sectPr><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr></w:sectPrChange>`;
+    const { parsed } = await convertBody(p(r('Metin')), { sectPr });
+    assert.deepEqual(finding(parsed), {
+        code: 'trackedChanges', count: 1, examples: [],
+        occurrences: [{ example: '', location: { kind: 'document' } }]
+    });
+    // The margins written are the current ones
+    assert.equal(parsed.pageSetup.leftMargin, 70.9);
+});
+
 test('in a footnote, deleted and moved-away text and a deleted paragraph are left out, and reported at the reference', async () => {
     const note = p('<w:r><w:footnoteRef/></w:r>' + r(' Dipnot ') + ins('eklenen ') + del('silinen ') + moveFrom('taşınan ') + r('metni.')) +
         deletedParagraph('Silinen dipnot paragrafı') + p(r('İkinci paragraf.'));
