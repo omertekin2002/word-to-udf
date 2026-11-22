@@ -29,6 +29,10 @@ const DEFAULT_RUN_FORMATTING = {
     fontSize: 12
 };
 
+// The theme font slots a w:rFonts w:asciiTheme may name for Latin text, and the theme font
+// (a:majorFont or a:minorFont, ECMA-376 Part 1, 20.1.4.1.24 / 20.1.4.1.25) each resolves to
+const THEME_FONT_SLOTS = { majorAscii: 'major', majorHAnsi: 'major', minorAscii: 'minor', minorHAnsi: 'minor' };
+
 // Word's fixed highlighting palette (w:highlight w:val, ST_HighlightColor, ECMA-376 Part 1, 17.18.40)
 const HIGHLIGHT_COLORS = {
     yellow: 'FFFF00', green: '00FF00', cyan: '00FFFF', magenta: 'FF00FF', blue: '0000FF', red: 'FF0000',
@@ -838,6 +842,8 @@ class DocxParser {
         // The formatted paragraphs of each note (see parseNoteParagraphs), keyed like footnotes and endnotes
         this.noteParagraphs = { footnote: {}, endnote: {} };
         this.numbering = {};
+        // The theme's Latin typefaces, which w:asciiTheme names (see parseThemeFonts)
+        this.themeFonts = { major: null, minor: null };
         this.styles = this.emptyStyles();
         this.findings = {};
         this.inDiscardedCell = false;
@@ -876,6 +882,7 @@ class DocxParser {
             this.noteFindings = { footnote: {}, endnote: {} };
             this.noteParagraphs = { footnote: {}, endnote: {} };
             this.numbering = {};
+            this.themeFonts = { major: null, minor: null };
             this.styles = this.emptyStyles();
             this.findings = {};
             this.inDiscardedCell = false;
@@ -901,6 +908,9 @@ class DocxParser {
 
             // Parse list definitions
             await this.parseNumbering();
+
+            // Read the theme's fonts, which styles and runs name through w:asciiTheme
+            await this.parseThemeFonts();
 
             // Parse style definitions
             await this.parseStyles();
@@ -1777,6 +1787,36 @@ class DocxParser {
     }
 
     /**
+     * Read the theme part's (word/theme/theme1.xml) major and minor Latin typefaces
+     * (a:fontScheme a:majorFont / a:minorFont a:latin@typeface), which a w:rFonts
+     * w:asciiTheme names. Without a theme part, or with a malformed one, both stay null,
+     * and a w:asciiTheme that names them is ignored (see readRunProperties).
+     */
+    async parseThemeFonts() {
+        const themeFile = this.zip.file(this.relatedPart('theme', 'word/theme/theme1.xml'));
+        if (!themeFile) return;
+
+        try {
+            const root = parseXml(await this.readXmlPart(themeFile)).documentElement;
+            if (!root || root.namespaceURI !== DRAWING_NS || root.localName !== 'theme') {
+                throw new Error('The theme part is not a well-formed a:theme part');
+            }
+            const themeElements = childElement(root, 'themeElements', DRAWING_NS);
+            const fontScheme = themeElements && childElement(themeElements, 'fontScheme', DRAWING_NS);
+            for (const slot of ['major', 'minor']) {
+                const font = fontScheme && childElement(fontScheme, `${slot}Font`, DRAWING_NS);
+                const latin = font && childElement(font, 'latin', DRAWING_NS);
+                const typeface = latin && (latin.getAttribute('typeface') || '').trim();
+                this.themeFonts[slot] = typeface || null;
+            }
+        } catch (error) {
+            rethrowFatal(error);
+            this.themeFonts = { major: null, minor: null };
+            console.warn('Could not parse the theme:', error);
+        }
+    }
+
+    /**
      * Parse the styles part (word/styles.xml): the document defaults (w:docDefaults),
      * the paragraph and character styles, each with the properties it sets itself, and
      * the table styles' borders. w:basedOn chains are resolved on first use (see
@@ -1921,8 +1961,16 @@ class DocxParser {
         const vertAlignVal = vertAlign && vertAlign.getAttribute('w:val');
         if (VERTICAL_ALIGNMENTS.includes(vertAlignVal)) props.vertAlign = vertAlignVal;
 
+        // The Latin font: a theme font (w:asciiTheme) wins over w:ascii in the same w:rFonts
+        // (ECMA-376 Part 1, 17.3.2.26). One the theme doesn't give falls back to w:ascii, else
+        // leaves the font to the layer underneath.
         const rFonts = childElement(rPr, 'rFonts');
-        if (rFonts && rFonts.getAttribute('w:ascii')) props.fontFamily = rFonts.getAttribute('w:ascii');
+        if (rFonts) {
+            const slot = THEME_FONT_SLOTS[rFonts.getAttribute('w:asciiTheme')];
+            const themeFont = slot && this.themeFonts[slot];
+            if (themeFont) props.fontFamily = themeFont;
+            else if (rFonts.getAttribute('w:ascii')) props.fontFamily = rFonts.getAttribute('w:ascii');
+        }
 
         // Font size is in half-points
         const sz = childElement(rPr, 'sz');

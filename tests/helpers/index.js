@@ -66,6 +66,9 @@ const CHUNK_CONTENT_TYPES = { mht: 'message/rfc822', html: 'text/html', htm: 'te
  *   `inner` goes in the <w:{root}> root, `type` names both the relationship and the content type. `rels` gives
  *   the part its own image relationships, in word/_rels/<name>.rels: id -> target relative to the part,
  *   e.g. { rIdLogo: 'media/logo.png' }
+ * @param {{major?: string, minor?: string}|string} [options.theme] - A theme part, word/theme/theme1.xml, whose
+ *   font scheme gives these major and minor Latin typefaces (an omitted one has no a:latin), or a string
+ *   that is the whole part as it is
  * @param {Object<string,Buffer>} [options.files] - More package parts, path -> bytes, with no relationship, e.g.
  *   { 'word/media/logo.png': PNG } for a picture only a header relates to
  * @returns {Promise<Buffer>}
@@ -98,6 +101,11 @@ async function buildDocx(bodyXml, options = {}) {
     if (options.numbering !== undefined) wordPart('numbering.xml', 'numbering', options.numbering);
     if (options.settings !== undefined) wordPart('settings.xml', 'settings', options.settings);
     for (const { name, root, type, id, inner, rels: partRels } of options.parts || []) wordPart(name, root, inner, type, id, partRels);
+    if (options.theme !== undefined) {
+        parts.push(['word/theme/theme1.xml', typeof options.theme === 'string' ? options.theme : themePart(options.theme)]);
+        overrides.push('<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>');
+        rels.push(`<Relationship Id="rId_theme" Type="${RELATIONSHIP_TYPE}theme" Target="theme/theme1.xml"/>`);
+    }
 
     // Notes parts start with Word's separator and continuation separator notes
     for (const type of ['footnote', 'endnote']) {
@@ -163,6 +171,21 @@ async function buildDocx(bodyXml, options = {}) {
     for (const [name, data] of parts) zip.file(name, data);
 
     return zip.generateAsync({ type: 'nodebuffer' });
+}
+
+/**
+ * A theme part (a:theme) whose font scheme gives these Latin typefaces
+ * @param {{major?: string, minor?: string}} fonts - An omitted one has no a:latin
+ * @returns {string}
+ */
+function themePart({ major, minor }) {
+    const font = (slot, typeface) => `<a:${slot}Font>` +
+        (typeface === undefined ? '' : `<a:latin typeface="${typeface}" panose="020F0302020204030204"/>`) +
+        '<a:ea typeface=""/><a:cs typeface=""/>' + `</a:${slot}Font>`;
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme"><a:themeElements>' +
+        '<a:fontScheme name="Office">' + font('major', major) + font('minor', minor) + '</a:fontScheme>' +
+        '</a:themeElements></a:theme>';
 }
 
 /**
