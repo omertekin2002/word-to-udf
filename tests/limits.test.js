@@ -281,6 +281,28 @@ test('only the pictures the document shows are decompressed and returned', async
     assert.equal(parsed.findings.length, 0, JSON.stringify(parsed.findings));
 });
 
+test('only the pictures the converted header shows are decompressed, through its own rels', async t => {
+    // The default header relates three pictures and shows one; the first-page header shows another.
+    // Each picture not shown claims to be far too large to read.
+    const header = (name, id, inner, rels) => ({ name, root: 'hdr', type: 'header', id, inner, rels });
+    const rels = { rIdLogo: 'media/logo.png', rIdUnused: 'media/unused.png', rIdBox: 'media/box.png' };
+    let docx = await buildDocx(p(r('Gövde')), {
+        sectPr: '<w:headerReference w:type="default" r:id="rIdHeader1"/><w:headerReference w:type="first" r:id="rIdHeader2"/><w:titlePg/>',
+        parts: [
+            header('header1.xml', 'rIdHeader1', p(r('Büro') + picture('rIdLogo')) + p(textBox(p(picture('rIdBox')))), rels),
+            header('header2.xml', 'rIdHeader2', p(picture('rIdFirst')), { rIdFirst: 'media/first.png' })
+        ],
+        files: { 'word/media/logo.png': PNG, 'word/media/unused.png': PNG, 'word/media/box.png': PNG, 'word/media/first.png': PNG }
+    });
+    for (const name of ['unused', 'box', 'first']) docx = declareSize(docx, `word/media/${name}.png`, 0xFFFFFFFE);
+    const reads = watchReads(t);
+    const parsed = await new (loadConverter().DocxParser)().parse(docx);
+
+    assert.deepEqual([...reads.keys()].filter(name => name.startsWith('word/media/')), ['word/media/logo.png']);
+    assert.deepEqual(Object.keys(parsed.images), ['word/media/logo.png']);
+    assert.equal(parsed.header[0].runs.filter(run => run.type === 'image' && run.data).length, 1);
+});
+
 test('a picture shown twice is decompressed once', async t => {
     const docx = await buildDocx(p(picture('rId_image1')) + p(picture('rId_image1')), { media: { 'image1.png': PNG } });
     const reads = watchReads(t);

@@ -173,12 +173,13 @@ const TAB_POSITION_PRECISION = 6;
 // Line rules (w:spacing w:lineRule) lineSpacing() can't express, so their paragraphs get single spacing
 const LOST_LINE_RULES = ['exact', 'atLeast'];
 
-// Header and footer content the conversion leaves out: pictures and text boxes (w:drawing, VML
-// w:pict, w:object), and fields (w:fldSimple, w:fldChar), whose displayed result would be stale
-const HEADER_FOOTER_DRAWINGS = PICTURE_ELEMENTS;
-
 // Run items a header or footer paragraph keeps: page breaks and note references have no place there
-const HEADER_FOOTER_RUN_TYPES = ['text', 'tab', 'break'];
+const HEADER_FOOTER_RUN_TYPES = ['text', 'tab', 'break', 'image'];
+
+// Start of the VML shape id Word gives a watermark it inserts in a header (Design › Watermark):
+// a picture watermark, and a text one (a WordArt shape). The UDF's page background (<bgImage>)
+// isn't written, and a watermark isn't a picture in the header's text.
+const WATERMARK_SHAPE_IDS = /^(?:WordPictureWatermark|PowerPlusWaterMarkObject)/;
 
 // Table edges a w:tblBorders sets, each under the names Word writes for it (start and end are
 // the newer names of left and right)
@@ -716,6 +717,9 @@ class DocxParser {
         this.documentPath = 'word/document.xml';
         this.document = null;
         this.relationships = {};
+        // The relationships of the header or footer part being parsed, which its pictures
+        // resolve through (see embedPicture); null while the main document part is parsed
+        this.partRelationships = null;
         this.images = {};
         this.imageFormats = {};
         this.footnotes = {};
@@ -753,6 +757,7 @@ class DocxParser {
         try {
             // Reset state: the app reuses one parser for every file
             this.relationships = {};
+            this.partRelationships = null;
             this.images = {};
             this.imageFormats = {};
             this.footnotes = {};
@@ -884,26 +889,37 @@ class DocxParser {
     }
 
     /**
-     * Parse the main document part's relationships, each with the name of the part it
-     * targets (path), or null for an external target such as a hyperlink
+     * Parse the main document part's relationships (see readRelationships)
      */
     async parseRelationships() {
+        this.relationships = await this.readRelationships(this.documentPath);
+    }
+
+    /**
+     * Read a part's relationships, each with the name of the part it targets (path), resolved
+     * relative to that part, or null for an external target such as a hyperlink
+     * @param {string} partPath - The part's name, e.g. word/header1.xml
+     * @returns {Promise<Object<string, {target: string, type: string, path: string|null}>>} Keyed
+     *   by relationship id; empty when the part has no relationships
+     */
+    async readRelationships(partPath) {
+        const relationships = {};
         // A part's relationships live in _rels/<part name>.rels next to it
-        const relsFile = this.zip.file(this.documentPath.replace(/[^/]*$/, name => `_rels/${name}.rels`));
-        if (!relsFile) return;
+        const relsFile = this.zip.file(partPath.replace(/[^/]*$/, name => `_rels/${name}.rels`));
+        if (!relsFile) return relationships;
 
         const relsXml = await this.readXmlPart(relsFile);
         const relsDoc = parseXml(relsXml);
-        const relationships = relsDoc.getElementsByTagName('Relationship');
 
-        for (const rel of relationships) {
+        for (const rel of relsDoc.getElementsByTagName('Relationship')) {
             const id = rel.getAttribute('Id');
             const target = rel.getAttribute('Target');
             const type = rel.getAttribute('Type');
             const path = rel.getAttribute('TargetMode') === 'External' || !target
-                ? null : resolvePartName(this.documentPath, target);
-            this.relationships[id] = { target, type, path };
+                ? null : resolvePartName(partPath, target);
+            relationships[id] = { target, type, path };
         }
+        return relationships;
     }
 
     /**
@@ -947,24 +963,30 @@ class DocxParser {
     }
 
     /**
-     * Decode the images the main document part shows, keyed by part name: those an a:blip
-     * embeds or a VML v:imagedata shows (legacy pictures and OLE object previews), text-box
-     * pictures included. An image part nothing shows (left over from a deleted picture, or
-     * in the mc:AlternateContent branch that isn't read) is never decompressed.
+     * Decode the images a part shows, keyed by part name: those an a:blip embeds or a VML
+     * v:imagedata shows (legacy pictures and OLE object previews). An image part nothing
+     * shows (left over from a deleted picture, or in the mc:AlternateContent branch that
+     * isn't read) is never decompressed. An image already decoded isn't read again.
+     * @param {Array<Element>} [containers] - Where the pictures are: the main document by
+     *   default, text-box pictures included
+     * @param {Object} [relationships] - The relationships of the part the containers are in
+     *   (see readRelationships)
+     * @param {boolean} [skipTextBoxes] - Leave out pictures inside a text box (w:txbxContent),
+     *   as in a header or footer, whose text boxes aren't converted
      */
-    async extractImages() {
-        const references = [
-            ...Array.from(this.document.getElementsByTagNameNS(DRAWING_NS, 'blip'))
+    async extractImages(containers = [this.document], relationships = this.relationships, skipTextBoxes = false) {
+        const references = containers.flatMap(container => [
+            ...Array.from(container.getElementsByTagNameNS(DRAWING_NS, 'blip'))
                 .map(blip => [blip, blip.getAttributeNS(RELATIONSHIPS_NS, 'embed')]),
-            ...Array.from(this.document.getElementsByTagNameNS(VML_NS, 'imagedata'))
+            ...Array.from(container.getElementsByTagNameNS(VML_NS, 'imagedata'))
                 .map(imageData => [imageData, imageData.getAttributeNS(RELATIONSHIPS_NS, 'id')])
-        ];
+        ]);
         const embeds = new Set(references
-            .filter(([element, id]) => id && this.isInReadBranch(element))
+            .filter(([element, id]) => id && this.isInReadBranch(element) && !(skipTextBoxes && this.isInTextBox(element, null)))
             .map(([, id]) => id));
         for (const id of embeds) {
-            if (!Object.prototype.hasOwnProperty.call(this.relationships, id)) continue;
-            const { type, path } = this.relationships[id];
+            if (!Object.prototype.hasOwnProperty.call(relationships, id)) continue;
+            const { type, path } = relationships[id];
             if (type !== PART_RELATIONSHIP_TYPE + 'image' || !path || this.images[path]) continue;
             const file = this.zip.file(path);
             if (!file) continue;
@@ -1017,17 +1039,19 @@ class DocxParser {
     }
 
     /**
-     * Whether an XML part holds any non-whitespace text (w:t, or an equation's m:t)
+     * Whether an XML part holds any non-whitespace text (w:t, or an equation's m:t), or a
+     * picture, text box, chart or shape (see PICTURE_ELEMENTS)
      * @param {string} path - Part name
      * @returns {Promise<boolean>} false for a missing or unreadable part
      */
-    async partHasText(path) {
+    async partHasContent(path) {
         const file = path && this.zip.file(path);
         if (!file) return false;
         try {
             const doc = parseXml(await this.readXmlPart(file));
-            return [WORD_NS, MATH_NS].some(namespace => Array.from(doc.getElementsByTagNameNS(namespace, 't'))
-                .some(t => (t.textContent || '').trim() !== ''));
+            return PICTURE_ELEMENTS.some(name => doc.getElementsByTagNameNS(WORD_NS, name).length > 0) ||
+                [WORD_NS, MATH_NS].some(namespace => Array.from(doc.getElementsByTagNameNS(namespace, 't'))
+                    .some(t => (t.textContent || '').trim() !== ''));
         } catch (error) {
             rethrowFatal(error);
             console.warn(`Could not read ${path}:`, error);
@@ -1070,11 +1094,11 @@ class DocxParser {
      * Parse the default header and footer of the document's final section, the section the
      * page setup comes from. A section without its own default header or footer uses the
      * previous section's (ECMA-376 Part 1, 17.10.5). Header and footer content that isn't
-     * converted is noted once for the document (headersFooters): text in a first-page,
-     * even-page or other section's header or footer, and fields, pictures, text boxes and
-     * tables in the converted ones.
+     * converted is noted once for the document (headersFooters): text or pictures in a
+     * first-page, even-page or other section's header or footer, and fields, text boxes,
+     * watermarks and tables in the converted ones. Pictures in the converted ones are kept.
      * @returns {Promise<{header: Array<Object>|null, footer: Array<Object>|null}>} Parsed
-     *   paragraphs, or null when there is no text to write
+     *   paragraphs, or null when there is no text or picture to write
      */
     async parseHeadersFooters() {
         const sections = this.bodySections();
@@ -1102,6 +1126,7 @@ class DocxParser {
                 lost = lost || dropped;
             } finally {
                 this.location = { kind: 'document' };
+                this.partRelationships = null;
             }
         }
 
@@ -1110,7 +1135,7 @@ class DocxParser {
             if (lost) break;
             if (!path || path === converted[kind] || checked.has(path)) continue;
             checked.add(path);
-            lost = await this.partHasText(path);
+            lost = await this.partHasContent(path);
         }
 
         if (lost) this.addFinding('headersFooters', '', { kind: 'document' });
@@ -1118,14 +1143,15 @@ class DocxParser {
     }
 
     /**
-     * Parse the top-level paragraphs of a header or footer part like body paragraphs. Fields,
-     * pictures, text boxes and tables are left out: a field's displayed result is dropped, not
-     * kept as static text.
+     * Parse the top-level paragraphs of a header or footer part like body paragraphs, pictures
+     * included: they resolve through the part's own relationships, and only the ones it shows
+     * are decoded. Fields, text boxes, watermarks and tables are left out: a field's displayed
+     * result is dropped, not kept as static text.
      * @param {string} path - The part's name
      * @param {'header'|'footer'} kind - Which part it is: its root is w:hdr or w:ftr
      * @returns {Promise<{paragraphs: Array<Object>|null, dropped: boolean}>} paragraphs is null
-     *   when the part is missing, unreadable or has no non-whitespace text left; dropped says
-     *   whether any content was left out
+     *   when the part is missing, unreadable or has no non-whitespace text or picture left;
+     *   dropped says whether any content was left out
      */
     async parseHeaderFooterPart(path, kind) {
         const file = this.zip.file(path);
@@ -1144,23 +1170,28 @@ class DocxParser {
 
         let dropped = false;
         const blocks = this.contentChildren(root);
-        const hasContent = element => HEADER_FOOTER_DRAWINGS.some(name => element.getElementsByTagNameNS(WORD_NS, name).length > 0) ||
+        const hasContent = element => PICTURE_ELEMENTS.some(name => element.getElementsByTagNameNS(WORD_NS, name).length > 0) ||
             Array.from(element.getElementsByTagNameNS(WORD_NS, 't')).some(t => (t.textContent || '').trim() !== '');
         if (blocks.some(block => block.localName === 'tbl' && hasContent(block))) dropped = true;
         // Embedded content from another program (w:altChunk) isn't converted
         if (blocks.some(block => block.localName === 'altChunk')) dropped = true;
         const paragraphs = blocks.filter(block => block.localName === 'p');
 
-        // Simple fields, with the result runs inside them, and pictures and text boxes
+        // Simple fields, with the result runs inside them, and watermarks
         const remove = elements => {
             for (const element of elements) {
                 dropped = true;
                 element.remove();
             }
         };
+        const isWatermark = element => Array.from(element.getElementsByTagNameNS(VML_NS, '*'))
+            .some(shape => WATERMARK_SHAPE_IDS.test(shape.getAttribute('id') || ''));
         for (const para of paragraphs) {
             remove(Array.from(para.getElementsByTagNameNS(WORD_NS, 'fldSimple')));
-            for (const name of HEADER_FOOTER_DRAWINGS) remove(Array.from(para.getElementsByTagNameNS(WORD_NS, name)));
+            for (const name of PICTURE_ELEMENTS) remove(Array.from(para.getElementsByTagNameNS(WORD_NS, name)).filter(isWatermark));
+            // A text box's paragraphs aren't parsed (see parseParagraph); a picture beside it in
+            // the same drawing still is (see parseDrawing)
+            if (para.getElementsByTagNameNS(WORD_NS, 'txbxContent').length > 0) dropped = true;
         }
 
         // Complex fields: everything from a w:fldChar begin to its matching end, the field
@@ -1186,7 +1217,14 @@ class DocxParser {
         const hasText = paragraphs.some(para => this.paragraphRuns(para)
             .some(run => run.namespaceURI === MATH_NS ? this.mathText(run).trim() !== ''
                 : childElements(run, 'sym').length > 0 || childElements(run, 't').some(t => (t.textContent || '').trim() !== '')));
-        if (!hasText) return { paragraphs: null, dropped };
+        const hasPicture = paragraphs.some(para => PICTURE_ELEMENTS.some(name => Array.from(para.getElementsByTagNameNS(WORD_NS, name))
+            .some(element => this.isInReadBranch(element) && !this.isInTextBox(element, para))));
+        if (!hasText && !hasPicture) return { paragraphs: null, dropped };
+
+        // The pictures left in the paragraphs, through the part's own relationships: a header's
+        // r:embed ids name entries of its _rels/header1.xml.rels, not of the document's
+        this.partRelationships = await this.readRelationships(path);
+        await this.extractImages(paragraphs, this.partRelationships, true);
 
         // Every paragraph is written, as in a table cell (see paragraphIsWritten)
         const parsed = paragraphs.map(para => {
@@ -1194,8 +1232,8 @@ class DocxParser {
             paragraph.runs = paragraph.runs.filter(run => HEADER_FOOTER_RUN_TYPES.includes(run.type));
             return paragraph;
         });
-        // A part whose only text is hidden (w:vanish) shows nothing in Word
-        if (!parsed.some(paragraph => paragraphText(paragraph).trim() !== '')) return { paragraphs: null, dropped };
+        // A part whose only text is hidden (w:vanish), or whose pictures are all missing, shows nothing
+        if (!parsed.some(paragraph => paragraph.runs.some(showsContent))) return { paragraphs: null, dropped };
         return { paragraphs: parsed, dropped };
     }
 
@@ -1229,10 +1267,16 @@ class DocxParser {
         let para = element;
         while (para && !(para.namespaceURI === WORD_NS && para.localName === 'p')) para = para.parentElement;
         if (!para) return '';
-        if (!this.documentParagraphs) {
-            this.documentParagraphs = Array.from(this.document.getElementsByTagNameNS(WORD_NS, 'p'));
+        // The paragraphs of the part the element is in: the main document, or a header or footer
+        let paragraphs;
+        if (para.ownerDocument === this.document) {
+            if (!this.documentParagraphs) {
+                this.documentParagraphs = Array.from(this.document.getElementsByTagNameNS(WORD_NS, 'p'));
+            }
+            paragraphs = this.documentParagraphs;
+        } else {
+            paragraphs = Array.from(para.ownerDocument.getElementsByTagNameNS(WORD_NS, 'p'));
         }
-        const paragraphs = this.documentParagraphs;
         const index = paragraphs.indexOf(para);
         for (let distance = 0; distance < paragraphs.length; distance++) {
             for (const i of distance === 0 ? [index] : [index - distance, index + distance]) {
@@ -2674,11 +2718,13 @@ class DocxParser {
      * and keeps no data, so the generator skips it.
      * @param {Object} image - The parsed image
      * @param {string} relationshipId - r:embed of an a:blip, or r:id of a v:imagedata
-     * @param {Element} element - The picture's element in the main document part, for the location hint
+     * @param {Element} element - The picture's element, for the location hint
      */
     embedPicture(image, relationshipId, element) {
-        const relationship = relationshipId && Object.prototype.hasOwnProperty.call(this.relationships, relationshipId)
-            ? this.relationships[relationshipId] : null;
+        // A header's or footer's pictures resolve through that part's relationships
+        const relationships = this.partRelationships || this.relationships;
+        const relationship = relationshipId && Object.prototype.hasOwnProperty.call(relationships, relationshipId)
+            ? relationships[relationshipId] : null;
         const path = relationship && relationship.path;
         if (path && this.images[path]) {
             image.data = this.images[path];

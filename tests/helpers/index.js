@@ -61,9 +61,13 @@ const CHUNK_CONTENT_TYPES = { mht: 'message/rfc822', html: 'text/html', htm: 'te
  * @param {Object<string,string>} [options.chunks] - File name under word/ -> contents of an embedded chunk
  *   (w:altChunk). Each gets an aFChunk relationship with id `rId_<name without extension>`, e.g.
  *   afchunk.mht -> rId_afchunk
- * @param {Array<{name: string, root: string, type: string, id: string, inner: string}>} [options.parts] - More
+ * @param {Array<{name: string, root: string, type: string, id: string, inner: string, rels?: Object<string,string>}>} [options.parts] - More
  *   parts under word/, e.g. { name: 'header1.xml', root: 'hdr', type: 'header', id: 'rIdHeader1', inner: '<w:p>...</w:p>' }:
- *   `inner` goes in the <w:{root}> root, `type` names both the relationship and the content type
+ *   `inner` goes in the <w:{root}> root, `type` names both the relationship and the content type. `rels` gives
+ *   the part its own image relationships, in word/_rels/<name>.rels: id -> target relative to the part,
+ *   e.g. { rIdLogo: 'media/logo.png' }
+ * @param {Object<string,Buffer>} [options.files] - More package parts, path -> bytes, with no relationship, e.g.
+ *   { 'word/media/logo.png': PNG } for a picture only a header relates to
  * @returns {Promise<Buffer>}
  */
 async function buildDocx(bodyXml, options = {}) {
@@ -71,11 +75,19 @@ async function buildDocx(bodyXml, options = {}) {
     const defaults = [];
     const overrides = [];
     const rels = [];
-    const wordPart = (name, rootTag, inner, type = rootTag, id = `rId_${rootTag}`) => {
+    const wordPart = (name, rootTag, inner, type = rootTag, id = `rId_${rootTag}`, partRels = null) => {
         parts.push([`word/${name}`,
             `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:${rootTag} ${NAMESPACES}>${inner}</w:${rootTag}>`]);
         overrides.push(`<Override PartName="/word/${name}" ContentType="${WORDML_CONTENT_TYPE}${type}+xml"/>`);
         rels.push(`<Relationship Id="${id}" Type="${RELATIONSHIP_TYPE}${type}" Target="${name}"/>`);
+        if (partRels) {
+            parts.push([`word/_rels/${name}.rels`,
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+                Object.entries(partRels).map(([relId, target]) =>
+                    `<Relationship Id="${relId}" Type="${RELATIONSHIP_TYPE}image" Target="${target}"/>`).join('') +
+                '</Relationships>']);
+        }
     };
 
     const sectPr = options.sectPr === undefined ? '' : `<w:sectPr>${options.sectPr}</w:sectPr>`;
@@ -85,7 +97,7 @@ async function buildDocx(bodyXml, options = {}) {
     if (options.styles !== undefined) wordPart('styles.xml', 'styles', options.styles);
     if (options.numbering !== undefined) wordPart('numbering.xml', 'numbering', options.numbering);
     if (options.settings !== undefined) wordPart('settings.xml', 'settings', options.settings);
-    for (const { name, root, type, id, inner } of options.parts || []) wordPart(name, root, inner, type, id);
+    for (const { name, root, type, id, inner, rels: partRels } of options.parts || []) wordPart(name, root, inner, type, id, partRels);
 
     // Notes parts start with Word's separator and continuation separator notes
     for (const type of ['footnote', 'endnote']) {
@@ -109,6 +121,13 @@ async function buildDocx(bodyXml, options = {}) {
                 `ContentType="${MEDIA_CONTENT_TYPES[extension] || 'application/octet-stream'}"/>`;
             if (!defaults.includes(entry)) defaults.push(entry);
         }
+    }
+
+    for (const [name, data] of Object.entries(options.files || {})) {
+        parts.push([name, data]);
+        const extension = name.split('.').pop().toLowerCase();
+        const entry = `<Default Extension="${extension}" ContentType="${MEDIA_CONTENT_TYPES[extension] || 'application/octet-stream'}"/>`;
+        if (!defaults.includes(entry)) defaults.push(entry);
     }
 
     for (const [name, data] of Object.entries(options.chunks || {})) {
