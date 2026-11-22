@@ -124,6 +124,43 @@ test('a hidden equation is left out and reported as hidden text, not as an equat
     assert.deepEqual(finding(parsed, 'hiddenText').examples, ['Görünürx']);
 });
 
+// An equation run with its own w:rPr
+const mrWith = (text, rPr) => `<m:r><w:rPr>${rPr}</w:rPr><m:t>${text}</m:t></m:r>`;
+
+test('a hidden run inside an equation is left out and reported as hidden text; the rest is written', async () => {
+    const { content, parsed } = await convertBody(p(r('Faiz: ') + oMath(mr('A') + mrWith('+gizli', '<w:vanish/>') + mr('/365'))));
+    assert.equal(content, 'Faiz: A/365');
+    assert.deepEqual(finding(parsed, 'equations').examples, ['A/365']);
+    assert.deepEqual(finding(parsed, 'hiddenText').examples, ['+gizli']);
+});
+
+test('an equation run hidden through its character style is left out; w:vanish off on a run shows it again', async () => {
+    const styles = '<w:style w:type="character" w:styleId="Gizli"><w:name w:val="Gizli"/><w:rPr><w:vanish/></w:rPr></w:style>';
+    const { content, parsed } = await convertBody(
+        p(oMath(frac(mrWith('x', '<w:rStyle w:val="Gizli"/>') + mr('a'), mrWith('2', '<w:rStyle w:val="Gizli"/><w:vanish w:val="0"/>')))),
+        { styles });
+    assert.equal(content, 'a/2');
+    assert.deepEqual(finding(parsed, 'hiddenText').examples, ['x']);
+});
+
+test('an equation whose runs are all hidden is left out and reported only as hidden text', async () => {
+    const { content, parsed } = await convertBody(p(r('Metin') + oMath(mrWith('x', '<w:vanish/>'))));
+    assert.equal(content, 'Metin');
+    assert.equal(finding(parsed, 'equations'), undefined);
+    assert.deepEqual(finding(parsed, 'hiddenText').examples, ['x']);
+});
+
+test('a hidden run inside a footnote equation is left out of the note and reported at the reference', async () => {
+    const { content, parsed } = await convertBody(p(r('Faiz') + footnoteRef(1)), {
+        footnotes: { 1: p(footnoteMark + r('Oran ') + oMath(mr('A') + mrWith('gizli', '<w:vanish/>') + mr('/365'))) }
+    });
+    assert.ok(content.includes('Oran A/365') && !content.includes('gizli'), JSON.stringify(content));
+    assert.equal(parsed.footnotes[1], 'Oran A/365');
+    const inNote = { kind: 'paragraph', paragraph: 1, note: { kind: 'footnote' } };
+    assert.deepEqual(finding(parsed, 'hiddenText').occurrences, [{ example: 'gizli', location: inNote }]);
+    assert.deepEqual(finding(parsed, 'equations').occurrences, [{ example: 'A/365', location: inNote }]);
+});
+
 test('an empty equation placeholder writes nothing and is not reported', async () => {
     const { content, parsed } = await convertBody(p(r('Metin') + oMath(ctrlPr)));
     assert.equal(content, 'Metin');

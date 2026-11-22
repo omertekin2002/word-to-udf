@@ -1302,19 +1302,16 @@ class DocxParser {
                 ((element.namespaceURI === WORD_NS && element.localName === 'r') ||
                     (element.namespaceURI === MATH_NS && element.localName === 'oMath')) && !isInEquation(element, para));
             for (const run of runs) {
-                const formatting = this.parseRunFormatting(run, style.run);
                 if (run.namespaceURI === MATH_NS) {
-                    const math = this.mathText(run);
-                    if (math.trim() === '') continue;
-                    if (formatting.hidden) {
-                        hidden.found = true;
-                        hidden.text += math;
-                    } else {
+                    // Its hidden runs add their text to hidden
+                    const math = this.mathText(run, { paragraphRun: style.run, hidden });
+                    if (math.trim() !== '') {
                         text += math;
                         findings.push(['equations', shortExample(math)]);
                     }
                     continue;
                 }
+                const formatting = this.parseRunFormatting(run, style.run);
                 if (formatting.hidden) {
                     const { shows, text: hiddenText } = hiddenRunContent(run);
                     if (shows) {
@@ -2350,24 +2347,19 @@ class DocxParser {
     /**
      * Parse an equation (m:oMath) into a text item of its linear text (see mathText), reported as
      * an equations finding. The text takes the paragraph's run formatting, as a run without its
-     * own w:rPr would; All Caps doesn't change it, as x and X are different variables. Each
-     * equation after the first in an m:oMathPara starts a new line, as Word shows it.
+     * own w:rPr would; All Caps doesn't change it, as x and X are different variables. Its hidden
+     * runs are left out (see mathText). Each equation after the first in an m:oMathPara starts a
+     * new line, as Word shows it.
      * @param {Element} oMath - The m:oMath element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
-     * @param {{found: boolean, text: string}} [hidden] - See parseRun
-     * @returns {Array<Object>} Empty for an equation with no text, or a hidden one
+     * @param {{found: boolean, text: string}} [hidden] - See parseRun; set by the equation's hidden runs
+     * @returns {Array<Object>} Empty for an equation with no text, or one all hidden
      */
     parseEquation(oMath, paragraphRun = {}, hidden = null) {
-        const text = this.mathText(oMath);
+        const text = this.mathText(oMath, { paragraphRun, hidden });
         if (text.trim() === '') return [];
+        // hidden, caps, smallCaps and lang don't apply to the equation's text as a whole
         const { hidden: isHidden, caps, smallCaps, lang, ...formatting } = this.parseRunFormatting(oMath, paragraphRun);
-        if (isHidden) {
-            if (hidden) {
-                hidden.found = true;
-                hidden.text += text;
-            }
-            return [];
-        }
 
         this.addFinding('equations', shortExample(text));
         const items = [];
@@ -2389,31 +2381,46 @@ class DocxParser {
      * name, a space and its argument. A fraction part, base, script, degree or limit is wrapped
      * in parentheses unless it is simple (see mathOperand). Any other structure (accents, bars,
      * boxes, matrices, equation arrays, limits, ...) is its text in document order.
+     * A hidden run (m:r or w:r whose w:rPr, character style or paragraph style resolves w:vanish
+     * on, see parseRunFormatting) adds nothing.
      * @param {Element} element - An m:oMath, or an element inside one
+     * @param {{paragraphRun?: Object, hidden?: {found: boolean, text: string}|null}} [context] -
+     *   paragraphRun: run properties from the paragraph's style; hidden: set when a hidden run has
+     *   text, which is appended to hidden.text
      * @returns {string}
      */
-    mathText(element) {
+    mathText(element, context = {}) {
         const ns = element.namespaceURI;
         const name = element.localName;
+        const children = el => this.mathChildrenText(el, context);
         if (ns === MARKUP_COMPATIBILITY_NS) {
             const branch = name === 'AlternateContent' ? this.alternateContentBranch(element) : null;
-            return branch ? this.mathChildrenText(branch) : '';
+            return branch ? children(branch) : '';
+        }
+        if ((ns === MATH_NS || ns === WORD_NS) && name === 'r' &&
+            this.parseRunFormatting(element, context.paragraphRun || {}).hidden) {
+            const text = this.mathChildrenText(element, { ...context, hidden: null });
+            if (context.hidden && text !== '') {
+                context.hidden.found = true;
+                context.hidden.text += text;
+            }
+            return '';
         }
         if (ns === WORD_NS) {
             if (name === 't') return element.textContent || '';
             if (name === 'sym') return symbolText(element).text;
             if (MATH_SKIPPED_WORD_ELEMENTS.includes(name)) return '';
-            return this.mathChildrenText(element);
+            return children(element);
         }
-        if (ns !== MATH_NS) return this.mathChildrenText(element);
+        if (ns !== MATH_NS) return children(element);
         // Properties (m:rPr, m:fPr, m:ctrlPr, ...) show no text
         if (name.endsWith('Pr')) return '';
 
         const part = partName => {
             const el = childElement(element, partName, MATH_NS);
-            return el ? this.mathChildrenText(el) : '';
+            return el ? children(el) : '';
         };
-        const operand = partName => this.mathOperand(childElement(element, partName, MATH_NS));
+        const operand = partName => this.mathOperand(childElement(element, partName, MATH_NS), context);
         const hidden = (properties, flag) => {
             const pr = childElement(element, properties, MATH_NS);
             return mathIsOn(pr && childElement(pr, flag, MATH_NS));
@@ -2438,7 +2445,7 @@ class DocxParser {
                 const begin = mathCharacter(element, 'dPr', 'begChr', '(');
                 const end = mathCharacter(element, 'dPr', 'endChr', ')');
                 const separator = mathCharacter(element, 'dPr', 'sepChr', '|');
-                const parts = childElements(element, 'e', MATH_NS).map(e => this.mathChildrenText(e));
+                const parts = childElements(element, 'e', MATH_NS).map(children);
                 return `${begin}${parts.join(separator)}${end}`;
             }
             case 'nary': {
@@ -2451,17 +2458,18 @@ class DocxParser {
             case 'func':
                 return `${part('fName')} ${part('e')}`;
             default:
-                return this.mathChildrenText(element);
+                return children(element);
         }
     }
 
     /**
      * Linear text of an element's children, in document order (see mathText)
      * @param {Element} element
+     * @param {Object} [context] - See mathText
      * @returns {string}
      */
-    mathChildrenText(element) {
-        return Array.from(element.children).map(child => this.mathText(child)).join('');
+    mathChildrenText(element, context = {}) {
+        return Array.from(element.children).map(child => this.mathText(child, context)).join('');
     }
 
     /**
@@ -2469,11 +2477,12 @@ class DocxParser {
      * unless it is empty, a single run of letters or digits or a decimal number (A/365, but
      * (a+b)/2 and x^(n+1)), or already one delimiter (m:d) with its own brackets
      * @param {Element|null} part - e.g. m:num, m:sup
+     * @param {Object} [context] - See mathText
      * @returns {string} '' for a missing part
      */
-    mathOperand(part) {
+    mathOperand(part, context = {}) {
         if (!part) return '';
-        const text = this.mathChildrenText(part);
+        const text = this.mathChildrenText(part, context);
         if (text === '' || SIMPLE_MATH_OPERAND.test(text)) return text;
         const shown = Array.from(part.children).filter(child => !(child.namespaceURI === MATH_NS && child.localName.endsWith('Pr')));
         if (shown.length === 1 && shown[0].namespaceURI === MATH_NS && shown[0].localName === 'd') return text;
