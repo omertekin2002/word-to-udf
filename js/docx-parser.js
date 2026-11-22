@@ -2019,11 +2019,12 @@ class DocxParser {
         if (ind) {
             if (ind.hasAttribute('w:left')) props.leftIndent = this.twipsToPoints(ind.getAttribute('w:left'));
             if (ind.hasAttribute('w:right')) props.rightIndent = this.twipsToPoints(ind.getAttribute('w:right'));
-            if (ind.hasAttribute('w:firstLine')) {
+            // A hanging indent is a negative first-line indent (see hangingIndent). It replaces an
+            // inherited first-line indent, and wins over w:firstLine on the same w:ind (ECMA-376 17.3.1.12).
+            if (ind.hasAttribute('w:hanging')) {
+                props.firstLineIndent = -this.twipsToPoints(ind.getAttribute('w:hanging')) || 0;
+            } else if (ind.hasAttribute('w:firstLine')) {
                 props.firstLineIndent = this.twipsToPoints(ind.getAttribute('w:firstLine'));
-            } else if (ind.hasAttribute('w:hanging')) {
-                // A hanging indent can't be represented, but it still replaces a first-line indent
-                props.firstLineIndent = 0;
             }
         }
 
@@ -2586,6 +2587,8 @@ class DocxParser {
             }
         }
 
+        this.hangingIndent(paragraph);
+
         // Get runs (text with formatting). Hidden runs add nothing; their text is collected for the finding.
         const hidden = { found: false, text: '' };
         for (const run of runs) {
@@ -2614,6 +2617,38 @@ class DocxParser {
         }
 
         return paragraph;
+    }
+
+    /**
+     * Settle a paragraph's hanging indent (a negative firstLineIndent, see readParagraphProperties).
+     * A list paragraph keeps no first-line indent, as before: its ListLevel drives the editor's
+     * list indentation, and how that combines with a negative FirstLineIndent is unverified.
+     * Any other paragraph keeps it, clamped so that the first line starts no further left than
+     * the margin, and gets the tab stop Word implies at the left indent: a left stop without a
+     * leader, unless one of its own stops lies past the first line's start and up to the left indent.
+     * List paragraphs are those with numbering whose level is a list (format other than none).
+     * @param {Object} paragraph - The parsed paragraph, with its numbering and tabStops resolved
+     */
+    hangingIndent(paragraph) {
+        if (!(paragraph.firstLineIndent < 0)) return;
+        const numbering = paragraph.numbering;
+        if (numbering && numbering.format !== 'none') {
+            paragraph.firstLineIndent = 0;
+            return;
+        }
+
+        const leftIndent = Math.max(paragraph.leftIndent || 0, 0);
+        paragraph.firstLineIndent = Math.max(paragraph.firstLineIndent, -leftIndent) || 0;
+        if (paragraph.firstLineIndent === 0) return;
+
+        // Indents are whole points (see twipsToPoints), so a stop is compared at the point it rounds to:
+        // the w:pos="2268" stop of a w:left="2268" paragraph (113.4 against 113) is at the left indent
+        const firstLineStart = leftIndent + paragraph.firstLineIndent;
+        const stops = paragraph.tabStops || [];
+        const between = stop => Math.round(stop.position) > firstLineStart && Math.round(stop.position) <= leftIndent;
+        if (stops.some(between)) return;
+        paragraph.tabStops = [...stops, { position: leftIndent, alignment: 0, leader: 0 }]
+            .sort((a, b) => a.position - b.position);
     }
 
     /**

@@ -156,6 +156,16 @@ Paragraph spacing (`w:spacing`) is read from the document defaults, the paragrap
 - Exact and at-least line heights (`w:lineRule="exact"` / `"atLeast"`) have no UDF equivalent, so those paragraphs get single spacing, and the page reports them as a `lineSpacing` conversion note.
 - Automatic spacing (`w:beforeAutospacing`, `w:afterAutospacing`), `w:contextualSpacing` and spacing in lines (`w:beforeLines`, `w:afterLines`) are ignored.
 
+### Indents
+Paragraph indents (`w:ind`) are read from the document defaults, the paragraph style and its `w:basedOn` chain, and the paragraph itself, each attribute on its own, and written in whole points: `w:left` as `LeftIndent`, `w:right` as `RightIndent`, `w:firstLine` as `FirstLineIndent`.
+- A hanging indent (`w:hanging`) is written as a negative `FirstLineIndent`, the way a Java Swing styled document (which the UDF is) marks a first line that starts left of the left indent: `<w:ind w:left="1440" w:hanging="1440"/>` becomes `LeftIndent="72.0" FirstLineIndent="-72.0"`. A hanging indent replaces an inherited first-line indent and the other way round; on the same `w:ind`, `w:hanging` wins over `w:firstLine`, as in Word.
+- A hanging indent larger than the left indent would start the first line left of the margin, so it is cut to the left indent: `<w:ind w:left="360" w:hanging="720"/>` becomes `FirstLineIndent="-18.0"`.
+- Word treats the left indent of a hanging paragraph as a tab stop when the paragraph has no stop of its own past the first line's start and up to the left indent, so `DAVACI<tab>: …` tabs to where the wrapped lines start. That stop is added to the paragraph's `TabSet` (left-aligned, no leader, at the left indent).
+- Numbered and bulleted paragraphs keep no first-line indent and get no implied stop: their `ListLevel` drives the editor's list indentation, and how it combines with a negative `FirstLineIndent` hasn't been checked. A numbering level without a number (`w:numFmt w:val="none"`) isn't written as a list, so its paragraphs hang like any other.
+- This applies in the body, table cells, text boxes and the converted header and footer. When a page break splits a paragraph, only the part before it keeps the first-line indent.
+- How the UYAP editor draws a negative `FirstLineIndent` hasn't been checked in the official editor.
+- Character-unit indents (`w:leftChars`, `w:hangingChars`, `w:firstLineChars`), `w:start` and `w:end`, and list indents from `numbering.xml` are not converted.
+
 ### Tab stops
 A paragraph's tab stops come from `w:tabs` in `w:docDefaults`, the paragraph style and its `w:basedOn` chain, and the paragraph itself. Each layer adds to the stops it inherits: a stop replaces any inherited stop at the same position, and `w:val="clear"` removes the inherited stop at its position. The result is written as the paragraph's `TabSet` attribute, `position:alignment:leader` per stop, comma-separated and in position order, with positions in points to one decimal: `w:pos="1985"` and `w:pos="2268"` become `TabSet="99.3:0:0,113.4:0:0"`.
 - Alignment: `left`, `start` and `num` are `0`, `center` is `1`, `right` and `end` are `2`, `decimal` is `3`.
@@ -165,7 +175,8 @@ A paragraph's tab stops come from `w:tabs` in `w:docDefaults`, the paragraph sty
 - No position is written twice. When two stops that are left round to the same tenth of a point (1441 and 1442 twips are both `72.1`), only the first in position order is written, the one a tab reaches first.
 - Paragraphs in table cells get their stops the same way.
 - Positions are written as Word measures them, from the left margin. Whether the UYAP editor measures `TabSet` positions from the margin or from the paragraph's left indent is not documented and has not been checked in the official editor, so stops in indented paragraphs may land elsewhere there.
-- The document's default tab interval (`w:defaultTabStop`), the implicit stop Word adds at a hanging indent, and tab stops in footnote and endnote text are not converted.
+- A paragraph with a hanging indent that isn't a list item also gets the stop Word implies at its left indent (see [Indents](#indents)).
+- The document's default tab interval (`w:defaultTabStop`) and tab stops in footnote and endnote text are not converted.
 
 ### Lists
 A paragraph's list comes from `w:numPr`, read from the paragraph style and its `w:basedOn` chain and from the paragraph itself, each attribute on its own: a numbered paragraph style gives the list (`w:numId`) and level (`w:ilvl`), and the paragraph can set just its own `w:ilvl` to move to another level of that list, or just its own `w:numId`.
@@ -250,6 +261,7 @@ The page lists a note's places, one line each, under "Nerede:" / "Where:", e.g. 
 - Footnote and endnote text keeps its run formatting and paragraphs, but not paragraph alignment, indents or spacing inside notes (note paragraphs are left-aligned, without indents), nor tab stops in notes; pictures, page breaks and tables inside notes are not converted as such (a table's text is kept as paragraphs). All endnotes go at the end of the document, even when Word places them at the end of each section, and they are always numbered from the start. Footnotes and such endnotes are listed in the conversion notes
 - Exact and at-least line heights, automatic paragraph spacing and contextual spacing are not converted (see Paragraph spacing); exact and at-least line heights are listed in the conversion notes
 - Bar tab stops and underscore or heavy tab leaders are not converted (see Tab stops), and are listed in the conversion notes
+- Hanging indents are written as a negative `FirstLineIndent` (see [Indents](#indents)), except on list paragraphs, which keep none; how the UYAP editor draws a negative first-line indent hasn't been checked in the official editor. Indents are rounded to whole points
 - Hidden text is left out (see Run text) and listed in the conversion notes; Small Caps text is written in full-size capitals
 - Subscript text is written on the baseline and paragraph borders are left out, since the UDF documentation defines neither; both are listed in the conversion notes. How the UYAP editor shows superscript text hasn't been checked in the official editor
 - Section breaks and Page break before start a new page, but there is one page setup for the whole document, from the last section: an earlier section's different orientation, paper size or margins, multiple columns, and odd/even-page section breaks (written as plain page breaks) are not kept, and are listed in the conversion notes (see [Page breaks and sections](#page-breaks-and-sections)). Line numbering and page-number restarts aren't converted
