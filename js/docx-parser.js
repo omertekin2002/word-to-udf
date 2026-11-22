@@ -260,6 +260,11 @@ const MAX_EXAMPLE_LENGTH = 40;
 // How many located occurrences (an example and where it is) a finding keeps
 const MAX_FINDING_OCCURRENCES = 5;
 
+// How many levels of tables are written as tables, the body's own table included: by default a
+// table in a cell of a table in a cell of a body table is the deepest. A table nested deeper is
+// flattened into its cell's paragraphs and reported (nestedTables). 1 flattens every nested table.
+const MAX_TABLE_DEPTH = 3;
+
 // Outline levels (w:outlineLvl w:val) that make a paragraph a heading: 0 to 8 are Word's
 // heading levels 1 to 9, and 9 is body text
 const MAX_HEADING_OUTLINE_LEVEL = 8;
@@ -732,6 +737,8 @@ class DocxParser {
         this.styles = this.emptyStyles();
         this.findings = {};
         this.inDiscardedCell = false;
+        // How many tables deep the content being parsed is (see parseTable): 0 outside any table
+        this.tableDepth = 0;
         // Whether a note's paragraphs are being parsed (see parseNoteParagraphs): addFinding records
         // nothing, since noteText's findings are recorded once per reference instead, and parseRun
         // leaves out pictures and note references
@@ -768,6 +775,7 @@ class DocxParser {
             this.styles = this.emptyStyles();
             this.findings = {};
             this.inDiscardedCell = false;
+            this.tableDepth = 0;
             this.parsingNote = false;
             this.location = { kind: 'document' };
             this.body = { paragraphs: 0, tables: 0, headings: { outline: null, petition: null } };
@@ -2015,7 +2023,7 @@ class DocxParser {
      * so its findings say where they are. Body paragraphs and tables are numbered from 1 in
      * document order, empty paragraphs included; a cell is located by its table, its row and its
      * w:tc position in that row. Text boxes and nested tables aren't counted: their findings take
-     * the location of the paragraph that anchors the text box, or of the outer table's cell. Each
+     * the location of the paragraph that anchors the text box, or of the outermost table's cell. Each
      * location names the last heading before it with an outline level, else the last petition
      * heading before it (see headingKind). Embedded content (w:altChunk), which isn't converted,
      * is numbered as a body paragraph, so its finding names where it starts.
@@ -2041,7 +2049,7 @@ class DocxParser {
             } else if (child.localName === 'tbl') {
                 const table = ++this.body.tables;
                 const heading = headingOf();
-                elements.push(this.parseTable(child, false, (row, cell) => {
+                elements.push(this.parseTable(child, (row, cell) => {
                     this.location = { kind: 'cell', table, row, cell, ...heading };
                 }));
             } else if (child.localName === 'altChunk') {
@@ -2104,7 +2112,7 @@ class DocxParser {
      * Parse the block-level content (paragraphs and tables) of a body, cell or text box. Embedded
      * content (w:altChunk) is reported (see reportEmbeddedChunk), not converted.
      * @param {Element} container - The containing element
-     * @param {boolean} [inCell] - Whether the content ends up in a table cell, where a table is nested
+     * @param {boolean} [inCell] - Whether the content ends up in a table cell
      * @returns {Array<Object>} Parsed paragraphs and tables in document order
      */
     parseBlocks(container, inCell = false) {
@@ -2116,7 +2124,7 @@ class DocxParser {
             if (localName === 'p') {
                 elements.push(...this.parseParagraphBlocks(child, inCell));
             } else if (localName === 'tbl') {
-                elements.push(this.parseTable(child, inCell));
+                elements.push(this.parseTable(child));
             } else if (localName === 'altChunk') {
                 this.reportEmbeddedChunk(child);
             }
@@ -2755,16 +2763,20 @@ class DocxParser {
     }
 
     /**
-     * Parse a table element. In a table of the document itself, the generator writes a cell
-     * that continues the vertical merge above it empty, so nothing in such a cell is recorded
-     * as a finding. A nested table is flattened to paragraphs instead, those cells included.
+     * Parse a table element, at this.tableDepth + 1 levels of tables deep. A table within
+     * MAX_TABLE_DEPTH levels, nested in a cell or not, is written as a table: the generator
+     * writes a cell that continues the vertical merge above it empty, so nothing in such a cell
+     * is recorded as a finding. A table nested deeper is flattened into its cell's paragraphs
+     * instead (see parseCellBlocks), those cells included, and its borders aren't written.
      * @param {Element} tbl - The table element
-     * @param {boolean} [nested] - Whether the table is in a cell of another table
      * @param {function(number, number): void} [enterCell] - Called with a cell's 1-based row and
      *   w:tc position in that row before its content is parsed (see parseBodyBlocks)
-     * @returns {Object} Parsed table
+     * @returns {Object} Parsed table; each cell has its content as blocks (paragraphs and
+     *   written nested tables, in document order) and as paragraphs (see flattenToParagraphs)
      */
-    parseTable(tbl, nested = false, enterCell = null) {
+    parseTable(tbl, enterCell = null) {
+        const depth = this.tableDepth + 1;
+        const flattened = depth > MAX_TABLE_DEPTH;
         const table = {
             type: 'table',
             rows: [],
@@ -2800,18 +2812,26 @@ class DocxParser {
         }
 
         const merges = verticalMerges(table);
-        table.rows.forEach((row, i) => row.cells.forEach((cell, j) => {
-            const discarded = !nested && merges[i][j].joinsAbove;
-            if (enterCell) enterCell(i + 1, j + 1);
-            if (discarded) this.inDiscardedCell = true;
-            try {
-                cell.paragraphs = this.parseCellParagraphs(cellElements[i][j]);
-            } finally {
-                if (discarded) this.inDiscardedCell = false;
-            }
-            // A nested table is flattened to paragraphs, so its borders aren't written
-            if (!nested && table.border !== 'borderNone') this.checkCellBorders(cell, merges[i][j], discarded);
-        }));
+        this.tableDepth = depth;
+        try {
+            table.rows.forEach((row, i) => row.cells.forEach((cell, j) => {
+                const discarded = !flattened && merges[i][j].joinsAbove;
+                if (enterCell) enterCell(i + 1, j + 1);
+                // A cell of a nested table may be in a cell written empty: that stays so
+                const wasDiscarded = this.inDiscardedCell;
+                if (discarded) this.inDiscardedCell = true;
+                try {
+                    cell.blocks = this.parseCellBlocks(cellElements[i][j]);
+                } finally {
+                    this.inDiscardedCell = wasDiscarded;
+                }
+                cell.paragraphs = this.flattenToParagraphs(cell.blocks);
+                // A flattened table's borders aren't written
+                if (!flattened && table.border !== 'borderNone') this.checkCellBorders(cell, merges[i][j], discarded);
+            }));
+        } finally {
+            this.tableDepth = depth - 1;
+        }
 
         return table;
     }
@@ -2974,13 +2994,14 @@ class DocxParser {
     }
 
     /**
-     * Parse a table cell's properties. Its paragraphs are added by parseTable.
+     * Parse a table cell's properties. Its content is added by parseTable.
      * @param {Element} tc - The table cell element
      * @returns {Object} Parsed cell, without content
      */
     parseTableCell(tc) {
         const cell = {
             type: 'cell',
+            blocks: [],
             paragraphs: [],
             colspan: 1,
             rowspan: 1,
@@ -3028,19 +3049,25 @@ class DocxParser {
     }
 
     /**
-     * Parse the paragraphs of a table cell. Nested tables can't be represented yet, so
-     * their paragraphs are flattened into the cell in reading order.
+     * Parse the content of a cell of the table being parsed (at this.tableDepth): its paragraphs
+     * and the tables nested in it, in document order. A nested table past MAX_TABLE_DEPTH is
+     * flattened into the cell's paragraphs in reading order, and reported.
      * @param {Element} tc - The table cell element
-     * @returns {Array<Object>} Parsed paragraphs
+     * @returns {Array<Object>} Parsed paragraphs and tables
      */
-    parseCellParagraphs(tc) {
-        const blocks = this.parseBlocks(tc, true);
-        for (const block of blocks) {
-            if (block.type !== 'table') continue;
-            const firstText = this.flattenToParagraphs([block]).map(paragraphText).find(text => text.trim() !== '');
+    parseCellBlocks(tc) {
+        const blocks = [];
+        for (const block of this.parseBlocks(tc, true)) {
+            if (block.type !== 'table' || this.tableDepth < MAX_TABLE_DEPTH) {
+                blocks.push(block);
+                continue;
+            }
+            const paragraphs = this.flattenToParagraphs([block]);
+            const firstText = paragraphs.map(paragraphText).find(text => text.trim() !== '');
             this.addFinding('nestedTables', shortExample(firstText || ''));
+            blocks.push(...paragraphs);
         }
-        return this.flattenToParagraphs(blocks);
+        return blocks;
     }
 
     /**
@@ -3057,7 +3084,7 @@ class DocxParser {
             } else if (block.type === 'table') {
                 for (const row of block.rows) {
                     for (const cell of row.cells) {
-                        // Cell paragraphs are already flattened
+                        // Cell paragraphs are already flattened, nested tables included
                         paragraphs.push(...cell.paragraphs);
                     }
                 }

@@ -211,6 +211,19 @@ const FEATURES = [
             `<w:tr>${cell('Text')}<w:tc></w:tc></w:tr></w:tbl>` + p(r('After the table'))
     },
     {
+        // A <table> inside a <cell>, between the cell's paragraphs ("Hücreler paragraflar ve iç
+        // içe tablolar içerebilir"), with its own merged, shaded and partly bordered cells
+        name: 'table nested in a table cell',
+        body: `<w:tbl><w:tblPr>${borders('tblBorders', 'nil', ...ALL_EDGES)}</w:tblPr>${grid(1)}<w:tr><w:tc>` +
+            p(r('Parties')) +
+            `<w:tbl><w:tblPr>${borders('tblBorders', 'double', ...ALL_EDGES)}</w:tblPr>${grid(2)}` +
+            '<w:tr>' + cell('Claimant', '<w:vMerge w:val="restart"/><w:shd w:val="clear" w:color="auto" w:fill="D9D9D9"/>') +
+            cell('Name', '<w:vAlign w:val="bottom"/>') + '</w:tr>' +
+            '<w:tr>' + cell('', '<w:vMerge/>') + cell('Address') + '</w:tr>' +
+            '<w:tr>' + cell('Signature', '<w:gridSpan w:val="2"/>') + '</w:tr></w:tbl>' +
+            p(r('End of cell')) + '</w:tc></w:tr></w:tbl>' + p(r('After the table'))
+    },
+    {
         name: 'table cell with a tab, a picture and a footnote mark',
         body: `<w:tbl>${grid(1)}<w:tr><w:tc>` +
             p(r('Label') + '<w:r><w:tab/></w:r>' + drawing + r('Noted') + footnoteRef(1)) +

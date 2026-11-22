@@ -328,7 +328,8 @@ test('every finding code the parser reports has a TR and an EN message, and app.
     assert.match(strings.en['notes.count'], /\{count\}/);
 });
 
-// A document with a first-page header, two comments, a nested table whose text looks like markup, and a GIF picture
+// A document with a first-page header, two comments, a table nested past the depth limit whose text looks like
+// markup, and a GIF picture
 async function docxWithFindings() {
     const p = inner => `<w:p>${inner}</w:p>`;
     const r = text => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
@@ -338,7 +339,7 @@ async function docxWithFindings() {
         '<pic:pic><pic:blipFill><a:blip r:embed="rId_image1"/></pic:blipFill></pic:pic>' +
         '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
     const comment = (id, text) => `<w:comment w:id="${id}" w:author="Yazar">${p(r(text))}</w:comment>`;
-    return buildDocx(p(r('Dilekçe metni')) + tbl([p(r('Dış')) + tbl([p(r('&lt;img src=x&gt; iç tablo'))])]) + p(picture), {
+    return buildDocx(p(r('Dilekçe metni')) + tbl([p(r('Dış')) + tbl([tbl([tbl([p(r('&lt;img src=x&gt; iç tablo'))])])])]) + p(picture), {
         sectPr: '<w:headerReference w:type="first" r:id="rIdHeader1"/><w:titlePg/>',
         media: { 'image1.gif': Buffer.from('GIF89a', 'latin1') },
         parts: [
