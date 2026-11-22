@@ -51,6 +51,8 @@ class UdfGenerator {
         this.collectedEndnotes = []; // Endnotes, appended after everything else
         this.endnoteCounter = 0; // Endnotes are numbered on their own
         this.endnoteFormat = 'lowerRoman';
+        this.pendingPageBreak = false; // A section break or page break before waiting for what follows it
+        this.bodyStart = 0; // How many elements come before the body's (the header)
     }
 
     /**
@@ -76,14 +78,24 @@ class UdfGenerator {
         }
         const headerLength = this.content.length;
 
-        // Process all document elements
+        // Process all document elements. A block-level page break (a section break, or a paragraph's
+        // page break before) is written when the next paragraph or table is: one that ends the
+        // document writes none.
+        this.pendingPageBreak = false;
+        this.bodyStart = this.elements.length;
         for (const element of document.elements) {
+            if (element.type === 'pageBreak') {
+                this.pendingPageBreak = true;
+                continue;
+            }
+            if (element.type === 'paragraph' || element.type === 'table') this.writePendingPageBreak();
             if (element.type === 'paragraph') {
                 this.processParagraph(element);
             } else if (element.type === 'table') {
                 this.processTable(element);
             }
         }
+        this.pendingPageBreak = false;
 
         // Append footnotes section at the end if there are any
         if (this.collectedFootnotes.length > 0) {
@@ -215,6 +227,18 @@ class UdfGenerator {
         } finally {
             this.elements = bodyElements;
         }
+    }
+
+    /**
+     * Write the block-level page break waiting for the paragraph or table about to be written (see
+     * generate), as a manual page break is. None before the body's first element, which already
+     * starts the first page, nor right after a page break, which would add a blank page.
+     */
+    writePendingPageBreak() {
+        if (!this.pendingPageBreak) return;
+        this.pendingPageBreak = false;
+        if (this.elements.length === this.bodyStart || this.elements[this.elements.length - 1] === '<page-break />') return;
+        this.writePageBreak();
     }
 
     /**
