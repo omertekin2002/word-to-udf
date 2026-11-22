@@ -202,6 +202,13 @@ const CELL_EDGES = {
 // Border values (ST_Border) that draw no line
 const NO_BORDER_VALUES = ['none', 'nil'];
 
+// Text of an equation part that needs no parentheses around it in linear form (see mathOperand):
+// one run of letters or digits, or a decimal number
+const SIMPLE_MATH_OPERAND = /^(?:[\p{L}\p{N}]+|\p{N}+(?:[.,]\p{N}+)+)$/u;
+
+// Word ML elements inside an equation that show no text: run properties, and deleted or moved-away runs
+const MATH_SKIPPED_WORD_ELEMENTS = ['rPr', 'del', 'moveFrom'];
+
 const COMPOUND_FILE_SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 // Name of the stream an encrypted OOXML package keeps its encryption parameters in (MS-OFFCRYPTO 2.3.4)
@@ -227,6 +234,7 @@ const STRICT_WORD_NS = 'http://purl.oclc.org/ooxml/wordprocessingml/main';
 const PARSE_FAILURES = {
     corrupt: 'The Word document is damaged: its main document part is missing or not well-formed.',
     encrypted: 'The Word document is password-protected.',
+    embeddedOnly: 'The Word document has no text of its own: its content is embedded by another program (w:altChunk).',
     legacyDoc: 'The file is a Word 97-2003 document (.doc), not a .docx.',
     strict: 'The Word document is saved as Strict Open XML, which is not supported.',
     tooLarge: 'The Word document is too large to convert: its parts decompress past the size limit.'
@@ -241,7 +249,8 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 // Codes of the conversion findings parse() reports, in the order it lists them: content the
 // conversion drops or simplifies, so the user can fix it in Word before filing
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
-    'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders'];
+    'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
+    'equations', 'embeddedContent'];
 
 // How many location hints a finding keeps, and how long each may be
 const MAX_FINDING_EXAMPLES = 3;
@@ -409,6 +418,44 @@ function isPetitionHeading(paragraph) {
 }
 
 /**
+ * Whether an Office Math on/off property is on: present, with no m:val or one that isn't off
+ * @param {Element|null} property - e.g. m:degHide
+ * @returns {boolean}
+ */
+function mathIsOn(property) {
+    if (!property) return false;
+    if (!property.hasAttributeNS(MATH_NS, 'val')) return true;
+    return !['0', 'false', 'off'].includes(property.getAttributeNS(MATH_NS, 'val'));
+}
+
+/**
+ * A character an Office Math structure's properties set, e.g. m:dPr/m:begChr
+ * @param {Element} element - The structure, e.g. m:d
+ * @param {string} properties - Local name of its properties element, e.g. 'dPr'
+ * @param {string} name - Local name of the character property, e.g. 'begChr'
+ * @param {string} fallback - The character when the property or its m:val is missing
+ * @returns {string} '' when m:val is empty: no character
+ */
+function mathCharacter(element, properties, name, fallback) {
+    const pr = childElement(element, properties, MATH_NS);
+    const property = pr && childElement(pr, name, MATH_NS);
+    return property && property.hasAttributeNS(MATH_NS, 'val') ? property.getAttributeNS(MATH_NS, 'val') : fallback;
+}
+
+/**
+ * Whether an element is inside an equation (m:oMath) below an ancestor
+ * @param {Element} element
+ * @param {Element} ancestor - Where to stop looking
+ * @returns {boolean}
+ */
+function isInEquation(element, ancestor) {
+    for (let el = element.parentElement; el && el !== ancestor; el = el.parentElement) {
+        if (el.namespaceURI === MATH_NS && el.localName === 'oMath') return true;
+    }
+    return false;
+}
+
+/**
  * A copy of a finding's location, so the caller can't change the one the parser keeps
  * @param {Object} location - See DocxParser.addFinding
  * @returns {Object}
@@ -426,6 +473,18 @@ function copyLocation(location) {
  */
 function paragraphText(paragraph) {
     return paragraph.runs.filter(run => run.type === 'text').map(run => run.text).join('');
+}
+
+/**
+ * Whether a parsed run item shows something in the UDF: text other than whitespace, a picture
+ * with data, or a note reference
+ * @param {Object} item - See parseRun
+ * @returns {boolean}
+ */
+function showsContent(item) {
+    if (item.type === 'text') return item.text.trim() !== '';
+    if (item.type === 'image') return Boolean(item.data);
+    return item.type === 'footnoteRef' || item.type === 'endnoteRef';
 }
 
 /**
@@ -709,6 +768,7 @@ class DocxParser {
             this.body = { paragraphs: 0, tables: 0, headings: { outline: null, petition: null } };
             this.documentParagraphs = null;
             this.endnotesMoved = false;
+            this.embeddedChunks = 0;
             this.partBytes = new Map();
             this.bytesRead = 0;
 
@@ -762,6 +822,13 @@ class DocxParser {
             // Decode the pictures the document shows, then extract document elements
             await this.extractImages();
             const elements = await this.extractElements();
+
+            // A body whose only content is embedded chunks (w:altChunk), which aren't converted,
+            // would give an empty UDF
+            if (this.embeddedChunks > 0 && !this.flattenToParagraphs(elements).some(paragraph =>
+                paragraph.runs.some(showsContent))) {
+                throw parseFailure('embeddedOnly');
+            }
 
             return {
                 elements: elements,
@@ -950,7 +1017,7 @@ class DocxParser {
     }
 
     /**
-     * Whether an XML part holds any non-whitespace text (w:t)
+     * Whether an XML part holds any non-whitespace text (w:t, or an equation's m:t)
      * @param {string} path - Part name
      * @returns {Promise<boolean>} false for a missing or unreadable part
      */
@@ -959,7 +1026,8 @@ class DocxParser {
         if (!file) return false;
         try {
             const doc = parseXml(await this.readXmlPart(file));
-            return Array.from(doc.getElementsByTagNameNS(WORD_NS, 't')).some(t => (t.textContent || '').trim() !== '');
+            return [WORD_NS, MATH_NS].some(namespace => Array.from(doc.getElementsByTagNameNS(namespace, 't'))
+                .some(t => (t.textContent || '').trim() !== ''));
         } catch (error) {
             rethrowFatal(error);
             console.warn(`Could not read ${path}:`, error);
@@ -1079,6 +1147,8 @@ class DocxParser {
         const hasContent = element => HEADER_FOOTER_DRAWINGS.some(name => element.getElementsByTagNameNS(WORD_NS, name).length > 0) ||
             Array.from(element.getElementsByTagNameNS(WORD_NS, 't')).some(t => (t.textContent || '').trim() !== '');
         if (blocks.some(block => block.localName === 'tbl' && hasContent(block))) dropped = true;
+        // Embedded content from another program (w:altChunk) isn't converted
+        if (blocks.some(block => block.localName === 'altChunk')) dropped = true;
         const paragraphs = blocks.filter(block => block.localName === 'p');
 
         // Simple fields, with the result runs inside them, and pictures and text boxes
@@ -1114,8 +1184,8 @@ class DocxParser {
         }
 
         const hasText = paragraphs.some(para => this.paragraphRuns(para)
-            .some(run => childElements(run, 'sym').length > 0 ||
-                childElements(run, 't').some(t => (t.textContent || '').trim() !== '')));
+            .some(run => run.namespaceURI === MATH_NS ? this.mathText(run).trim() !== ''
+                : childElements(run, 'sym').length > 0 || childElements(run, 't').some(t => (t.textContent || '').trim() !== '')));
         if (!hasText) return { paragraphs: null, dropped };
 
         // Every paragraph is written, as in a table cell (see paragraphIsWritten)
@@ -1215,11 +1285,11 @@ class DocxParser {
      * Plain text of a footnote or endnote: the text of its runs in document order, with one
      * space between paragraphs. A tab (w:tab, w:ptab) or line break (w:br, w:cr) in a run becomes a
      * space, so the words on either side of it stay apart. A symbol (w:sym) becomes its Unicode
-     * text (see symbolText). A hidden run (w:vanish, resolved through the paragraph and character
-     * styles as in the body) adds nothing.
+     * text (see symbolText), and an equation (m:oMath) its linear text (see mathText). A hidden run
+     * (w:vanish, resolved through the paragraph and character styles as in the body) adds nothing.
      * @param {Element} note - The w:footnote or w:endnote element
      * @param {Array<[string, string]>} [findings] - Receives a [code, example] pair for each symbol
-     *   (symbols) and for each paragraph with hidden content (hiddenText)
+     *   (symbols), each equation (equations) and each paragraph with hidden content (hiddenText)
      * @returns {string}
      */
     noteText(note, findings = []) {
@@ -1227,8 +1297,24 @@ class DocxParser {
         for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
             const style = this.paragraphStyle(childElement(para, 'pPr'));
             const hidden = { found: false, text: '' };
-            for (const run of para.getElementsByTagNameNS(WORD_NS, 'r')) {
+            // Runs, and equations in place of the runs inside them
+            const runs = Array.from(para.getElementsByTagName('*')).filter(element =>
+                ((element.namespaceURI === WORD_NS && element.localName === 'r') ||
+                    (element.namespaceURI === MATH_NS && element.localName === 'oMath')) && !isInEquation(element, para));
+            for (const run of runs) {
                 const formatting = this.parseRunFormatting(run, style.run);
+                if (run.namespaceURI === MATH_NS) {
+                    const math = this.mathText(run);
+                    if (math.trim() === '') continue;
+                    if (formatting.hidden) {
+                        hidden.found = true;
+                        hidden.text += math;
+                    } else {
+                        text += math;
+                        findings.push(['equations', shortExample(math)]);
+                    }
+                    continue;
+                }
                 if (formatting.hidden) {
                     const { shows, text: hiddenText } = hiddenRunContent(run);
                     if (shows) {
@@ -1884,7 +1970,8 @@ class DocxParser {
      * w:tc position in that row. Text boxes and nested tables aren't counted: their findings take
      * the location of the paragraph that anchors the text box, or of the outer table's cell. Each
      * location names the last heading before it with an outline level, else the last petition
-     * heading before it (see headingKind).
+     * heading before it (see headingKind). Embedded content (w:altChunk), which isn't converted,
+     * is numbered as a body paragraph, so its finding names where it starts.
      * @param {Element} body - The w:body element
      * @returns {Array<Object>} Parsed paragraphs and tables in document order (see parseBlocks)
      */
@@ -1910,6 +1997,10 @@ class DocxParser {
                 elements.push(this.parseTable(child, false, (row, cell) => {
                     this.location = { kind: 'cell', table, row, cell, ...heading };
                 }));
+            } else if (child.localName === 'altChunk') {
+                // Embedded content takes a body paragraph's place: Word shows it where its first paragraph would be
+                this.location = { kind: 'paragraph', paragraph: ++this.body.paragraphs, ...headingOf() };
+                this.reportEmbeddedChunk(child);
             }
         }
 
@@ -1963,7 +2054,8 @@ class DocxParser {
     }
 
     /**
-     * Parse the block-level content (paragraphs and tables) of a body, cell or text box
+     * Parse the block-level content (paragraphs and tables) of a body, cell or text box. Embedded
+     * content (w:altChunk) is reported (see reportEmbeddedChunk), not converted.
      * @param {Element} container - The containing element
      * @param {boolean} [inCell] - Whether the content ends up in a table cell, where a table is nested
      * @returns {Array<Object>} Parsed paragraphs and tables in document order
@@ -1978,6 +2070,8 @@ class DocxParser {
                 elements.push(...this.parseParagraphBlocks(child, inCell));
             } else if (localName === 'tbl') {
                 elements.push(this.parseTable(child, inCell));
+            } else if (localName === 'altChunk') {
+                this.reportEmbeddedChunk(child);
             }
         }
 
@@ -2004,10 +2098,11 @@ class DocxParser {
     /**
      * Collect the runs of a paragraph, including runs inside inline wrappers
      * (hyperlinks, insertions, content controls, smart tags, fields, ...).
-     * Deleted and moved-away text is skipped.
+     * Deleted and moved-away text is skipped. An equation (m:oMath, also each one in an
+     * m:oMathPara) is collected whole in place of its runs: parseRun writes it as linear text.
      * @param {Element} container - The paragraph or an inline wrapper
      * @param {Array<Element>} [runs] - Accumulator
-     * @returns {Array<Element>} w:r elements in document order
+     * @returns {Array<Element>} w:r and m:oMath elements in document order
      */
     paragraphRuns(container, runs = []) {
         const skipped = ['pPr', 'rPr', 'sdtPr', 'sdtEndPr', 'customXmlPr', 'smartTagPr', 'del', 'moveFrom'];
@@ -2018,8 +2113,10 @@ class DocxParser {
                     const branch = this.alternateContentBranch(child);
                     if (branch) this.paragraphRuns(branch, runs);
                 }
+            } else if (child.namespaceURI === MATH_NS && child.localName === 'oMath') {
+                runs.push(child);
             } else if (child.namespaceURI !== WORD_NS) {
-                // e.g. Office Math (m:oMath), which can hold w:r
+                // e.g. an m:oMathPara, which holds equations
                 this.paragraphRuns(child, runs);
             } else if (child.localName === 'r') {
                 runs.push(child);
@@ -2163,6 +2260,7 @@ class DocxParser {
      *   footnoteRef, endnoteRef). Empty for a hidden run: Word neither shows nor prints it.
      */
     parseRun(run, paragraphRun = {}, hidden = null) {
+        if (run.namespaceURI === MATH_NS) return this.parseEquation(run, paragraphRun, hidden);
         const items = [];
         // hidden, caps, smallCaps and lang decide how the run's text is written; they aren't text attributes
         const { hidden: isHidden, caps, smallCaps, lang, ...formatting } = this.parseRunFormatting(run, paragraphRun);
@@ -2247,6 +2345,153 @@ class DocxParser {
         }
 
         return items;
+    }
+
+    /**
+     * Parse an equation (m:oMath) into a text item of its linear text (see mathText), reported as
+     * an equations finding. The text takes the paragraph's run formatting, as a run without its
+     * own w:rPr would; All Caps doesn't change it, as x and X are different variables. Each
+     * equation after the first in an m:oMathPara starts a new line, as Word shows it.
+     * @param {Element} oMath - The m:oMath element
+     * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
+     * @param {{found: boolean, text: string}} [hidden] - See parseRun
+     * @returns {Array<Object>} Empty for an equation with no text, or a hidden one
+     */
+    parseEquation(oMath, paragraphRun = {}, hidden = null) {
+        const text = this.mathText(oMath);
+        if (text.trim() === '') return [];
+        const { hidden: isHidden, caps, smallCaps, lang, ...formatting } = this.parseRunFormatting(oMath, paragraphRun);
+        if (isHidden) {
+            if (hidden) {
+                hidden.found = true;
+                hidden.text += text;
+            }
+            return [];
+        }
+
+        this.addFinding('equations', shortExample(text));
+        const items = [];
+        const parent = oMath.parentElement;
+        if (parent && parent.namespaceURI === MATH_NS && parent.localName === 'oMathPara' &&
+            childElements(parent, 'oMath', MATH_NS)[0] !== oMath) {
+            items.push({ type: 'break' });
+        }
+        items.push({ ...formatting, text });
+        return items;
+    }
+
+    /**
+     * Linear text of an Office Math element, close to Word's own linear format: a fraction
+     * (m:f) is num/den, scripts are base^sup, base_sub and base_sub^sup, a radical (m:rad)
+     * √(x) or d√(x) with a degree that isn't hidden, a delimiter (m:d) its parts between its
+     * begin and end characters, joined by its separator, an n-ary operator (m:nary) the
+     * operator, its limits as _sub and ^sup, a space and its body, and a function (m:func) its
+     * name, a space and its argument. A fraction part, base, script, degree or limit is wrapped
+     * in parentheses unless it is simple (see mathOperand). Any other structure (accents, bars,
+     * boxes, matrices, equation arrays, limits, ...) is its text in document order.
+     * @param {Element} element - An m:oMath, or an element inside one
+     * @returns {string}
+     */
+    mathText(element) {
+        const ns = element.namespaceURI;
+        const name = element.localName;
+        if (ns === MARKUP_COMPATIBILITY_NS) {
+            const branch = name === 'AlternateContent' ? this.alternateContentBranch(element) : null;
+            return branch ? this.mathChildrenText(branch) : '';
+        }
+        if (ns === WORD_NS) {
+            if (name === 't') return element.textContent || '';
+            if (name === 'sym') return symbolText(element).text;
+            if (MATH_SKIPPED_WORD_ELEMENTS.includes(name)) return '';
+            return this.mathChildrenText(element);
+        }
+        if (ns !== MATH_NS) return this.mathChildrenText(element);
+        // Properties (m:rPr, m:fPr, m:ctrlPr, ...) show no text
+        if (name.endsWith('Pr')) return '';
+
+        const part = partName => {
+            const el = childElement(element, partName, MATH_NS);
+            return el ? this.mathChildrenText(el) : '';
+        };
+        const operand = partName => this.mathOperand(childElement(element, partName, MATH_NS));
+        const hidden = (properties, flag) => {
+            const pr = childElement(element, properties, MATH_NS);
+            return mathIsOn(pr && childElement(pr, flag, MATH_NS));
+        };
+
+        switch (name) {
+            case 't':
+                return element.textContent || '';
+            case 'f':
+                return `${operand('num')}/${operand('den')}`;
+            case 'sSup':
+                return `${operand('e')}^${operand('sup')}`;
+            case 'sSub':
+                return `${operand('e')}_${operand('sub')}`;
+            case 'sSubSup':
+                return `${operand('e')}_${operand('sub')}^${operand('sup')}`;
+            case 'rad': {
+                const degree = hidden('radPr', 'degHide') ? '' : operand('deg');
+                return `${degree}√(${part('e')})`;
+            }
+            case 'd': {
+                const begin = mathCharacter(element, 'dPr', 'begChr', '(');
+                const end = mathCharacter(element, 'dPr', 'endChr', ')');
+                const separator = mathCharacter(element, 'dPr', 'sepChr', '|');
+                const parts = childElements(element, 'e', MATH_NS).map(e => this.mathChildrenText(e));
+                return `${begin}${parts.join(separator)}${end}`;
+            }
+            case 'nary': {
+                const sub = hidden('naryPr', 'subHide') ? '' : operand('sub');
+                const sup = hidden('naryPr', 'supHide') ? '' : operand('sup');
+                const body = part('e');
+                return `${mathCharacter(element, 'naryPr', 'chr', '∫')}${sub ? `_${sub}` : ''}${sup ? `^${sup}` : ''}` +
+                    (body ? ` ${body}` : '');
+            }
+            case 'func':
+                return `${part('fName')} ${part('e')}`;
+            default:
+                return this.mathChildrenText(element);
+        }
+    }
+
+    /**
+     * Linear text of an element's children, in document order (see mathText)
+     * @param {Element} element
+     * @returns {string}
+     */
+    mathChildrenText(element) {
+        return Array.from(element.children).map(child => this.mathText(child)).join('');
+    }
+
+    /**
+     * Linear text of a fraction part, base, script, degree or limit, wrapped in parentheses
+     * unless it is empty, a single run of letters or digits or a decimal number (A/365, but
+     * (a+b)/2 and x^(n+1)), or already one delimiter (m:d) with its own brackets
+     * @param {Element|null} part - e.g. m:num, m:sup
+     * @returns {string} '' for a missing part
+     */
+    mathOperand(part) {
+        if (!part) return '';
+        const text = this.mathChildrenText(part);
+        if (text === '' || SIMPLE_MATH_OPERAND.test(text)) return text;
+        const shown = Array.from(part.children).filter(child => !(child.namespaceURI === MATH_NS && child.localName.endsWith('Pr')));
+        if (shown.length === 1 && shown[0].namespaceURI === MATH_NS && shown[0].localName === 'd') return text;
+        return `(${text})`;
+    }
+
+    /**
+     * Report embedded content from another program (w:altChunk: HTML, RTF, MHT or another
+     * .docx), which isn't converted, as an embeddedContent finding at this.location. The example
+     * is the file name of the part it embeds.
+     * @param {Element} altChunk - The w:altChunk element
+     */
+    reportEmbeddedChunk(altChunk) {
+        this.embeddedChunks++;
+        const id = altChunk.getAttributeNS(RELATIONSHIPS_NS, 'id');
+        const relationship = id && Object.prototype.hasOwnProperty.call(this.relationships, id) ? this.relationships[id] : null;
+        const target = relationship ? (relationship.path || relationship.target || '') : '';
+        this.addFinding('embeddedContent', shortExample(target.split('/').pop()));
     }
 
     /**

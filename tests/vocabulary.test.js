@@ -140,6 +140,12 @@ const part = (kind, inner) => ({
 
 const FEATURES = [
     {
+        // An equation is written as ordinary text in its linear form
+        name: 'equation',
+        body: p(r('Faiz: ') + '<m:oMath><m:f><m:num><m:r><m:t>A</m:t></m:r></m:num>' +
+            '<m:den><m:r><m:t>365</m:t></m:r></m:den></m:f></m:oMath>' + r(' TL'))
+    },
+    {
         name: 'run formatting',
         body: p(r('Bold', '<w:b/>') + r('Italic', '<w:i/>') + r('Underline', '<w:u w:val="single"/>') +
             r('Strike', '<w:strike/>') + r('Colour', '<w:color w:val="FF0000"/>') +
