@@ -98,14 +98,15 @@ test('an earlier section\'s footer the final section inherits is converted, with
     assert.deepEqual(findings, []);
 });
 
-test('a page number field, a table or a picture in the converted header or footer gives the finding', async () => {
+test('a page number field, a table or a text box in the converted header or footer gives the finding', async () => {
     const pageField = '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r>' +
         '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>';
     const cases = {
         'PAGE field': ['footer', p(r('Sayfa ') + pageField)],
         'NUMPAGES simple field': ['footer', p(r('Toplam ') + '<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>3</w:t></w:r></w:fldSimple>')],
         table: ['header', tbl([[p(r('Hücre')), p('')]]) + p(r('Üst bilgi'))],
-        picture: ['header', p(r('Üst bilgi') + picture('rIdLogo'))]
+        'text box': ['header', p(r('Üst bilgi') + '<w:r><w:pict><v:shape style="width:100pt;height:50pt"><v:textbox>' +
+            `<w:txbxContent>${p(r('Kutu'))}</w:txbxContent></v:textbox></v:shape></w:pict></w:r>`)]
     };
     for (const [name, [kind, inner]] of Object.entries(cases)) {
         const findings = await findingsOf(p(r('Gövde')), {

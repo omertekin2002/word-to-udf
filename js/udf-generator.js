@@ -70,7 +70,7 @@ class UdfGenerator {
         this.endnoteFormat = document.endnoteFormat || 'lowerRoman';
         this.pageSetup = document.pageSetup || {};
 
-        // Header text comes first in the content, before the body (UDF: <header> is the first element)
+        // Header text and pictures come first in the content, before the body (UDF: <header> is the first element)
         if (document.header) {
             this.elements.push(this.headerFooterElement('header', document.header));
         }
@@ -102,7 +102,7 @@ class UdfGenerator {
             this.currentOffset += 1;
         }
 
-        // Footer text comes last, after the body and the notes (UDF: <footer> is the last element)
+        // Footer text and pictures come last, after the body and the notes (UDF: <footer> is the last element)
         if (document.footer) {
             this.elements.push(this.headerFooterElement('footer', document.footer));
         }
@@ -200,10 +200,10 @@ class UdfGenerator {
     }
 
     /**
-     * Write header or footer paragraphs, with their text added to the content at the current
-     * offset, as body paragraphs are
+     * Write header or footer paragraphs, with their text and pictures added to the content at
+     * the current offset, as body paragraphs are: a picture is an <image> covering one U+FFFC
      * @param {'header'|'footer'} tag - The element to write
-     * @param {Array<Object>} paragraphs - Parsed paragraphs, holding only text, tabs and line breaks
+     * @param {Array<Object>} paragraphs - Parsed paragraphs, holding only text, tabs, line breaks and pictures
      * @returns {string} The <header> or <footer> element
      */
     headerFooterElement(tag, paragraphs) {

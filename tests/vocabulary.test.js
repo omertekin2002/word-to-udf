@@ -129,13 +129,14 @@ const borders = (tag, val, ...edges) =>
     `<w:${tag}>${edges.map(edge => `<w:${edge} w:val="${val}" w:sz="4" w:space="0" w:color="auto"/>`).join('')}</w:${tag}>`;
 const ALL_EDGES = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'];
 const grid = columns => `<w:tblGrid>${'<w:gridCol w:w="2000"/>'.repeat(columns)}</w:tblGrid>`;
-const drawing = '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>' +
+const picture = rId => '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>' +
     '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
-    '<pic:pic><pic:blipFill><a:blip r:embed="rId_image1"/></pic:blipFill></pic:pic>' +
+    `<pic:pic><pic:blipFill><a:blip r:embed="${rId}"/></pic:blipFill></pic:pic>` +
     '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+const drawing = picture('rId_image1');
 const footnoteRef = id => `<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="${id}"/></w:r>`;
-const part = (kind, inner) => ({
-    name: `${kind}1.xml`, root: kind === 'header' ? 'hdr' : 'ftr', type: kind, id: `rId_${kind}1`, inner
+const part = (kind, inner, rels) => ({
+    name: `${kind}1.xml`, root: kind === 'header' ? 'hdr' : 'ftr', type: kind, id: `rId_${kind}1`, inner, rels
 });
 
 const FEATURES = [
@@ -250,6 +251,7 @@ const FEATURES = [
         }
     },
     {
+        // The header's logo is an <image> inside <header>, related through the header part's own rels
         name: 'header and footer',
         body: p(r('Body')),
         options: {
@@ -257,7 +259,9 @@ const FEATURES = [
                 '<w:footerReference w:type="default" r:id="rId_footer1"/>' +
                 '<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>' +
                 '<w:pgMar w:top="1418" w:right="1134" w:bottom="1418" w:left="1701" w:header="709" w:footer="709" w:gutter="0"/>',
-            parts: [part('header', p(r('Header text'))), part('footer', p(r('Footer text')))]
+            parts: [part('header', p(picture('rIdLogo') + r('Header text')), { rIdLogo: 'media/logo.png' }),
+                part('footer', p(r('Footer text')))],
+            files: { 'word/media/logo.png': PNG }
         }
     }
 ];
@@ -333,6 +337,11 @@ test('the corpus writes every documented element and attribute the generator is 
     assert.deepEqual(missing, [],
         `the corpus no longer exercises ${missing.join(', ')}: add a feature body that writes it, ` +
         "or move it to `unused` if the generator shouldn't write it");
+});
+
+test('the corpus writes an <image> inside <header>, as Docs.md\'s Üstbilgi section shows', async () => {
+    const { doc } = (await corpus()).find(result => result.name === 'header and footer');
+    assert.equal(doc.querySelectorAll('elements > header > paragraph > image').length, 1);
 });
 
 test('the vocabulary check names an undocumented element or attribute', () => {
