@@ -480,6 +480,8 @@ class UdfGenerator {
         if (run.italic) attrs.push('italic="true"');
         if (run.underline) attrs.push('underline="true"');
         if (run.strike) attrs.push('strikethrough="true"');
+        // Superscript (w:vertAlign), as note marks are written; the size stays the run's own
+        if (run.superscript) attrs.push('superscript="true"');
 
         if (run.color) {
             // Convert hex color to RGB integer
