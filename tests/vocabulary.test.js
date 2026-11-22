@@ -141,6 +141,18 @@ const part = (kind, inner, rels) => ({
 
 const FEATURES = [
     {
+        // Tracked changes are converted as accepted: inserted text kept, a deleted paragraph and row left out
+        name: 'tracked changes',
+        body: p(r('Kalan ') + '<w:ins w:id="1" w:author="A"><w:r><w:t>eklenen</w:t></w:r></w:ins>' +
+            '<w:del w:id="2" w:author="A"><w:r><w:delText>silinen</w:delText></w:r></w:del>') +
+            '<w:p><w:pPr><w:rPr><w:del w:id="3" w:author="A"/></w:rPr></w:pPr>' +
+            '<w:del w:id="4" w:author="A"><w:r><w:delText>Silinen paragraf</w:delText></w:r></w:del></w:p>' +
+            '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>' +
+            '<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>' + p(r('Kalan satır')) + '</w:tc></w:tr>' +
+            '<w:tr><w:trPr><w:del w:id="5" w:author="A"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>' +
+            '<w:p><w:del w:id="6" w:author="A"><w:r><w:delText>Silinen satır</w:delText></w:r></w:del></w:p></w:tc></w:tr></w:tbl>'
+    },
+    {
         // An equation is written as ordinary text in its linear form
         name: 'equation',
         body: p(r('Faiz: ') + '<m:oMath><m:f><m:num><m:r><m:t>A</m:t></m:r></m:num>' +

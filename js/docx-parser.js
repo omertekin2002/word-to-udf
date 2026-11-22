@@ -251,7 +251,23 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 // conversion drops or simplifies, so the user can fix it in Word before filing
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
     'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
-    'equations', 'embeddedContent'];
+    'equations', 'embeddedContent', 'trackedChanges'];
+
+// Track Changes revision marks inside a paragraph, its runs and its paragraph mark: inserted, deleted
+// and moved content (w:ins, w:del, w:moveTo, w:moveFrom, which also mark a paragraph mark in
+// w:pPr/w:rPr and inserted numbering in w:numPr), and formatting, numbering and section changes
+const PARAGRAPH_REVISION_ELEMENTS = ['ins', 'del', 'moveTo', 'moveFrom', 'rPrChange', 'pPrChange', 'numberingChange',
+    'sectPrChange'];
+// In a row's w:trPr: an inserted or deleted row, or a row formatting change
+const ROW_REVISION_ELEMENTS = ['ins', 'del', 'trPrChange'];
+// In a row's w:trPr: a deleted row, which Word's Accept All removes
+const DELETED_ROW_ELEMENTS = ['del'];
+// In a cell's w:tcPr: an inserted, deleted or merged cell, or a cell formatting change
+const CELL_REVISION_ELEMENTS = ['cellIns', 'cellDel', 'cellMerge', 'tcPrChange'];
+// In w:pPr/w:rPr: a deleted or moved-away paragraph mark, which Word's Accept All removes
+const DELETED_MARK_ELEMENTS = ['del', 'moveFrom'];
+// Inline wrappers whose runs a document with every change accepted doesn't have
+const DELETED_RUN_WRAPPERS = ['del', 'moveFrom'];
 
 // How many location hints a finding keeps, and how long each may be
 const MAX_FINDING_EXAMPLES = 3;
@@ -479,6 +495,41 @@ function copyLocation(location) {
  */
 function paragraphText(paragraph) {
     return paragraph.runs.filter(run => run.type === 'text').map(run => run.text).join('');
+}
+
+/**
+ * Whether a paragraph's mark is deleted or moved away (w:pPr/w:rPr/w:del or w:moveFrom), so
+ * Word's Accept All joins it to the next paragraph
+ * @param {Element} para - The w:p element
+ * @returns {boolean}
+ */
+function paragraphMarkDeleted(para) {
+    const pPr = childElement(para, 'pPr');
+    const rPr = pPr && childElement(pPr, 'rPr');
+    return Boolean(rPr) && DELETED_MARK_ELEMENTS.some(name => childElement(rPr, name));
+}
+
+/**
+ * Whether a parsed paragraph has nothing left: no items, or only whitespace text. With its mark
+ * deleted too (see paragraphMarkDeleted), Word's Accept All removes it.
+ * @param {Array<Object>} items - Its parsed items (see parseRun)
+ * @returns {boolean}
+ */
+function nothingLeft(items) {
+    return items.every(item => item.type === 'text' && item.text.trim() === '');
+}
+
+/**
+ * Whether an element is inside deleted or moved-away content (w:del, w:moveFrom) of a paragraph
+ * @param {Element} element - A run
+ * @param {Element} ancestor - The paragraph to stop at
+ * @returns {boolean}
+ */
+function isDeletedRun(element, ancestor) {
+    for (let el = element.parentElement; el && el !== ancestor; el = el.parentElement) {
+        if (el.namespaceURI === WORD_NS && DELETED_RUN_WRAPPERS.includes(el.localName)) return true;
+    }
+    return false;
 }
 
 /**
@@ -1233,18 +1284,26 @@ class DocxParser {
         });
         const hasPicture = shownRuns.some(run => PICTURE_ELEMENTS.some(name => Array.from(run.getElementsByTagNameNS(WORD_NS, name))
             .some(element => this.isInReadBranch(element) && !this.isInTextBox(element, run))));
-        if (!hasText && !hasPicture) return { paragraphs: null, dropped };
+        if (!hasText && !hasPicture) {
+            // Nothing is left to parse, but a part emptied by unaccepted deletions still has changes to report
+            for (const para of paragraphs) {
+                if (this.hasRevisions(para)) this.addFinding('trackedChanges');
+            }
+            return { paragraphs: null, dropped };
+        }
 
         // The pictures those runs show, through the part's own relationships: a header's r:embed
         // ids name entries of its _rels/header1.xml.rels, not of the document's
         this.partRelationships = await this.readRelationships(path);
         await this.extractImages(shownRuns, this.partRelationships, true);
 
-        // Every paragraph is written, as in a table cell (see paragraphIsWritten)
-        const parsed = paragraphs.map(para => {
+        // Every paragraph is written, as in a table cell (see paragraphIsWritten), except one
+        // Word's Accept All removes (see parseParagraphBlocks)
+        const parsed = paragraphs.flatMap(para => {
             const paragraph = this.parseParagraph(para, this.paragraphRuns(para), true);
+            if (paragraphMarkDeleted(para) && nothingLeft(paragraph.runs)) return [];
             paragraph.runs = paragraph.runs.filter(run => HEADER_FOOTER_RUN_TYPES.includes(run.type));
-            return paragraph;
+            return [paragraph];
         });
         // A part whose only text is hidden (w:vanish), or whose pictures are all missing, shows nothing
         if (!parsed.some(paragraph => paragraph.runs.some(showsContent))) return { paragraphs: null, dropped };
@@ -1347,18 +1406,22 @@ class DocxParser {
      * (w:vanish, resolved through the paragraph and character styles as in the body) adds nothing.
      * @param {Element} note - The w:footnote or w:endnote element
      * @param {Array<[string, string]>} [findings] - Receives a [code, example] pair for each symbol
-     *   (symbols), each equation (equations) and each paragraph with hidden content (hiddenText)
+     *   (symbols), each equation (equations), each paragraph with hidden content (hiddenText) and
+     *   each paragraph with unaccepted changes (trackedChanges, see hasRevisions)
      * @returns {string}
      */
     noteText(note, findings = []) {
         let text = '';
         for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
+            const start = text.length;
             const style = this.paragraphStyle(childElement(para, 'pPr'));
             const hidden = { found: false, text: '' };
-            // Runs, and equations in place of the runs inside them
+            // Runs, and equations in place of the runs inside them. Deleted and moved-away runs
+            // are left out, as in the body (see paragraphRuns).
             const runs = Array.from(para.getElementsByTagName('*')).filter(element =>
                 ((element.namespaceURI === WORD_NS && element.localName === 'r') ||
-                    (element.namespaceURI === MATH_NS && element.localName === 'oMath')) && !isInEquation(element, para));
+                    (element.namespaceURI === MATH_NS && element.localName === 'oMath')) && !isInEquation(element, para) &&
+                !isDeletedRun(element, para));
             for (const run of runs) {
                 if (run.namespaceURI === MATH_NS) {
                     // Its hidden runs add their text to hidden
@@ -1391,6 +1454,7 @@ class DocxParser {
                 }
             }
             if (hidden.found) findings.push(['hiddenText', shortExample(hidden.text)]);
+            if (this.hasRevisions(para)) findings.push(['trackedChanges', shortExample(text.slice(start).trim())]);
             text += ' ';
         }
         return text.trim();
@@ -1416,9 +1480,10 @@ class DocxParser {
             for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
                 const style = this.paragraphStyle(childElement(para, 'pPr'));
                 const paragraphRun = 'fontSize' in this.styles.defaults.run ? style.run : { fontSize: NOTE_FONT_SIZE, ...style.run };
-                paragraphs.push(this.paragraphRuns(para)
-                    .flatMap(run => this.parseRun(run, paragraphRun))
-                    .filter(item => NOTE_RUN_TYPES.includes(item.type)));
+                const items = this.paragraphRuns(para).flatMap(run => this.parseRun(run, paragraphRun));
+                // A paragraph Word's Accept All removes (see parseParagraphBlocks) is left out
+                if (paragraphMarkDeleted(para) && nothingLeft(items)) continue;
+                paragraphs.push(items.filter(item => NOTE_RUN_TYPES.includes(item.type)));
             }
         } finally {
             this.parsingNote = parsingNote;
@@ -2015,6 +2080,10 @@ class DocxParser {
             return this.parseBodyBlocks(body);
         } finally {
             this.location = { kind: 'document' };
+            // A change to the final section's properties (margins, orientation, headers), which
+            // are converted as they now are, belongs to the whole document
+            const sectPr = childElement(body, 'sectPr');
+            if (sectPr && childElement(sectPr, 'sectPrChange')) this.addFinding('trackedChanges', '', { kind: 'document' });
         }
     }
 
@@ -2041,17 +2110,18 @@ class DocxParser {
         for (const child of this.contentChildren(body)) {
             if (child.localName === 'p') {
                 this.location = { kind: 'paragraph', paragraph: ++this.body.paragraphs, ...headingOf() };
-                const paragraphs = this.parseParagraphBlocks(child);
-                elements.push(...paragraphs);
-                // A heading names the places after it, not its own
-                const kind = this.headingKind(child, paragraphs[0]);
-                if (kind) this.body.headings[kind] = shortExample(paragraphText(paragraphs[0]));
+                const { paragraph, blocks } = this.parseParagraphBlocks(child);
+                elements.push(...blocks);
+                // A heading names the places after it, not its own. A paragraph left out isn't one.
+                const kind = paragraph && this.headingKind(child, paragraph);
+                if (kind) this.body.headings[kind] = shortExample(paragraphText(paragraph));
             } else if (child.localName === 'tbl') {
                 const table = ++this.body.tables;
                 const heading = headingOf();
-                elements.push(this.parseTable(child, (row, cell) => {
+                const parsed = this.parseTable(child, (row, cell) => {
                     this.location = { kind: 'cell', table, row, cell, ...heading };
-                }));
+                });
+                if (parsed) elements.push(parsed);
             } else if (child.localName === 'altChunk') {
                 // Embedded content takes a body paragraph's place: Word shows it where its first paragraph would be
                 this.location = { kind: 'paragraph', paragraph: ++this.body.paragraphs, ...headingOf() };
@@ -2122,9 +2192,10 @@ class DocxParser {
             const localName = child.localName;
 
             if (localName === 'p') {
-                elements.push(...this.parseParagraphBlocks(child, inCell));
+                elements.push(...this.parseParagraphBlocks(child, inCell).blocks);
             } else if (localName === 'tbl') {
-                elements.push(this.parseTable(child));
+                const table = this.parseTable(child);
+                if (table) elements.push(table);
             } else if (localName === 'altChunk') {
                 this.reportEmbeddedChunk(child);
             }
@@ -2134,20 +2205,48 @@ class DocxParser {
     }
 
     /**
-     * Parse a paragraph, then the blocks of the text boxes anchored in it, which follow it
+     * Parse a paragraph, then the blocks of the text boxes anchored in it, which follow it. A
+     * paragraph whose mark is deleted and which has nothing left once its deleted runs are dropped
+     * is left out, as Word's Accept All removes it; its text boxes are still parsed.
      * @param {Element} para - The w:p element
      * @param {boolean} [inCell] - Whether the content ends up in a table cell
-     * @returns {Array<Object>} The parsed paragraph first, then the text boxes' paragraphs and tables
+     * @returns {{paragraph: Object|null, blocks: Array<Object>}} The parsed paragraph, null when it
+     *   is left out, and the blocks: the paragraph first, then the text boxes' paragraphs and tables
      */
     parseParagraphBlocks(para, inCell = false) {
         const runs = this.paragraphRuns(para);
-        const elements = [this.parseParagraph(para, runs, inCell)];
+        let paragraph = this.parseParagraph(para, runs, inCell);
+        if (paragraphMarkDeleted(para) && nothingLeft(paragraph.runs)) paragraph = null;
+        const blocks = paragraph ? [paragraph] : [];
         for (const run of runs) {
             for (const textBox of this.findTextBoxes(run)) {
-                elements.push(...this.parseBlocks(textBox, inCell));
+                blocks.push(...this.parseBlocks(textBox, inCell));
             }
         }
-        return elements;
+        return { paragraph, blocks };
+    }
+
+    /**
+     * Whether a paragraph holds Track Changes revision marks (see PARAGRAPH_REVISION_ELEMENTS):
+     * in its runs, its inline wrappers or its properties. The paragraphs of a text box anchored
+     * in it are left to their own parse, and only the read branch of mc:AlternateContent counts.
+     * @param {Element} element - The w:p element, or an element inside it
+     * @returns {boolean}
+     */
+    hasRevisions(element) {
+        for (const child of element.children) {
+            if (child.namespaceURI === MARKUP_COMPATIBILITY_NS && child.localName === 'AlternateContent') {
+                const branch = this.alternateContentBranch(child);
+                if (branch && this.hasRevisions(branch)) return true;
+            } else if (child.namespaceURI === WORD_NS && child.localName === 'txbxContent') {
+                continue;
+            } else if (child.namespaceURI === WORD_NS && PARAGRAPH_REVISION_ELEMENTS.includes(child.localName)) {
+                return true;
+            } else if (this.hasRevisions(child)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -2290,6 +2389,9 @@ class DocxParser {
             paragraph.runs.push(...this.parseRun(run, style.run, hidden));
         }
         if (hidden.found) this.addFinding('hiddenText', shortExample(hidden.text));
+
+        // Unaccepted changes: the paragraph is converted as if they were accepted
+        if (this.hasRevisions(para)) this.addFinding('trackedChanges', shortExample(paragraphText(paragraph)));
 
         // Line heights and tab stops the conversion loses, with the paragraph's text as the hint.
         // A paragraph the generator doesn't write as one has no line height or stops to lose.
@@ -2797,13 +2899,39 @@ class DocxParser {
         const edges = this.tableBorders(childElement(tbl, 'tblPr'));
 
         // Get rows and cells (only this table's own, not those of nested tables). The cells'
-        // properties come first: they decide which cells continue a vertical merge.
+        // properties come first: they decide which cells continue a vertical merge. A row marked
+        // deleted is left out, as Word's Accept All removes it, before borders and merges are
+        // resolved; rows keep Word's numbers (deleted rows counted) for locating findings.
         const cellElements = [];
+        const rowNumbers = [];
+        const changedRows = [];
+        // The numbers of the deleted rows before each kept row, and after the last one
+        const deletedRows = [[]];
+        let rowNumber = 0;
         for (const tr of this.contentChildren(tbl)) {
             if (tr.localName !== 'tr') continue;
+            rowNumber++;
+            const trPr = childElement(tr, 'trPr');
+            if (trPr && DELETED_ROW_ELEMENTS.some(name => childElement(trPr, name))) {
+                deletedRows[deletedRows.length - 1].push(rowNumber);
+                continue;
+            }
             const tcs = this.contentChildren(tr).filter(tc => tc.localName === 'tc');
             cellElements.push(tcs);
+            rowNumbers.push(rowNumber);
+            changedRows.push(Boolean(trPr) && ROW_REVISION_ELEMENTS.some(name => childElement(trPr, name)));
+            deletedRows.push([]);
             table.rows.push({ type: 'row', cells: tcs.map(tc => this.parseTableCell(tc)) });
+        }
+        // A deleted row is reported at its first cell, in document order with the kept rows' findings
+        const reportDeleted = rows => rows.forEach(number => {
+            if (enterCell) enterCell(number, 1);
+            this.addFinding('trackedChanges');
+        });
+        // Every row deleted: Word's Accept All removes the table
+        if (rowNumber > 0 && table.rows.length === 0) {
+            reportDeleted(deletedRows[0]);
+            return null;
         }
 
         this.resolveCellBorders(table, edges, cellElements);
@@ -2813,22 +2941,37 @@ class DocxParser {
 
         const merges = verticalMerges(table);
         this.tableDepth = depth;
+        const firstText = paragraphs => paragraphs.map(paragraphText).find(text => text.trim() !== '') || '';
         try {
-            table.rows.forEach((row, i) => row.cells.forEach((cell, j) => {
-                const discarded = !flattened && merges[i][j].joinsAbove;
-                if (enterCell) enterCell(i + 1, j + 1);
-                // A cell of a nested table may be in a cell written empty: that stays so
-                const wasDiscarded = this.inDiscardedCell;
-                if (discarded) this.inDiscardedCell = true;
-                try {
-                    cell.blocks = this.parseCellBlocks(cellElements[i][j]);
-                } finally {
-                    this.inDiscardedCell = wasDiscarded;
+            table.rows.forEach((row, i) => {
+                reportDeleted(deletedRows[i]);
+                row.cells.forEach((cell, j) => {
+                    const discarded = !flattened && merges[i][j].joinsAbove;
+                    if (enterCell) enterCell(rowNumbers[i], j + 1);
+                    // A cell of a nested table may be in a cell written empty: that stays so
+                    const wasDiscarded = this.inDiscardedCell;
+                    if (discarded) this.inDiscardedCell = true;
+                    try {
+                        cell.blocks = this.parseCellBlocks(cellElements[i][j]);
+                        cell.paragraphs = this.flattenToParagraphs(cell.blocks);
+                        // An inserted, deleted or merged cell, or a cell formatting change
+                        const tcPr = childElement(cellElements[i][j], 'tcPr');
+                        if (tcPr && CELL_REVISION_ELEMENTS.some(name => childElement(tcPr, name))) {
+                            this.addFinding('trackedChanges', shortExample(firstText(cell.paragraphs)));
+                        }
+                    } finally {
+                        this.inDiscardedCell = wasDiscarded;
+                    }
+                    // A flattened table's borders aren't written
+                    if (!flattened && table.border !== 'borderNone') this.checkCellBorders(cell, merges[i][j], discarded);
+                });
+                // An inserted row, or a row formatting change, located at its first cell
+                if (changedRows[i]) {
+                    if (enterCell) enterCell(rowNumbers[i], 1);
+                    this.addFinding('trackedChanges', shortExample(firstText(row.cells.flatMap(cell => cell.paragraphs))));
                 }
-                cell.paragraphs = this.flattenToParagraphs(cell.blocks);
-                // A flattened table's borders aren't written
-                if (!flattened && table.border !== 'borderNone') this.checkCellBorders(cell, merges[i][j], discarded);
-            }));
+            });
+            reportDeleted(deletedRows[table.rows.length]);
         } finally {
             this.tableDepth = depth - 1;
         }

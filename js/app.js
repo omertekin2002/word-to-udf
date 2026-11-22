@@ -29,7 +29,8 @@ const FINDING_KEYS = {
     symbols: 'notes.symbols',
     tableBorders: 'notes.tableBorders',
     equations: 'notes.equations',
-    embeddedContent: 'notes.embeddedContent'
+    embeddedContent: 'notes.embeddedContent',
+    trackedChanges: 'notes.trackedChanges'
 };
 
 // The conversion's real steps, in order; the bar fills one share per step
@@ -37,7 +38,7 @@ const PROGRESS_STAGES = ['progress.parsing', 'progress.converting', 'progress.co
 
 // Findings whose examples are document text, shown in quotes; the others are format names
 const QUOTED_EXAMPLE_CODES = ['hiddenText', 'nestedTables', 'missingImage', 'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops',
-    'equations', 'embeddedContent'];
+    'equations', 'embeddedContent', 'trackedChanges'];
 
 // What separates the parts of a location line
 const LOCATION_SEPARATOR = ' · ';

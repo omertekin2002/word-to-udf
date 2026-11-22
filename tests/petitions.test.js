@@ -181,6 +181,26 @@ test('icra/itiraz dilekçesi: list levels, page break and justified text', async
     assert.equal(paragraphOf(doc, content, 'Ad Soyad').getAttribute('Alignment'), '2');
 });
 
+test('icra/itiraz dilekçesi: the paragraph deleted with Track Changes leaves no empty paragraph, and is noted', async () => {
+    const { doc, content, parsed } = await converted(itiraz);
+    // The list item before the deleted paragraph is followed straight by the one after it
+    const before = paragraphOf(doc, content, 'Takibe konu borcun ');
+    const after = paragraphOf(doc, content, 'İşlemiş faiz ve uygulanan faiz oranı hukuka aykırıdır.');
+    assert.equal(before.nextElementSibling, after);
+    assert.deepEqual(findingSummaries(parsed.findings).map(finding => [finding.code, finding.count]), [['trackedChanges', 2]]);
+});
+
+test('ekli tablo dilekçesi: the row deleted with Track Changes leaves no row, and is noted', async () => {
+    const { doc, content, parsed } = await converted(tablo);
+    const rows = [...doc.querySelectorAll('elements table row')];
+    const rowText = row => [...row.querySelectorAll('[startOffset]')].map(el => textOf(el, content)).join('').trim();
+    assert.equal(rows.length, tablo.tableShape.length);
+    assert.ok(rows.every(row => rowText(row) !== ''), 'no row is left empty');
+    const third = rows.findIndex(row => rowText(row).startsWith('3'));
+    assert.ok(rowText(rows[third + 1]).startsWith('4'), 'row 4 follows row 3');
+    assert.deepEqual(findingSummaries(parsed.findings).map(finding => [finding.code, finding.count]), [['trackedChanges', 1]]);
+});
+
 test('ekli tablo dilekçesi: table shape, merged total row and in-cell line break', async () => {
     const { doc, content } = await converted(tablo);
 

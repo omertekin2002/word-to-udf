@@ -70,9 +70,17 @@ function recorder() {
             deleted.push(text);
             return '<w:del w:id="90" w:author="Yazar" w:date="2026-01-01T00:00:00Z">' +
                 `<w:r><w:delText xml:space="preserve">${escapeText(text)}</w:delText></w:r></w:del>`;
+        },
+
+        /** A paragraph deleted whole with Track Changes: its mark and its text, which Accept All removes */
+        deletedParagraph(text) {
+            return `<w:p><w:pPr><w:rPr>${TRACKED_DELETION}</w:rPr></w:pPr>${this.del(text)}</w:p>`;
         }
     };
 }
+
+// The mark Word writes on a deleted paragraph mark or table row
+const TRACKED_DELETION = '<w:del w:id="91" w:author="Yazar" w:date="2026-01-01T00:00:00Z"/>';
 
 /** The recorded strings a test checks against */
 const recorded = ({ texts, footnotes, deleted }) => ({ texts, footnotes, deleted });
@@ -239,8 +247,8 @@ function davaDilekcesi() {
 
 /**
  * 2. İcra/itiraz dilekçesi: headings bold only through the Balk1 ("Başlık 1")
- * style, a two-level list (1. -> a)), a tracked deletion, a page break and
- * justified body text.
+ * style, a two-level list (1. -> a)), a tracked deletion and a paragraph deleted
+ * whole with Track Changes, a page break and justified body text.
  */
 function itirazDilekcesi() {
     const rec = recorder();
@@ -260,6 +268,7 @@ function itirazDilekcesi() {
         p(rec.run('Borca itiraz ediyoruz:'), list(LIST, 0)),
         p(rec.run('Takibe konu borcun ') + rec.del('tamamen ') + rec.run('ödendiği banka dekontuyla sabittir.'),
             list(LIST, 1) + jc('both')),
+        rec.deletedParagraph('Bu cümle karşı tarafın önerisiyle çıkarılmıştır.'),
         p(rec.run('İşlemiş faiz ve uygulanan faiz oranı hukuka aykırıdır.'), list(LIST, 1) + jc('both')),
         p(rec.run('Yetkiye itiraz ediyoruz:'), list(LIST, 0)),
         p(rec.run('Borçlunun yerleşim yeri İlçe / İl olup takip yapılan icra dairesi yetkisizdir.'),
@@ -299,8 +308,8 @@ function itirazDilekcesi() {
 
 /**
  * 3. Ekli tablo dilekçesi: underlined and italic runs, a receivables table with a
- * header row, a vertically merged cell, a line break in a cell and a horizontally
- * merged total row, then an EKLER list.
+ * header row, a vertically merged cell, a line break in a cell, a row deleted with
+ * Track Changes and a horizontally merged total row, then an EKLER list.
  */
 function tabloDilekcesi() {
     const rec = recorder();
@@ -338,6 +347,9 @@ function tabloDilekcesi() {
             ['Örnek fatura no. 0001', '<w:br/>', '(00.00.2026 tarihli)'], '10.000,00', '<w:vMerge w:val="restart"/>') +
         dataRow('2', null, ['Örnek fatura no. 0002'], '5.250,50', '<w:vMerge/>') +
         dataRow('3', 'Gecikme faizi', ['Ödeme tarihine kadar işleyen yasal faiz'], '1.234,56') +
+        // A row deleted with Track Changes: Accept All removes it, its text with it
+        row(['3a', 'Cezai şart', 'Sözleşmedeki cezai şart', '500,00']
+            .map((text, i) => `<w:tc>${cellPr(WIDTHS[i])}${p(rec.del(text))}</w:tc>`), `<w:trPr>${TRACKED_DELETION}</w:trPr>`) +
         dataRow('4', 'Masraflar', ['İhtarname ve tebligat giderleri'], '750,00') +
         row([
             `<w:tc>${cellPr(WIDTHS[0] + WIDTHS[1] + WIDTHS[2], '<w:gridSpan w:val="3"/>' + shaded)}` +

@@ -277,7 +277,8 @@ test('the generator ignores findings: the UDF is the same with or without them',
 
 // None of the petition fixtures has headers, comments, nested tables, pictures, endnotes, exact or
 // at-least line heights, or bar stops and underscore or heavy leaders. Only the dava dilekçesi has footnotes,
-// and Wingdings check boxes in its EKLER list.
+// and Wingdings check boxes in its EKLER list. The icra/itiraz dilekçesi has a tracked deletion in one
+// paragraph and a paragraph deleted whole; the ekli tablo dilekçesi a deleted table row.
 const EXPECTED_FIXTURE_FINDINGS = {
     'dava dilekçesi': [{
         code: 'notesMoved',
@@ -288,8 +289,8 @@ const EXPECTED_FIXTURE_FINDINGS = {
         count: 3,
         examples: ['Wingdings F0FE → ☑', 'Wingdings F0A8 → □']
     }],
-    'icra/itiraz dilekçesi': [],
-    'ekli tablo dilekçesi': [],
+    'icra/itiraz dilekçesi': [{ code: 'trackedChanges', count: 2, examples: ['Takibe konu borcun ödendiği banka dekont…'] }],
+    'ekli tablo dilekçesi': [{ code: 'trackedChanges', count: 1, examples: [] }],
     'cevap dilekçesi': []
 };
 
@@ -673,11 +674,12 @@ test('lineSpacing and tabStops are recorded for exactly the paragraphs the gener
 });
 
 test('paragraphs and footnotes that are never converted give no finding', async () => {
-    // A deleted footnote reference, and tab stops and line heights only in a style no paragraph uses
+    // A deleted footnote reference, and tab stops and line heights only in a style no paragraph uses.
+    // The deletion is an unaccepted change, the only thing reported.
     const findings = await findingsOf(
         p(r('Metin') + `<w:del w:id="1" w:author="Y">${footnoteRef(1)}</w:del>`),
         { footnotes: { 1: p(r('Silinen')) }, styles: paraStyle('Unused', spacing('exact') + tabsOf(stop('bar', 720))) });
-    assert.deepEqual(findings, []);
+    assert.deepEqual(findings, [{ code: 'trackedChanges', count: 1, examples: ['Metin'] }]);
 });
 
 test('the new findings come in FINDING_CODES order after the existing ones', async () => {
