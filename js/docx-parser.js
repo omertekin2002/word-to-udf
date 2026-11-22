@@ -1217,14 +1217,20 @@ class DocxParser {
         const hasText = paragraphs.some(para => this.paragraphRuns(para)
             .some(run => run.namespaceURI === MATH_NS ? this.mathText(run).trim() !== ''
                 : childElements(run, 'sym').length > 0 || childElements(run, 't').some(t => (t.textContent || '').trim() !== '')));
-        const hasPicture = paragraphs.some(para => PICTURE_ELEMENTS.some(name => Array.from(para.getElementsByTagNameNS(WORD_NS, name))
-            .some(element => this.isInReadBranch(element) && !this.isInTextBox(element, para))));
+        // The runs the paragraphs show: not deleted or moved away (see paragraphRuns), nor hidden
+        const shownRuns = paragraphs.flatMap(para => {
+            const styleRun = this.paragraphStyle(childElement(para, 'pPr')).run;
+            return this.paragraphRuns(para)
+                .filter(run => run.namespaceURI === WORD_NS && !this.parseRunFormatting(run, styleRun).hidden);
+        });
+        const hasPicture = shownRuns.some(run => PICTURE_ELEMENTS.some(name => Array.from(run.getElementsByTagNameNS(WORD_NS, name))
+            .some(element => this.isInReadBranch(element) && !this.isInTextBox(element, run))));
         if (!hasText && !hasPicture) return { paragraphs: null, dropped };
 
-        // The pictures left in the paragraphs, through the part's own relationships: a header's
-        // r:embed ids name entries of its _rels/header1.xml.rels, not of the document's
+        // The pictures those runs show, through the part's own relationships: a header's r:embed
+        // ids name entries of its _rels/header1.xml.rels, not of the document's
         this.partRelationships = await this.readRelationships(path);
-        await this.extractImages(paragraphs, this.partRelationships, true);
+        await this.extractImages(shownRuns, this.partRelationships, true);
 
         // Every paragraph is written, as in a table cell (see paragraphIsWritten)
         const parsed = paragraphs.map(para => {

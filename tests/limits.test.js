@@ -303,6 +303,26 @@ test('only the pictures the converted header shows are decompressed, through its
     assert.equal(parsed.header[0].runs.filter(run => run.type === 'image' && run.data).length, 1);
 });
 
+test('a header picture in a deleted, moved-away or hidden run is not decompressed', async t => {
+    const header = { name: 'header1.xml', root: 'hdr', type: 'header', id: 'rIdHeader1',
+        inner: p(r('Büro') + `<w:del w:id="1" w:author="A">${picture('rIdDeleted')}</w:del>` +
+            `<w:moveFrom w:id="2" w:author="A">${picture('rIdMoved')}</w:moveFrom>` +
+            picture('rIdHidden').replace('<w:r>', '<w:r><w:rPr><w:vanish/></w:rPr>')),
+        rels: { rIdDeleted: 'media/deleted.png', rIdMoved: 'media/moved.png', rIdHidden: 'media/hidden.png' } };
+    let docx = await buildDocx(p(r('Gövde')), {
+        sectPr: '<w:headerReference w:type="default" r:id="rIdHeader1"/>',
+        parts: [header],
+        files: { 'word/media/deleted.png': PNG, 'word/media/moved.png': PNG, 'word/media/hidden.png': PNG }
+    });
+    for (const name of ['deleted', 'moved', 'hidden']) docx = declareSize(docx, `word/media/${name}.png`, 0xFFFFFFFE);
+    const reads = watchReads(t);
+    const parsed = await new (loadConverter().DocxParser)().parse(docx);
+
+    assert.deepEqual([...reads.keys()].filter(name => name.startsWith('word/media/')), []);
+    assert.deepEqual(Object.keys(parsed.images), []);
+    assert.deepEqual([...parsed.header[0].runs].map(run => run.type), ['text']);
+});
+
 test('a picture shown twice is decompressed once', async t => {
     const docx = await buildDocx(p(picture('rId_image1')) + p(picture('rId_image1')), { media: { 'image1.png': PNG } });
     const reads = watchReads(t);
