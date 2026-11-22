@@ -251,7 +251,18 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 // conversion drops or simplifies, so the user can fix it in Word before filing
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
     'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
-    'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout'];
+    'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'paragraphBorders'];
+
+// Vertical alignments a run can have (w:vertAlign w:val, ST_VerticalAlignRun, ECMA-376 Part 1, 17.18.96).
+// Superscript is written; subscript has no UDF attribute, so it stays on the baseline and is reported.
+const VERTICAL_ALIGNMENTS = ['baseline', 'superscript', 'subscript'];
+
+// The edges of a paragraph's border (w:pBdr, ECMA-376 Part 1, 17.3.1.24): the box's four sides,
+// the line between paragraphs with the same borders, and a bar beside it
+const PARAGRAPH_BORDER_EDGES = ['top', 'left', 'bottom', 'right', 'between', 'bar'];
+
+// Border line styles (w:val) that draw nothing
+const INVISIBLE_BORDER_STYLES = ['nil', 'none'];
 
 // Section start types (a w:sectPr's w:type, which says how that section starts after the previous
 // one) that start the section on a new page. A missing w:type means nextPage. oddPage and evenPage
@@ -1448,16 +1459,19 @@ class DocxParser {
      * (w:vanish, resolved through the paragraph and character styles as in the body) adds nothing.
      * @param {Element} note - The w:footnote or w:endnote element
      * @param {Array<[string, string]>} [findings] - Receives a [code, example] pair for each symbol
-     *   (symbols), each equation (equations), each paragraph with hidden content (hiddenText) and
-     *   each paragraph with unaccepted changes (trackedChanges, see hasRevisions)
+     *   (symbols), each equation (equations), each paragraph with hidden content (hiddenText), with
+     *   unaccepted changes (trackedChanges, see hasRevisions), with subscript text (subscript) and
+     *   with a border (paragraphBorders, see hasParagraphBorder)
      * @returns {string}
      */
     noteText(note, findings = []) {
         let text = '';
         for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
             const start = text.length;
-            const style = this.paragraphStyle(childElement(para, 'pPr'));
+            const pPr = childElement(para, 'pPr');
+            const style = this.paragraphStyle(pPr);
             const hidden = { found: false, text: '' };
+            let subscript = false;
             // Runs, and equations in place of the runs inside them. Deleted and moved-away runs
             // are left out, as in the body (see paragraphRuns).
             const runs = Array.from(para.getElementsByTagName('*')).filter(element =>
@@ -1483,6 +1497,7 @@ class DocxParser {
                     }
                     continue;
                 }
+                const runStart = text.length;
                 for (const child of run.getElementsByTagNameNS(WORD_NS, '*')) {
                     if (child.localName === 't') {
                         text += child.textContent || '';
@@ -1494,9 +1509,14 @@ class DocxParser {
                         text += ' ';
                     }
                 }
+                if (formatting.vertAlign === 'subscript' && text.slice(runStart).trim() !== '') subscript = true;
             }
             if (hidden.found) findings.push(['hiddenText', shortExample(hidden.text)]);
             if (this.hasRevisions(para)) findings.push(['trackedChanges', shortExample(text.slice(start).trim())]);
+            if (subscript) findings.push(['subscript', shortExample(text.slice(start).trim())]);
+            if (this.hasParagraphBorder(style.paragraph, this.readParagraphProperties(pPr))) {
+                findings.push(['paragraphBorders', shortExample(text.slice(start).trim())]);
+            }
             text += ' ';
         }
         return text.trim();
@@ -1846,6 +1866,10 @@ class DocxParser {
             const tabs = chain.flatMap(style => style.paragraph.tabs || []);
             if (tabs.length > 0) paragraph.tabs = tabs;
             else delete paragraph.tabs;
+            // Border edges inherit one by one, not as a whole w:pBdr
+            const borderEdges = Object.assign({}, ...chain.map(style => style.paragraph.borderEdges));
+            if (Object.keys(borderEdges).length > 0) paragraph.borderEdges = borderEdges;
+            else delete paragraph.borderEdges;
 
             resolved.set(styleId, {
                 run: Object.assign({}, ...chain.map(style => style.run)),
@@ -1891,6 +1915,11 @@ class DocxParser {
 
         const u = childElement(rPr, 'u');
         if (u && u.hasAttribute('w:val')) props.underline = u.getAttribute('w:val') !== 'none';
+
+        // Superscript or subscript (w:vertAlign); an explicit baseline cancels an inherited one
+        const vertAlign = childElement(rPr, 'vertAlign');
+        const vertAlignVal = vertAlign && vertAlign.getAttribute('w:val');
+        if (VERTICAL_ALIGNMENTS.includes(vertAlignVal)) props.vertAlign = vertAlignVal;
 
         const rFonts = childElement(rPr, 'rFonts');
         if (rFonts && rFonts.getAttribute('w:ascii')) props.fontFamily = rFonts.getAttribute('w:ascii');
@@ -1979,6 +2008,18 @@ class DocxParser {
         // Page break before (w:pageBreakBefore), which starts a body paragraph on a new page (see bodyPageBreakBefore)
         const pageBreakBefore = childElement(pPr, 'pageBreakBefore');
         if (pageBreakBefore) props.pageBreakBefore = this.isOn(pageBreakBefore);
+
+        // Paragraph borders (w:pBdr), which the UDF can't draw: whether each edge it sets draws a
+        // line. Edges inherit one by one (see resolveStyle and hasParagraphBorder).
+        const pBdr = childElement(pPr, 'pBdr');
+        if (pBdr) {
+            const edges = {};
+            for (const edge of PARAGRAPH_BORDER_EDGES) {
+                const element = childElement(pBdr, edge);
+                if (element) edges[edge] = !INVISIBLE_BORDER_STYLES.includes(element.getAttribute('w:val') || 'nil');
+            }
+            if (Object.keys(edges).length > 0) props.borderEdges = edges;
+        }
 
         return props;
     }
@@ -2472,8 +2513,10 @@ class DocxParser {
 
         // The outline level only locates findings (see headingKind); it isn’t written. Page break
         // before is written as a page break ahead of a body paragraph (see bodyPageBreakBefore).
+        // Borders can't be written; they are reported below.
         delete paragraph.outlineLevel;
         delete paragraph.pageBreakBefore;
+        delete paragraph.borderEdges;
 
         // Tab stops: each layer adds to or clears the stops of the layers under it
         delete paragraph.tabs;
@@ -2505,9 +2548,15 @@ class DocxParser {
         // Unaccepted changes: the paragraph is converted as if they were accepted
         if (this.hasRevisions(para)) this.addFinding('trackedChanges', shortExample(paragraphText(paragraph)));
 
-        // Line heights and tab stops the conversion loses, with the paragraph's text as the hint.
-        // A paragraph the generator doesn't write as one has no line height or stops to lose.
+        // Subscript text, written on the baseline (see parseRun)
+        if (paragraph.runs.some(run => run.subscript && run.text.trim() !== '')) this.addFinding('subscript', shortExample(paragraphText(paragraph)));
+
+        // Line heights, tab stops and borders the conversion loses, with the paragraph's text as the hint.
+        // A paragraph the generator doesn't write as one has no line height, stops or borders to lose.
         if (paragraphIsWritten(paragraph, inCell)) {
+            if (this.hasParagraphBorder(style.paragraph, own)) {
+                this.addFinding('paragraphBorders', shortExample(paragraphText(paragraph)));
+            }
             if (LOST_LINE_RULES.includes(paragraph.lineRule)) {
                 this.addFinding('lineSpacing', shortExample(paragraphText(paragraph)));
             }
@@ -2520,19 +2569,37 @@ class DocxParser {
     }
 
     /**
+     * Whether a paragraph draws a border line (w:pBdr), which the UDF can't write: an edge whose
+     * line style isn't nil or none, from the document defaults, the paragraph style chain or the
+     * paragraph's own w:pPr. Each edge inherits on its own, so an edge set to none hides only that edge.
+     * @param {Object} styleParagraph - The paragraph style's paragraph properties (see resolveStyle)
+     * @param {Object} own - The paragraph's own properties (see readParagraphProperties)
+     * @returns {boolean}
+     */
+    hasParagraphBorder(styleParagraph, own) {
+        const edges = { ...this.styles.defaults.paragraph.borderEdges, ...styleParagraph.borderEdges, ...own.borderEdges };
+        return Object.values(edges).some(Boolean);
+    }
+
+    /**
      * Parse a run element (text with formatting)
      * @param {Element} run - The run element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @param {{found: boolean, text: string}} [hidden] - Set when the run is hidden (w:vanish) and
      *   holds content: found becomes true and the run's text is appended to text
      * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image,
-     *   footnoteRef, endnoteRef). Empty for a hidden run: Word neither shows nor prints it.
+     *   footnoteRef, endnoteRef). Empty for a hidden run: Word neither shows nor prints it. Text of
+     *   a superscript run has superscript: true; text of a subscript run has subscript: true and is
+     *   written on the baseline, as the UDF has no subscript.
      */
     parseRun(run, paragraphRun = {}, hidden = null) {
         if (run.namespaceURI === MATH_NS) return this.parseEquation(run, paragraphRun, hidden);
         const items = [];
-        // hidden, caps, smallCaps and lang decide how the run's text is written; they aren't text attributes
-        const { hidden: isHidden, caps, smallCaps, lang, ...formatting } = this.parseRunFormatting(run, paragraphRun);
+        // hidden, caps, smallCaps and lang decide how the run's text is written, and vertAlign whether
+        // it is superscript or subscript; they aren't text attributes
+        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, ...formatting } = this.parseRunFormatting(run, paragraphRun);
+        if (vertAlign === 'superscript') formatting.superscript = true;
+        else if (vertAlign === 'subscript') formatting.subscript = true;
 
         if (isHidden) {
             const { shows, text } = hiddenRunContent(run);
@@ -2630,8 +2697,8 @@ class DocxParser {
     parseEquation(oMath, paragraphRun = {}, hidden = null) {
         const text = this.equationText(oMath, paragraphRun, hidden);
         if (text.trim() === '') return [];
-        // hidden, caps, smallCaps and lang don't apply to the equation's text as a whole
-        const { hidden: isHidden, caps, smallCaps, lang, ...formatting } = this.parseRunFormatting(oMath, paragraphRun);
+        // hidden, caps, smallCaps, lang and vertAlign don't apply to the equation's text as a whole
+        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, ...formatting } = this.parseRunFormatting(oMath, paragraphRun);
 
         this.addFinding('equations', shortExample(text));
         const items = [];

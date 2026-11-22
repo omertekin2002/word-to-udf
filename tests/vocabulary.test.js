@@ -106,7 +106,7 @@ const DOCUMENTED = {
  */
 const UNDOCUMENTED_EXCEPTIONS = {
     content: [
-        'superscript', // footnote and endnote reference marks and note numbers
+        'superscript', // footnote and endnote reference marks and note numbers, and superscript runs (w:vertAlign)
         'strikethrough' // w:strike
     ]
 };
@@ -162,6 +162,7 @@ const FEATURES = [
         name: 'run formatting',
         body: p(r('Bold', '<w:b/>') + r('Italic', '<w:i/>') + r('Underline', '<w:u w:val="single"/>') +
             r('Strike', '<w:strike/>') + r('Colour', '<w:color w:val="FF0000"/>') +
+            r('m') + r('2', '<w:vertAlign w:val="superscript"/>') + r('H') + r('2', '<w:vertAlign w:val="subscript"/>') +
             r('Highlight', '<w:highlight w:val="yellow"/>') +
             r('Font', '<w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="28"/>') +
             '<w:r><w:t>Line</w:t><w:br/><w:t>break</w:t></w:r>', '<w:jc w:val="center"/>')
