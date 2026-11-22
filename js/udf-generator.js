@@ -470,10 +470,20 @@ class UdfGenerator {
     }
 
     /**
-     * Process a table element
+     * Process a table of the document itself
      * @param {Object} table - Parsed table
      */
     processTable(table) {
+        this.elements.push(this.tableElement(table));
+    }
+
+    /**
+     * The <table> element of a parsed table, its cells' text added to the content in reading
+     * order. A table nested in a cell is written the same way, in its place in the cell.
+     * @param {Object} table - Parsed table
+     * @returns {string} The element
+     */
+    tableElement(table) {
         const columnCount = table.columnWidths.length ||
             (table.rows[0] ? table.rows[0].cells.length : 1);
 
@@ -548,8 +558,7 @@ class UdfGenerator {
             rowElements.push(`<row rowName="row${i + 1}" rowType="dataRow">${cellElements.join('')}</row>`);
         }
 
-        const tableElement = `<table tableName="Table" columnCount="${columnCount}" columnSpans="${columnSpans}" border="${border}">${rowElements.join('')}</table>`;
-        this.elements.push(tableElement);
+        return `<table tableName="Table" columnCount="${columnCount}" columnSpans="${columnSpans}" border="${border}">${rowElements.join('')}</table>`;
     }
 
     /**
@@ -575,15 +584,22 @@ class UdfGenerator {
     }
 
     /**
-     * Process a table cell
-     * @param {Object} cell - Parsed cell
+     * Process a table cell: its paragraphs, and the tables nested in it, in document order
+     * @param {Object} cell - Parsed cell: its blocks (paragraphs and tables), else its paragraphs
      * @returns {string} Cell content elements
      */
     processTableCell(cell) {
         const cellElements = [];
+        const blocks = cell.blocks || cell.paragraphs;
 
-        for (let i = 0; i < cell.paragraphs.length; i++) {
-            const paragraph = cell.paragraphs[i];
+        for (let i = 0; i < blocks.length; i++) {
+            // A nested table's cells add their own text; no line break follows the table
+            if (blocks[i].type === 'table') {
+                cellElements.push(this.tableElement(blocks[i]));
+                continue;
+            }
+
+            const paragraph = blocks[i];
             const paraElements = [];
 
             for (const run of paragraph.runs) {
@@ -623,8 +639,8 @@ class UdfGenerator {
 
             cellElements.push(this.buildParagraphElement(paragraph, paraElements));
 
-            // Add newline between paragraphs (except last)
-            if (i < cell.paragraphs.length - 1) {
+            // Add newline between paragraphs, and before a nested table (except last)
+            if (i < blocks.length - 1) {
                 this.content += '\n';
                 this.currentOffset += 1;
             }

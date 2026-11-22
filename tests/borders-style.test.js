@@ -282,11 +282,24 @@ test('a vertical merge leaves out the edges it joins when choosing the line and 
     assert.deepEqual(borderFinding(unmerged.parsed).occurrences.map(({ location }) => location.row), [1, 2]);
 });
 
-test('a nested table, flattened to paragraphs, gives no border note', async () => {
+test('a nested table\'s cells give the border note like a body table\'s, at the outer cell', async () => {
     const inner = table([[['Inner', tcBorders(line('wave', {}, ...OUTER))]]]);
-    const { parsed } = await convertBody(
+    const { parsed, doc } = await convertBody(
         `<w:tbl><w:tblPr>${tblBorders(NO_EDGES)}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>` +
-        `<w:tr><w:tc>${inner}${p('')}</w:tc></w:tr></w:tbl>`,
+        `<w:tr><w:tc>${p('Outer')}${inner}${p('')}</w:tc></w:tr></w:tbl>`,
         { styles: NORMAL_TABLE });
+    assert.deepEqual(borderFinding(parsed).occurrences,
+        [{ example: 'Inner', location: { kind: 'cell', table: 1, row: 1, cell: 1 } }]);
+    // The wave is written as solid on the nested cell, which draws its own four edges
+    const nestedCell = doc.querySelector('elements > table cell table cell');
+    assert.equal(nestedCell.getAttribute('borderStyle'), 'borderStyle-solid');
+    assert.equal(doc.querySelector('elements > table').getAttribute('border'), 'borderNone');
+});
+
+test('a table nested past the depth limit, flattened to paragraphs, gives no border note', async () => {
+    const inner = table([[['Inner', tcBorders(line('wave', {}, ...OUTER))]]]);
+    const wrap = content => `<w:tbl><w:tblPr>${tblBorders(NO_EDGES)}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>` +
+        `<w:tr><w:tc>${content}${p('')}</w:tc></w:tr></w:tbl>`;
+    const { parsed } = await convertBody(wrap(wrap(wrap(inner))), { styles: NORMAL_TABLE });
     assert.equal(borderFinding(parsed), undefined);
 });
