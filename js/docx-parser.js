@@ -1304,7 +1304,7 @@ class DocxParser {
             for (const run of runs) {
                 if (run.namespaceURI === MATH_NS) {
                     // Its hidden runs add their text to hidden
-                    const math = this.mathText(run, { paragraphRun: style.run, hidden });
+                    const math = this.equationText(run, style.run, hidden);
                     if (math.trim() !== '') {
                         text += math;
                         findings.push(['equations', shortExample(math)]);
@@ -2356,7 +2356,7 @@ class DocxParser {
      * @returns {Array<Object>} Empty for an equation with no text, or one all hidden
      */
     parseEquation(oMath, paragraphRun = {}, hidden = null) {
-        const text = this.mathText(oMath, { paragraphRun, hidden });
+        const text = this.equationText(oMath, paragraphRun, hidden);
         if (text.trim() === '') return [];
         // hidden, caps, smallCaps and lang don't apply to the equation's text as a whole
         const { hidden: isHidden, caps, smallCaps, lang, ...formatting } = this.parseRunFormatting(oMath, paragraphRun);
@@ -2373,6 +2373,26 @@ class DocxParser {
     }
 
     /**
+     * Linear text of an equation (see mathText). An equation whose runs with text are all hidden
+     * has none: the operators and brackets of its structures (a fraction's /, a script's ^) would
+     * be all that is left.
+     * @param {Element} oMath - The m:oMath element
+     * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
+     * @param {{found: boolean, text: string}} [hidden] - Set when a hidden run has text, which is appended
+     * @returns {string}
+     */
+    equationText(oMath, paragraphRun = {}, hidden = null) {
+        const hiddenRuns = { found: false, text: '' };
+        const visible = { found: false };
+        const text = this.mathText(oMath, { paragraphRun, hidden: hiddenRuns, visible });
+        if (hiddenRuns.found && hidden) {
+            hidden.found = true;
+            hidden.text += hiddenRuns.text;
+        }
+        return hiddenRuns.found && !visible.found ? '' : text;
+    }
+
+    /**
      * Linear text of an Office Math element, close to Word's own linear format: a fraction
      * (m:f) is num/den, scripts are base^sup, base_sub and base_sub^sup, a radical (m:rad)
      * √(x) or d√(x) with a degree that isn't hidden, a delimiter (m:d) its parts between its
@@ -2384,9 +2404,10 @@ class DocxParser {
      * A hidden run (m:r or w:r whose w:rPr, character style or paragraph style resolves w:vanish
      * on, see parseRunFormatting) adds nothing.
      * @param {Element} element - An m:oMath, or an element inside one
-     * @param {{paragraphRun?: Object, hidden?: {found: boolean, text: string}|null}} [context] -
-     *   paragraphRun: run properties from the paragraph's style; hidden: set when a hidden run has
-     *   text, which is appended to hidden.text
+     * @param {{paragraphRun?: Object, hidden?: {found: boolean, text: string}|null,
+     *   visible?: {found: boolean}|null}} [context] - paragraphRun: run properties from the paragraph's
+     *   style; hidden: set when a hidden run has text, which is appended to hidden.text; visible:
+     *   set when a run that isn't hidden has text other than whitespace
      * @returns {string}
      */
     mathText(element, context = {}) {
@@ -2397,14 +2418,18 @@ class DocxParser {
             const branch = name === 'AlternateContent' ? this.alternateContentBranch(element) : null;
             return branch ? children(branch) : '';
         }
-        if ((ns === MATH_NS || ns === WORD_NS) && name === 'r' &&
-            this.parseRunFormatting(element, context.paragraphRun || {}).hidden) {
-            const text = this.mathChildrenText(element, { ...context, hidden: null });
-            if (context.hidden && text !== '') {
-                context.hidden.found = true;
-                context.hidden.text += text;
+        if ((ns === MATH_NS || ns === WORD_NS) && name === 'r') {
+            const isHidden = this.parseRunFormatting(element, context.paragraphRun || {}).hidden;
+            const text = this.mathChildrenText(element, { ...context, hidden: null, visible: null });
+            if (isHidden) {
+                if (context.hidden && text !== '') {
+                    context.hidden.found = true;
+                    context.hidden.text += text;
+                }
+                return '';
             }
-            return '';
+            if (context.visible && text.trim() !== '') context.visible.found = true;
+            return text;
         }
         if (ns === WORD_NS) {
             if (name === 't') return element.textContent || '';
@@ -2475,7 +2500,7 @@ class DocxParser {
     /**
      * Linear text of a fraction part, base, script, degree or limit, wrapped in parentheses
      * unless it is empty, a single run of letters or digits or a decimal number (A/365, but
-     * (a+b)/2 and x^(n+1)), or already one delimiter (m:d) with its own brackets
+     * (a+b)/2 and x^(n+1)), or already one delimiter (m:d) with both a begin and an end character
      * @param {Element|null} part - e.g. m:num, m:sup
      * @param {Object} [context] - See mathText
      * @returns {string} '' for a missing part
@@ -2485,7 +2510,9 @@ class DocxParser {
         const text = this.mathChildrenText(part, context);
         if (text === '' || SIMPLE_MATH_OPERAND.test(text)) return text;
         const shown = Array.from(part.children).filter(child => !(child.namespaceURI === MATH_NS && child.localName.endsWith('Pr')));
-        if (shown.length === 1 && shown[0].namespaceURI === MATH_NS && shown[0].localName === 'd') return text;
+        const bracketed = d => d.namespaceURI === MATH_NS && d.localName === 'd' &&
+            mathCharacter(d, 'dPr', 'begChr', '(') !== '' && mathCharacter(d, 'dPr', 'endChr', ')') !== '';
+        if (shown.length === 1 && bracketed(shown[0])) return text;
         return `(${text})`;
     }
 

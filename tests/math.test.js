@@ -48,6 +48,10 @@ test('an equation in a sentence is written as linear text where it stands, and r
 const LINEAR_FORMS = [
     ['a fraction with a compound numerator', frac(mr('a+b'), mr('2')), '(a+b)/2'],
     ['a fraction whose numerator is already bracketed', frac(delim('', mr('a+b')), mr('2')), '(a+b)/2'],
+    ['a fraction whose numerator is a delimiter without brackets',
+        frac(delim(chr('begChr', '') + chr('endChr', ''), mr('a+b')), mr('2')), '(a+b)/2'],
+    ['a fraction whose numerator is a delimiter with only a begin bracket',
+        frac(delim(chr('begChr', '{') + chr('endChr', ''), mr('a+b')), mr('2')), '({a+b)/2'],
     ['a fraction of decimal numbers', frac(mr('1.5'), mr('365')), '1.5/365'],
     ['a superscript', sup(mr('x'), mr('2')), 'x^2'],
     ['a compound superscript', sup(mr('x'), mr('n+1')), 'x^(n+1)'],
@@ -132,6 +136,25 @@ test('a hidden run inside an equation is left out and reported as hidden text; t
     assert.equal(content, 'Faiz: A/365');
     assert.deepEqual(finding(parsed, 'equations').examples, ['A/365']);
     assert.deepEqual(finding(parsed, 'hiddenText').examples, ['+gizli']);
+});
+
+test('a structure whose runs are all hidden leaves no operator behind', async () => {
+    for (const math of [
+        frac(mrWith('a', '<w:vanish/>'), mrWith('b', '<w:vanish/>')),
+        sup(mrWith('x', '<w:vanish/>'), mrWith('2', '<w:vanish/>')),
+        rad(null, mrWith('x', '<w:vanish/>'))
+    ]) {
+        const { content, parsed } = await convertBody(p(r('Metin') + oMath(math)));
+        assert.equal(content, 'Metin');
+        assert.equal(finding(parsed, 'equations'), undefined);
+        assert.equal(finding(parsed, 'hiddenText').count, 1);
+    }
+    // The same in a footnote
+    const { parsed } = await convertBody(p(r('Faiz') + footnoteRef(1)), {
+        footnotes: { 1: p(footnoteMark + r('Oran') + oMath(frac(mrWith('a', '<w:vanish/>'), mrWith('b', '<w:vanish/>')))) }
+    });
+    assert.equal(parsed.footnotes[1], 'Oran');
+    assert.equal(finding(parsed, 'equations'), undefined);
 });
 
 test('an equation run hidden through its character style is left out; w:vanish off on a run shows it again', async () => {
