@@ -36,12 +36,14 @@ const NAMESPACES = [
     'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"',
     'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"',
     'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"',
-    'xmlns:v="urn:schemas-microsoft-com:vml"'
+    'xmlns:v="urn:schemas-microsoft-com:vml"',
+    'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
 ].join(' ');
 
 const RELATIONSHIP_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/';
 const WORDML_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.';
 const MEDIA_CONTENT_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif' };
+const CHUNK_CONTENT_TYPES = { mht: 'message/rfc822', html: 'text/html', htm: 'text/html', rtf: 'application/rtf' };
 
 /**
  * Build a minimal .docx in memory. Optional parts get the content-type override and
@@ -56,6 +58,9 @@ const MEDIA_CONTENT_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/
  * @param {string} [options.numbering] - Contents of <w:numbering> in word/numbering.xml
  * @param {string} [options.sectPr] - Contents of the body's final <w:sectPr>, e.g. a <w:endnotePr>
  * @param {string} [options.settings] - Contents of <w:settings> in word/settings.xml, e.g. a <w:endnotePr>
+ * @param {Object<string,string>} [options.chunks] - File name under word/ -> contents of an embedded chunk
+ *   (w:altChunk). Each gets an aFChunk relationship with id `rId_<name without extension>`, e.g.
+ *   afchunk.mht -> rId_afchunk
  * @param {Array<{name: string, root: string, type: string, id: string, inner: string}>} [options.parts] - More
  *   parts under word/, e.g. { name: 'header1.xml', root: 'hdr', type: 'header', id: 'rIdHeader1', inner: '<w:p>...</w:p>' }:
  *   `inner` goes in the <w:{root}> root, `type` names both the relationship and the content type
@@ -104,6 +109,14 @@ async function buildDocx(bodyXml, options = {}) {
                 `ContentType="${MEDIA_CONTENT_TYPES[extension] || 'application/octet-stream'}"/>`;
             if (!defaults.includes(entry)) defaults.push(entry);
         }
+    }
+
+    for (const [name, data] of Object.entries(options.chunks || {})) {
+        parts.push([`word/${name}`, data]);
+        rels.push(`<Relationship Id="rId_${name.replace(/\.[^.]*$/, '')}" Type="${RELATIONSHIP_TYPE}aFChunk" Target="${name}"/>`);
+        const extension = name.split('.').pop().toLowerCase();
+        const entry = `<Default Extension="${extension}" ContentType="${CHUNK_CONTENT_TYPES[extension] || 'application/octet-stream'}"/>`;
+        if (!defaults.includes(entry)) defaults.push(entry);
     }
 
     if (rels.length > 0) {

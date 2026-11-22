@@ -251,12 +251,18 @@ async function oversizedDocx() {
     return declareSize(await buildDocx('<w:p><w:r><w:t>Dilekçe metni</w:t></w:r></w:p>'), 'word/document.xml', 200 * 1024 * 1024);
 }
 
+// A .docx whose body is only a chunk embedded by another program (w:altChunk) and empty paragraphs
+async function embeddedOnlyDocx() {
+    return buildDocx('<w:p/><w:altChunk r:id="rId_afchunk"/>', { chunks: { 'afchunk.mht': 'MIME-Version: 1.0\r\n\r\n<p>Dilekçe</p>' } });
+}
+
 const NAMED_FAILURES = [
     ['a damaged .docx', 'error.corrupt', truncatedDocx],
     ['a password-protected .docx', 'error.encrypted', async () => compoundFile(['EncryptionInfo', 'EncryptedPackage'])],
     ['a .doc renamed to .docx', 'error.legacyDoc', async () => compoundFile(['WordDocument', '1Table'])],
     ['a Strict Open XML .docx', 'error.strict', strictDocx],
-    ['a .docx too large to convert', 'error.tooLarge', oversizedDocx]
+    ['a .docx too large to convert', 'error.tooLarge', oversizedDocx],
+    ['a .docx whose only content is embedded by another program', 'error.embeddedOnly', embeddedOnlyDocx]
 ];
 
 for (const [what, key, build] of NAMED_FAILURES) {
@@ -305,7 +311,8 @@ test('every finding code the parser reports has a TR and an EN message, and app.
     const { strings, run } = await loadPage({ app: true });
     const codes = run('FINDING_CODES');
     assert.deepEqual([...codes], ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
-        'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders']);
+        'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
+        'equations', 'embeddedContent']);
     const keys = run('FINDING_KEYS');
     assert.deepEqual(Object.keys(keys).sort(), [...codes].sort());
     for (const code of codes) {

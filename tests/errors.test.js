@@ -45,6 +45,12 @@ test('a .docx without word/document.xml is rejected as damaged', async () => {
     await assertRejects(await withDocumentXml(null), 'corrupt');
 });
 
+test('a .docx whose body is only embedded chunks (w:altChunk) is refused, not converted to an empty UDF', async () => {
+    const chunks = { 'afchunk.mht': 'MIME-Version: 1.0\r\nContent-Type: text/html\r\n\r\n<p>Dilekçe metni</p>' };
+    await assertRejects(await buildDocx('<w:p/><w:altChunk r:id="rId_afchunk"/><w:p/>',
+        { chunks, sectPr: '<w:pgSz w:w="11906" w:h="16838"/>' }), 'embeddedOnly');
+});
+
 test('a compound file with an EncryptionInfo stream is rejected as password-protected', async () => {
     await assertRejects(compoundFile(['EncryptionInfo', 'EncryptedPackage']), 'encrypted');
 });
