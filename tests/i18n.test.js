@@ -312,7 +312,7 @@ test('every finding code the parser reports has a TR and an EN message, and app.
     const codes = run('FINDING_CODES');
     assert.deepEqual([...codes], ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
         'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
-        'equations', 'embeddedContent']);
+        'equations', 'embeddedContent', 'trackedChanges']);
     const keys = run('FINDING_KEYS');
     assert.deepEqual(Object.keys(keys).sort(), [...codes].sort());
     for (const code of codes) {
@@ -461,6 +461,36 @@ test('hidden text, moved notes, lost line heights and lost tab stops are listed 
     assert.deepEqual(labelTexts(), labels('en'));
     assert.equal(document.getElementById('conversionNotesHelp').textContent, strings.en['notes.locationHelp']);
     assert.notEqual(strings.tr['notes.tabStops'], strings.en['notes.tabStops']);
+});
+
+test('unaccepted tracked changes are listed in both languages, with their places', async () => {
+    const { window, document, strings } = await loadPage({ app: true });
+    const rev = 'w:id="1" w:author="Avukat"';
+    const r = text => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+    const deleted = text => `<w:del ${rev}><w:r><w:delText>${text}</w:delText></w:r></w:del>`;
+    const docx = await buildDocx(
+        `<w:p>${r('Kabul ')}<w:ins ${rev}>${r('edilmemiş ekleme')}</w:ins></w:p>` +
+        `<w:p><w:pPr><w:rPr><w:del ${rev}/></w:rPr></w:pPr>${deleted('Silinen paragraf')}</w:p>` +
+        '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>' +
+        `<w:tr><w:tc><w:p>${r('Kalan satır')}</w:p></w:tc></w:tr>` +
+        `<w:tr><w:trPr><w:del ${rev}/></w:trPr><w:tc><w:p>${deleted('Silinen satır')}</w:p></w:tc></w:tr></w:tbl>`);
+    window.app.processFile(fileOf('dilekce.docx', docx));
+    await window.app.handleConvert();
+
+    const expected = lang => [{
+        code: 'trackedChanges', text: strings[lang]['notes.trackedChanges'], count: strings[lang]['notes.count'].replace('{count}', '3'),
+        examples: [
+            where(strings[lang], ['paragraph', { paragraph: 1 }], '“Kabul edilmemiş ekleme”'),
+            where(strings[lang], ['paragraph', { paragraph: 2 }]),
+            where(strings[lang], ['cell', { table: 1, row: 2, cell: 1 }])
+        ]
+    }];
+    assert.ok(visible(document.getElementById('conversionNotes')));
+    assert.deepEqual(noteItems(document), expected('tr'));
+    assert.match(strings.tr['notes.trackedChanges'], /Gözden Geçir › Kabul Et/);
+    document.querySelector('[data-set-lang="en"]').click();
+    assert.deepEqual(noteItems(document), expected('en'));
+    assert.match(strings.en['notes.trackedChanges'], /Review › Accept/);
 });
 
 test('converted and left-out symbols are listed in both languages, with unquoted font and code examples', async () => {
