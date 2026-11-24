@@ -8,13 +8,17 @@ const r = (text, rPr = '') => `<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ''}<w:t xm
 const HEADER_TEXT = 'Ad Soyad Hukuk Bürosu';
 const FOOTER_TEXT = 'Dosya No: 2026/0000';
 
-/** A header (w:hdr) or footer (w:ftr) part for buildDocx, related as rIdHeader<n> / rIdFooter<n> */
-const part = (kind, inner, n = 1) => ({
+/**
+ * A header (w:hdr) or footer (w:ftr) part for buildDocx, related as rIdHeader<n> / rIdFooter<n>,
+ * with its own image relationships (id -> target relative to the part), if any
+ */
+const part = (kind, inner, n = 1, rels = undefined) => ({
     name: `${kind}${n}.xml`,
     root: kind === 'header' ? 'hdr' : 'ftr',
     type: kind,
     id: `rId${kind === 'header' ? 'Header' : 'Footer'}${n}`,
-    inner
+    inner,
+    rels
 });
 const reference = (kind, n = 1, type = 'default') =>
     `<w:${kind}Reference w:type="${type}" r:id="rId${kind === 'header' ? 'Header' : 'Footer'}${n}"/>`;
@@ -29,10 +33,39 @@ const complexField = (instruction, result) =>
     '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
 const simpleField = (instruction, result) => `<w:fldSimple w:instr=" ${instruction} ">${r(result)}</w:fldSimple>`;
 
-const picture = '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>' +
-    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
-    '<pic:pic><pic:blipFill><a:blip r:embed="rIdLogo"/></pic:blipFill></pic:pic>' +
+const PIC_GRAPHIC = rId => '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+    `<pic:pic><pic:blipFill><a:blip r:embed="${rId}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>`;
+/** A run holding an inline DrawingML picture, 1 in by 0.5 in (72 by 36 points) */
+const pictureRun = (rId = 'rIdLogo') =>
+    `<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>${PIC_GRAPHIC(rId)}</wp:inline></w:drawing></w:r>`;
+/** A run holding a picture anchored to the page, behind or beside the text, 2 in by 1 in */
+const anchoredPictureRun = (rId = 'rIdLogo') => '<w:r><w:drawing><wp:anchor behindDoc="0" relativeHeight="1">' +
+    '<wp:positionH relativeFrom="page"><wp:posOffset>457200</wp:posOffset></wp:positionH>' +
+    '<wp:positionV relativeFrom="page"><wp:posOffset>228600</wp:posOffset></wp:positionV>' +
+    `<wp:extent cx="1828800" cy="914400"/><wp:wrapNone/>${PIC_GRAPHIC(rId)}</wp:anchor></w:drawing></w:r>`;
+/** A run holding a VML picture (w:pict), 120 by 40 points */
+const vmlPictureRun = (rId = 'rIdLogo') => '<w:r><w:pict><v:shape id="_x0000_i1025" type="#_x0000_t75" style="width:120pt;height:40pt">' +
+    `<v:imagedata r:id="${rId}"/></v:shape></w:pict></w:r>`;
+/** Word's way of writing a picture for older readers: DrawingML, with a VML fallback of the same picture */
+const alternatePictureRun = (rId = 'rIdLogo') => '<w:r><mc:AlternateContent>' +
+    `<mc:Choice Requires="wps"><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>${PIC_GRAPHIC(rId)}</wp:inline></w:drawing></mc:Choice>` +
+    `<mc:Fallback><w:pict><v:shape style="width:72pt;height:36pt"><v:imagedata r:id="${rId}"/></v:shape></w:pict></mc:Fallback>` +
+    '</mc:AlternateContent></w:r>';
+const chartRun = '<w:r><w:drawing><wp:inline><wp:extent cx="5486400" cy="3200400"/>' +
+    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">' +
+    '<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdChart"/>' +
     '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+/** Word's picture watermark (Design › Watermark): a VML shape in the header behind the page */
+const watermarkRun = (rId = 'rIdLogo') => '<w:r><w:pict><v:shape id="WordPictureWatermark1" type="#_x0000_t75" ' +
+    'style="position:absolute;width:415pt;height:415pt;z-index:-251657216;mso-position-horizontal:center;mso-position-vertical:center">' +
+    `<v:imagedata r:id="${rId}" gain="19661f" blacklevel="22938f"/></v:shape></w:pict></w:r>`;
+const picture = pictureRun();
+
+const PNG = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01]);
+const OTHER_PNG = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x02]);
+const GIF = Buffer.from('GIF89a\x01\x00\x01\x00', 'latin1');
+const LOGO = { 'word/media/logo.png': PNG };
+const LOGO_RELS = { rIdLogo: 'media/logo.png' };
 const textBox = '<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor><a:graphic><a:graphicData>' +
     `<wps:wsp><wps:txbx><w:txbxContent>${p(r('Kutu metni'))}</w:txbxContent></wps:txbx></wps:wsp>` +
     '</a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice>' +
@@ -219,19 +252,20 @@ test('a footer holding only a page number field writes no footer, and is noted',
     assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
 });
 
-for (const [name, inner] of [['a picture', p(r(HEADER_TEXT) + picture)], ['a text box', p(r(HEADER_TEXT) + textBox)],
-    ['a table', table + p(r(HEADER_TEXT))]]) {
+for (const [name, inner] of [['a text box', p(r(HEADER_TEXT) + textBox)], ['a table', table + p(r(HEADER_TEXT))],
+    ['a table holding a picture', table.replace('Tablo hücresi</w:t></w:r>', `Tablo hücresi</w:t></w:r>${picture}`) + p(r(HEADER_TEXT))]]) {
     test(`${name} in the converted header is left out and noted; the header's paragraphs are kept`, async () => {
         const { doc, content, parsed } = await convertBody(p(r('Gövde')), {
             sectPr: reference('header'),
-            parts: [part('header', inner)]
+            parts: [part('header', inner, 1, LOGO_RELS)],
+            files: LOGO
         });
         const headerEl = topLevel(doc)[0];
         assert.equal(headerEl.localName, 'header');
         assert.deepEqual(texts(headerEl, content), [HEADER_TEXT]);
         assert.equal(doc.querySelectorAll('image').length, 0);
         assert.ok(!content.includes('Kutu metni') && !content.includes('Tablo hücresi'));
-        // The picture's relationship is the header part's, not the document's: no missingImage
+        assert.deepEqual(plain(parsed.images), {}, 'a picture left out is not decoded');
         assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
     });
 }
@@ -325,4 +359,219 @@ test('a missing or malformed header part writes nothing', async () => {
     const malformed = await convert(docx);
     assert.equal(malformed.parsed.header, null);
     assert.ok(!malformed.xml.includes('<header'));
+});
+
+/** The <image> elements under a root, as plain data */
+const imagesIn = root => [...root.querySelectorAll('image')].map(image => ({
+    data: image.getAttribute('imageData'),
+    width: image.getAttribute('width'),
+    height: image.getAttribute('height'),
+    length: image.getAttribute('length')
+}));
+const logo = (width, height) => ({ data: PNG.toString('base64'), width: String(width), height: String(height), length: '1' });
+
+for (const [name, run, size] of [['inline', pictureRun(), [72, 36]], ['anchored', anchoredPictureRun(), [144, 72]]]) {
+    test(`an ${name} logo in the default header, related through the header's own rels, is written as an <image> in it`, async () => {
+        const { doc, content, xml, parsed } = await convertBody(p(r('Gövde')), {
+            sectPr: reference('header'),
+            parts: [part('header', p(run + r(HEADER_TEXT)), 1, LOGO_RELS)],
+            files: LOGO
+        });
+        const [headerEl] = topLevel(doc);
+        assert.equal(headerEl.localName, 'header');
+        assert.deepEqual([...headerEl.children].map(el => el.localName), ['paragraph']);
+        assert.deepEqual([...headerEl.firstElementChild.children].map(el => el.localName), ['image', 'content']);
+        assert.deepEqual(imagesIn(headerEl), [logo(...size)]);
+        // The documented shape: <image imageData width height startOffset length="1"> over a U+FFFC
+        const image = headerEl.querySelector('image');
+        assert.equal(image.getAttribute('startOffset'), '0');
+        assert.equal(textOf(image, content), '￼');
+        assert.equal(content, '￼' + HEADER_TEXT + 'Gövde');
+        assert.match(xml, /<header><paragraph [^>]*><image startOffset="0" length="1" imageData="[^"]+" width="\d+" height="\d+" \/>/);
+        assert.deepEqual(findingSummaries(parsed.findings), []);
+    });
+}
+
+test('grouped pictures in a header keep the first image and report omitted images', async () => {
+    const group = 'http://schemas.microsoft.com/office/word/2010/wordprocessingGroup';
+    const picture = id => `<pic:pic><pic:blipFill><a:blip r:embed="${id}"/></pic:blipFill></pic:pic>`;
+    const drawing = '<w:r><w:drawing><wp:anchor><wp:extent cx="914400" cy="457200"/>' +
+        `<a:graphic><a:graphicData uri="${group}"><wpg:wgp xmlns:wpg="${group}"><wpg:cNvGrpSpPr/><wpg:grpSpPr/>` +
+        picture('rIdLogo') + picture('rIdSecond') + '</wpg:wgp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+    const { doc, parsed } = await convertBody(p(r('Metin')), {
+        sectPr: reference('header'),
+        parts: [part('header', p(drawing), 1, { ...LOGO_RELS, rIdSecond: 'media/second.png' })],
+        files: { ...LOGO, 'word/media/second.png': OTHER_PNG }
+    });
+    assert.equal(doc.querySelectorAll('header image').length, 1);
+    assert.equal(doc.querySelector('header image').getAttribute('imageData'), PNG.toString('base64'));
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
+});
+
+test('a header picture resolves through the header part\'s rels, not a document relationship with the same id', async () => {
+    // The document relates rIdLogo to another picture; the header's own rels point rIdLogo at logo.png
+    const docx = await buildDocx(p(r('Gövde')), {
+        sectPr: reference('header'),
+        parts: [part('header', p(picture), 1, LOGO_RELS)],
+        files: { ...LOGO, 'word/media/other.png': OTHER_PNG }
+    });
+    // Add the clashing id to the document's own relationships
+    const JSZip = require('jszip');
+    const zip = await JSZip.loadAsync(docx);
+    const rels = await zip.file('word/_rels/document.xml.rels').async('string');
+    zip.file('word/_rels/document.xml.rels', rels.replace('</Relationships>',
+        '<Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" ' +
+        'Target="media/other.png"/></Relationships>'));
+    const { doc, parsed } = await convert(await zip.generateAsync({ type: 'nodebuffer' }));
+
+    assert.deepEqual(imagesIn(topLevel(doc)[0]), [logo(72, 36)]);
+    assert.deepEqual(Object.keys(plain(parsed.images)), ['word/media/logo.png']);
+    assert.deepEqual(findingSummaries(parsed.findings), []);
+});
+
+test('a header holding only a logo is written; the pool starts with U+FFFC and every offset still points at its own text', async () => {
+    const { doc, content, parsed } = await convertBody(p(r('Gövde', '<w:b/>') + r(' metni')) + p(r('Son paragraf')), {
+        sectPr: bothReferences,
+        parts: [part('header', p(picture), 1, LOGO_RELS), part('footer', p(r('Dosya No: ') + r('2026/0000', '<w:i/>')))],
+        files: LOGO
+    });
+
+    assert.deepEqual(topLevel(doc).map(el => el.localName), ['header', 'paragraph', 'paragraph', 'footer']);
+    assert.ok(content.startsWith('￼'));
+    assert.equal(parsed.header.length, 1);
+    const found = pieces(doc, content);
+    assert.deepEqual(found.map(({ section, text }) => [section, text]), [
+        ['header', '￼'],
+        ['body', 'Gövde'], ['body', ' metni'], ['body', 'Son paragraf'],
+        ['footer', 'Dosya No: '], ['footer', '2026/0000']
+    ]);
+    let offset = 0;
+    for (const { start, text } of found) {
+        assert.equal(start, offset);
+        offset += text.length;
+    }
+    assert.equal(offset, content.length);
+    assert.deepEqual(findingSummaries(parsed.findings), []);
+});
+
+test('a footer with a picture and text keeps both, in order', async () => {
+    const { doc, content } = await convertBody(p(r('Gövde')), {
+        sectPr: reference('footer'),
+        parts: [part('footer', p(r('Önce ') + picture + r(FOOTER_TEXT)), 1, LOGO_RELS)],
+        files: LOGO
+    });
+    const footerEl = topLevel(doc).at(-1);
+    assert.equal(footerEl.localName, 'footer');
+    assert.deepEqual([...footerEl.firstElementChild.children].map(el => el.localName), ['content', 'image', 'content']);
+    assert.deepEqual(texts(footerEl, content), ['Önce ', '￼', FOOTER_TEXT]);
+    assert.ok(content.endsWith('Önce ￼' + FOOTER_TEXT));
+    assert.deepEqual(imagesIn(footerEl), [logo(72, 36)]);
+});
+
+for (const [name, run, size] of [['a VML picture (w:pict)', vmlPictureRun(), [120, 40]],
+    ['DrawingML with a VML fallback (mc:AlternateContent)', alternatePictureRun(), [72, 36]]]) {
+    test(`${name} in a header embeds the picture once`, async () => {
+        const { doc, parsed } = await convertBody(p(r('Gövde')), {
+            sectPr: reference('header'),
+            parts: [part('header', p(run + r(HEADER_TEXT)), 1, LOGO_RELS)],
+            files: LOGO
+        });
+        assert.deepEqual(imagesIn(topLevel(doc)[0]), [logo(...size)]);
+        assert.equal(doc.querySelectorAll('image').length, 1);
+        assert.deepEqual(findingSummaries(parsed.findings), []);
+    });
+}
+
+test('a header picture with no relationship or no media part gives missingImage in the header and writes no <image>', async () => {
+    for (const [name, options] of [
+        ['no relationship', { parts: [part('header', p(r(HEADER_TEXT) + picture))] }],
+        ['no media part', { parts: [part('header', p(r(HEADER_TEXT) + picture), 1, LOGO_RELS)] }]
+    ]) {
+        const { doc, content, parsed } = await convertBody(p(r('Gövde')), { sectPr: reference('header'), ...options });
+        assert.equal(doc.querySelectorAll('image').length, 0, name);
+        assert.deepEqual(texts(topLevel(doc)[0], content), [HEADER_TEXT], name);
+        assert.deepEqual(plain(parsed.findings), [{
+            code: 'missingImage', count: 1, examples: [HEADER_TEXT],
+            occurrences: [{ example: HEADER_TEXT, location: { kind: 'header' } }]
+        }], name);
+    }
+});
+
+test('a header holding only a missing picture writes no header and gives missingImage', async () => {
+    const { xml, parsed } = await convertBody(p(r('Gövde')), {
+        sectPr: reference('header'),
+        parts: [part('header', p(picture))]
+    });
+    assert.ok(!xml.includes('<header'));
+    assert.equal(parsed.header, null);
+    assert.deepEqual(plain(parsed.findings).map(({ code, occurrences }) => [code, occurrences.map(o => o.location)]),
+        [['missingImage', [{ kind: 'header' }]]]);
+});
+
+test('a GIF logo in a header is embedded as-is and gives unsupportedImage; a chart gives unconvertedDrawing', async () => {
+    const { doc, content, parsed } = await convertBody(p(r('Gövde')), {
+        sectPr: bothReferences,
+        parts: [part('header', p(pictureRun('rIdGif') + r(HEADER_TEXT)), 1, { rIdGif: 'media/logo.gif' }),
+            part('footer', p(r(FOOTER_TEXT) + chartRun))],
+        files: { 'word/media/logo.gif': GIF }
+    });
+    const [headerEl] = topLevel(doc);
+    assert.deepEqual(imagesIn(headerEl).map(image => image.data), [GIF.toString('base64')]);
+    assert.deepEqual(texts(topLevel(doc).at(-1), content), [FOOTER_TEXT]);
+    assert.deepEqual(plain(parsed.findings).map(({ code, examples, occurrences }) => [code, examples, occurrences.map(o => o.location)]), [
+        ['unsupportedImage', ['GIF'], [{ kind: 'header' }]],
+        ['unconvertedDrawing', [FOOTER_TEXT], [{ kind: 'footer' }]]
+    ]);
+});
+
+test('a picture in a header field\'s result is left out with the field, and not decoded', async () => {
+    const { doc, parsed } = await convertBody(p(r('Gövde')), {
+        sectPr: reference('header'),
+        parts: [part('header', p(r(HEADER_TEXT) + complexField('INCLUDEPICTURE "logo.png"', 'x').replace(r('x'), picture)), 1, LOGO_RELS)],
+        files: LOGO
+    });
+    assert.equal(doc.querySelectorAll('image').length, 0);
+    assert.deepEqual(plain(parsed.images), {});
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
+});
+
+test('a watermark in the header is left out and noted, and its picture is not decoded', async () => {
+    const { doc, content, parsed } = await convertBody(p(r('Gövde')), {
+        sectPr: reference('header'),
+        parts: [part('header', p(watermarkRun()) + p(r(HEADER_TEXT)), 1, LOGO_RELS)],
+        files: LOGO
+    });
+    assert.equal(doc.querySelectorAll('image').length, 0);
+    assert.ok(content.startsWith(HEADER_TEXT) || content.startsWith('​' + HEADER_TEXT));
+    assert.deepEqual(plain(parsed.images), {});
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
+});
+
+test('a first-page header holding only a picture is not converted, and is noted', async () => {
+    const { doc, content, parsed } = await convertBody(p(r('Gövde')), {
+        sectPr: reference('header', 1) + reference('header', 2, 'first') + '<w:titlePg/>',
+        parts: [part('header', p(r(HEADER_TEXT))), part('header', p(picture), 2, LOGO_RELS)],
+        files: LOGO
+    });
+    assert.equal(doc.querySelectorAll('image').length, 0);
+    assert.equal(content, HEADER_TEXT + 'Gövde');
+    assert.deepEqual(plain(parsed.images), {});
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
+});
+
+test('a letterhead converts to a well-formed .udf whose header holds the logo first', async () => {
+    // Synthetic letterhead: a logo paragraph, the office name and address, a footer with a file reference
+    const { doc, content, xml } = await convertBody(p(r('T.C.')) + p(r('İSTANBUL ... MAHKEMESİNE')), {
+        sectPr: bothReferences,
+        parts: [part('header', p(anchoredPictureRun() + r('Ad Soyad', '<w:b/>') + r(' Hukuk Bürosu')) +
+            p(r('Örnek Mah. 1. Sok. No: 0')), 1, LOGO_RELS),
+        part('footer', p(r(FOOTER_TEXT)))],
+        files: LOGO
+    });
+    // convert() already checked content.xml is well-formed
+    assert.ok(/^<\?xml[^>]*>\s*<template/.test(xml));
+    const header = doc.querySelector('elements > header');
+    assert.equal(header, topLevel(doc)[0]);
+    assert.equal(header.querySelectorAll(':scope > paragraph > image').length, 1);
+    assert.ok(content.startsWith('￼Ad Soyad Hukuk Bürosu'));
 });

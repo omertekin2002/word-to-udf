@@ -29,6 +29,10 @@ const DEFAULT_RUN_FORMATTING = {
     fontSize: 12
 };
 
+// The theme font slots a w:rFonts w:asciiTheme may name for Latin text, and the theme font
+// (a:majorFont or a:minorFont, ECMA-376 Part 1, 20.1.4.1.24 / 20.1.4.1.25) each resolves to
+const THEME_FONT_SLOTS = { majorAscii: 'major', majorHAnsi: 'major', minorAscii: 'minor', minorHAnsi: 'minor' };
+
 // Word's fixed highlighting palette (w:highlight w:val, ST_HighlightColor, ECMA-376 Part 1, 17.18.40)
 const HIGHLIGHT_COLORS = {
     yellow: 'FFFF00', green: '00FF00', cyan: '00FFFF', magenta: 'FF00FF', blue: '0000FF', red: 'FF0000',
@@ -173,12 +177,13 @@ const TAB_POSITION_PRECISION = 6;
 // Line rules (w:spacing w:lineRule) lineSpacing() can't express, so their paragraphs get single spacing
 const LOST_LINE_RULES = ['exact', 'atLeast'];
 
-// Header and footer content the conversion leaves out: pictures and text boxes (w:drawing, VML
-// w:pict, w:object), and fields (w:fldSimple, w:fldChar), whose displayed result would be stale
-const HEADER_FOOTER_DRAWINGS = PICTURE_ELEMENTS;
-
 // Run items a header or footer paragraph keeps: page breaks and note references have no place there
-const HEADER_FOOTER_RUN_TYPES = ['text', 'tab', 'break'];
+const HEADER_FOOTER_RUN_TYPES = ['text', 'tab', 'break', 'image'];
+
+// Start of the VML shape id Word gives a watermark it inserts in a header (Design › Watermark):
+// a picture watermark, and a text one (a WordArt shape). The UDF's page background (<bgImage>)
+// isn't written, and a watermark isn't a picture in the header's text.
+const WATERMARK_SHAPE_IDS = /^(?:WordPictureWatermark|PowerPlusWaterMarkObject)/;
 
 // Table edges a w:tblBorders sets, each under the names Word writes for it (start and end are
 // the newer names of left and right)
@@ -201,6 +206,13 @@ const CELL_EDGES = {
 
 // Border values (ST_Border) that draw no line
 const NO_BORDER_VALUES = ['none', 'nil'];
+
+// Text of an equation part that needs no parentheses around it in linear form (see mathOperand):
+// one run of letters or digits, or a decimal number
+const SIMPLE_MATH_OPERAND = /^(?:[\p{L}\p{N}]+|\p{N}+(?:[.,]\p{N}+)+)$/u;
+
+// Word ML elements inside an equation that show no text: run properties, and deleted or moved-away runs
+const MATH_SKIPPED_WORD_ELEMENTS = ['rPr', 'del', 'moveFrom'];
 
 const COMPOUND_FILE_SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
@@ -227,6 +239,7 @@ const STRICT_WORD_NS = 'http://purl.oclc.org/ooxml/wordprocessingml/main';
 const PARSE_FAILURES = {
     corrupt: 'The Word document is damaged: its main document part is missing or not well-formed.',
     encrypted: 'The Word document is password-protected.',
+    embeddedOnly: 'The Word document has no text of its own: its content is embedded by another program (w:altChunk).',
     legacyDoc: 'The file is a Word 97-2003 document (.doc), not a .docx.',
     strict: 'The Word document is saved as Strict Open XML, which is not supported.',
     tooLarge: 'The Word document is too large to convert: its parts decompress past the size limit.'
@@ -241,7 +254,43 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 // Codes of the conversion findings parse() reports, in the order it lists them: content the
 // conversion drops or simplifies, so the user can fix it in Word before filing
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
-    'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders'];
+    'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
+    'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'paragraphBorders'];
+
+// Vertical alignments a run can have (w:vertAlign w:val, ST_VerticalAlignRun, ECMA-376 Part 1, 17.18.96).
+// Superscript is written; subscript has no UDF attribute, so it stays on the baseline and is reported.
+const VERTICAL_ALIGNMENTS = ['baseline', 'superscript', 'subscript'];
+
+// The edges of a paragraph's border (w:pBdr, ECMA-376 Part 1, 17.3.1.24): the box's four sides,
+// the line between paragraphs with the same borders, and a bar beside it
+const PARAGRAPH_BORDER_EDGES = ['top', 'left', 'bottom', 'right', 'between', 'bar'];
+
+// Border line styles (w:val) that draw nothing
+const INVISIBLE_BORDER_STYLES = ['nil', 'none'];
+
+// Section start types (a w:sectPr's w:type, which says how that section starts after the previous
+// one) that start the section on a new page. A missing w:type means nextPage. oddPage and evenPage
+// are written as a plain page break and reported (sectionLayout): Word may add a blank page there.
+const PAGE_SECTION_STARTS = ['nextPage', 'oddPage', 'evenPage'];
+const PARITY_SECTION_STARTS = ['oddPage', 'evenPage'];
+
+// The w:pgSz and w:pgMar attributes a section's page setup is compared on (see sectionLayoutDiffers)
+const PAGE_SIZE_ATTRIBUTES = ['w:w', 'w:h'];
+const PAGE_MARGIN_ATTRIBUTES = ['w:top', 'w:right', 'w:bottom', 'w:left'];
+
+// Track Changes revision marks inside a paragraph, its runs and its paragraph mark: inserted, deleted
+// and moved content (w:ins, w:del, w:moveTo, w:moveFrom, which also mark a paragraph mark in
+// w:pPr/w:rPr and inserted numbering in w:numPr), and formatting, numbering and section changes
+const PARAGRAPH_REVISION_ELEMENTS = ['ins', 'del', 'moveTo', 'moveFrom', 'rPrChange', 'pPrChange', 'numberingChange',
+    'sectPrChange'];
+// In a row's w:trPr: an inserted or deleted row, or a row formatting change
+const ROW_REVISION_ELEMENTS = ['ins', 'del', 'trPrChange'];
+// In a cell's w:tcPr: an inserted, deleted or merged cell, or a cell formatting change
+const CELL_REVISION_ELEMENTS = ['cellIns', 'cellDel', 'cellMerge', 'tcPrChange'];
+// In w:pPr/w:rPr: a deleted or moved-away paragraph mark, which Word's Accept All removes
+const DELETED_MARK_ELEMENTS = ['del', 'moveFrom'];
+// Inline wrappers whose runs a document with every change accepted doesn't have
+const DELETED_RUN_WRAPPERS = ['del', 'moveFrom'];
 
 // How many location hints a finding keeps, and how long each may be
 const MAX_FINDING_EXAMPLES = 3;
@@ -249,6 +298,11 @@ const MAX_EXAMPLE_LENGTH = 40;
 
 // How many located occurrences (an example and where it is) a finding keeps
 const MAX_FINDING_OCCURRENCES = 5;
+
+// How many levels of tables are written as tables, the body's own table included: by default a
+// table in a cell of a table in a cell of a body table is the deepest. A table nested deeper is
+// flattened into its cell's paragraphs and reported (nestedTables). 1 flattens every nested table.
+const MAX_TABLE_DEPTH = 3;
 
 // Outline levels (w:outlineLvl w:val) that make a paragraph a heading: 0 to 8 are Word's
 // heading levels 1 to 9, and 9 is body text
@@ -409,6 +463,44 @@ function isPetitionHeading(paragraph) {
 }
 
 /**
+ * Whether an Office Math on/off property is on: present, with no m:val or one that isn't off
+ * @param {Element|null} property - e.g. m:degHide
+ * @returns {boolean}
+ */
+function mathIsOn(property) {
+    if (!property) return false;
+    if (!property.hasAttributeNS(MATH_NS, 'val')) return true;
+    return !['0', 'false', 'off'].includes(property.getAttributeNS(MATH_NS, 'val'));
+}
+
+/**
+ * A character an Office Math structure's properties set, e.g. m:dPr/m:begChr
+ * @param {Element} element - The structure, e.g. m:d
+ * @param {string} properties - Local name of its properties element, e.g. 'dPr'
+ * @param {string} name - Local name of the character property, e.g. 'begChr'
+ * @param {string} fallback - The character when the property or its m:val is missing
+ * @returns {string} '' when m:val is empty: no character
+ */
+function mathCharacter(element, properties, name, fallback) {
+    const pr = childElement(element, properties, MATH_NS);
+    const property = pr && childElement(pr, name, MATH_NS);
+    return property && property.hasAttributeNS(MATH_NS, 'val') ? property.getAttributeNS(MATH_NS, 'val') : fallback;
+}
+
+/**
+ * Whether an element is inside an equation (m:oMath) below an ancestor
+ * @param {Element} element
+ * @param {Element} ancestor - Where to stop looking
+ * @returns {boolean}
+ */
+function isInEquation(element, ancestor) {
+    for (let el = element.parentElement; el && el !== ancestor; el = el.parentElement) {
+        if (el.namespaceURI === MATH_NS && el.localName === 'oMath') return true;
+    }
+    return false;
+}
+
+/**
  * A copy of a finding's location, so the caller can't change the one the parser keeps
  * @param {Object} location - See DocxParser.addFinding
  * @returns {Object}
@@ -420,12 +512,98 @@ function copyLocation(location) {
 }
 
 /**
+ * The w:sectPr of a section break: the one in a paragraph's w:pPr, which ends a section there
+ * @param {Element} para - The w:p element
+ * @returns {Element|null}
+ */
+function sectionBreakOf(para) {
+    const pPr = childElement(para, 'pPr');
+    return (pPr && childElement(pPr, 'sectPr')) || null;
+}
+
+/**
+ * How a section starts after the previous one: its w:type, nextPage when it has none
+ * (the w:type default). A missing final w:sectPr is a section with nothing set.
+ * @param {Element|null} sectPr - The section's w:sectPr
+ * @returns {string} e.g. 'nextPage', 'continuous', 'oddPage'
+ */
+function sectionStart(sectPr) {
+    const type = sectPr && childElement(sectPr, 'type');
+    return (type && type.getAttribute('w:val')) || 'nextPage';
+}
+
+/**
+ * Whether a section has more than one text column: w:cols with w:num above 1, or more than one w:col
+ * @param {Element} sectPr - The section's w:sectPr
+ * @returns {boolean}
+ */
+function hasColumns(sectPr) {
+    const cols = childElement(sectPr, 'cols');
+    if (!cols) return false;
+    return parseInt(cols.getAttribute('w:num'), 10) > 1 || childElements(cols, 'col').length > 1;
+}
+
+/**
  * Plain text of a parsed paragraph's text runs
  * @param {Object} paragraph - A parsed paragraph
  * @returns {string}
  */
 function paragraphText(paragraph) {
     return paragraph.runs.filter(run => run.type === 'text').map(run => run.text).join('');
+}
+
+/**
+ * Whether a paragraph's mark is deleted or moved away (w:pPr/w:rPr/w:del or w:moveFrom), so
+ * Word's Accept All joins it to the next paragraph
+ * @param {Element} para - The w:p element
+ * @returns {boolean}
+ */
+function paragraphMarkDeleted(para) {
+    const pPr = childElement(para, 'pPr');
+    const rPr = pPr && childElement(pPr, 'rPr');
+    return Boolean(rPr) && DELETED_MARK_ELEMENTS.some(name => childElement(rPr, name));
+}
+
+/**
+ * Whether Accept All removes this row and its contents (w:trPr/w:del)
+ */
+function tableRowDeleted(trPr) {
+    return Boolean(trPr && childElement(trPr, 'del'));
+}
+
+/**
+ * Whether a parsed paragraph has nothing left: no items, or only whitespace text. With its mark
+ * deleted too (see paragraphMarkDeleted), Word's Accept All removes it.
+ * @param {Array<Object>} items - Its parsed items (see parseRun)
+ * @returns {boolean}
+ */
+function nothingLeft(items) {
+    return items.every(item => item.type === 'text' && item.text.trim() === '');
+}
+
+/**
+ * Whether an element is inside deleted or moved-away content (w:del, w:moveFrom) of a paragraph
+ * @param {Element} element - A run
+ * @param {Element} ancestor - The paragraph to stop at
+ * @returns {boolean}
+ */
+function isDeletedRun(element, ancestor) {
+    for (let el = element.parentElement; el && el !== ancestor; el = el.parentElement) {
+        if (el.namespaceURI === WORD_NS && DELETED_RUN_WRAPPERS.includes(el.localName)) return true;
+    }
+    return false;
+}
+
+/**
+ * Whether a parsed run item shows something in the UDF: text other than whitespace, a picture
+ * with data, or a note reference
+ * @param {Object} item - See parseRun
+ * @returns {boolean}
+ */
+function showsContent(item) {
+    if (item.type === 'text') return item.text.trim() !== '';
+    if (item.type === 'image') return Boolean(item.data);
+    return item.type === 'footnoteRef' || item.type === 'endnoteRef';
 }
 
 /**
@@ -657,6 +835,9 @@ class DocxParser {
         this.documentPath = 'word/document.xml';
         this.document = null;
         this.relationships = {};
+        // The relationships of the header or footer part being parsed, which its pictures
+        // resolve through (see embedPicture); null while the main document part is parsed
+        this.partRelationships = null;
         this.images = {};
         this.imageFormats = {};
         this.footnotes = {};
@@ -666,9 +847,13 @@ class DocxParser {
         // The formatted paragraphs of each note (see parseNoteParagraphs), keyed like footnotes and endnotes
         this.noteParagraphs = { footnote: {}, endnote: {} };
         this.numbering = {};
+        // The theme's Latin typefaces, which w:asciiTheme names (see parseThemeFonts)
+        this.themeFonts = { major: null, minor: null };
         this.styles = this.emptyStyles();
         this.findings = {};
         this.inDiscardedCell = false;
+        // How many tables deep the content being parsed is (see parseTable): 0 outside any table
+        this.tableDepth = 0;
         // Whether a note's paragraphs are being parsed (see parseNoteParagraphs): addFinding records
         // nothing, since noteText's findings are recorded once per reference instead, and parseRun
         // leaves out pictures and note references
@@ -694,6 +879,7 @@ class DocxParser {
         try {
             // Reset state: the app reuses one parser for every file
             this.relationships = {};
+            this.partRelationships = null;
             this.images = {};
             this.imageFormats = {};
             this.footnotes = {};
@@ -701,14 +887,17 @@ class DocxParser {
             this.noteFindings = { footnote: {}, endnote: {} };
             this.noteParagraphs = { footnote: {}, endnote: {} };
             this.numbering = {};
+            this.themeFonts = { major: null, minor: null };
             this.styles = this.emptyStyles();
             this.findings = {};
             this.inDiscardedCell = false;
+            this.tableDepth = 0;
             this.parsingNote = false;
             this.location = { kind: 'document' };
             this.body = { paragraphs: 0, tables: 0, headings: { outline: null, petition: null } };
             this.documentParagraphs = null;
             this.endnotesMoved = false;
+            this.embeddedChunks = 0;
             this.partBytes = new Map();
             this.bytesRead = 0;
 
@@ -724,6 +913,9 @@ class DocxParser {
 
             // Parse list definitions
             await this.parseNumbering();
+
+            // Read the theme's fonts, which styles and runs name through w:asciiTheme
+            await this.parseThemeFonts();
 
             // Parse style definitions
             await this.parseStyles();
@@ -762,6 +954,13 @@ class DocxParser {
             // Decode the pictures the document shows, then extract document elements
             await this.extractImages();
             const elements = await this.extractElements();
+
+            // A body whose only content is embedded chunks (w:altChunk), which aren't converted,
+            // would give an empty UDF
+            if (this.embeddedChunks > 0 && !this.flattenToParagraphs(elements).some(paragraph =>
+                paragraph.runs.some(showsContent))) {
+                throw parseFailure('embeddedOnly');
+            }
 
             return {
                 elements: elements,
@@ -817,26 +1016,37 @@ class DocxParser {
     }
 
     /**
-     * Parse the main document part's relationships, each with the name of the part it
-     * targets (path), or null for an external target such as a hyperlink
+     * Parse the main document part's relationships (see readRelationships)
      */
     async parseRelationships() {
+        this.relationships = await this.readRelationships(this.documentPath);
+    }
+
+    /**
+     * Read a part's relationships, each with the name of the part it targets (path), resolved
+     * relative to that part, or null for an external target such as a hyperlink
+     * @param {string} partPath - The part's name, e.g. word/header1.xml
+     * @returns {Promise<Object<string, {target: string, type: string, path: string|null}>>} Keyed
+     *   by relationship id; empty when the part has no relationships
+     */
+    async readRelationships(partPath) {
+        const relationships = {};
         // A part's relationships live in _rels/<part name>.rels next to it
-        const relsFile = this.zip.file(this.documentPath.replace(/[^/]*$/, name => `_rels/${name}.rels`));
-        if (!relsFile) return;
+        const relsFile = this.zip.file(partPath.replace(/[^/]*$/, name => `_rels/${name}.rels`));
+        if (!relsFile) return relationships;
 
         const relsXml = await this.readXmlPart(relsFile);
         const relsDoc = parseXml(relsXml);
-        const relationships = relsDoc.getElementsByTagName('Relationship');
 
-        for (const rel of relationships) {
+        for (const rel of relsDoc.getElementsByTagName('Relationship')) {
             const id = rel.getAttribute('Id');
             const target = rel.getAttribute('Target');
             const type = rel.getAttribute('Type');
             const path = rel.getAttribute('TargetMode') === 'External' || !target
-                ? null : resolvePartName(this.documentPath, target);
-            this.relationships[id] = { target, type, path };
+                ? null : resolvePartName(partPath, target);
+            relationships[id] = { target, type, path };
         }
+        return relationships;
     }
 
     /**
@@ -880,24 +1090,30 @@ class DocxParser {
     }
 
     /**
-     * Decode the images the main document part shows, keyed by part name: those an a:blip
-     * embeds or a VML v:imagedata shows (legacy pictures and OLE object previews), text-box
-     * pictures included. An image part nothing shows (left over from a deleted picture, or
-     * in the mc:AlternateContent branch that isn't read) is never decompressed.
+     * Decode the images a part shows, keyed by part name: those an a:blip embeds or a VML
+     * v:imagedata shows (legacy pictures and OLE object previews). An image part nothing
+     * shows (left over from a deleted picture, or in the mc:AlternateContent branch that
+     * isn't read) is never decompressed. An image already decoded isn't read again.
+     * @param {Array<Element>} [containers] - Where the pictures are: the main document by
+     *   default, text-box pictures included
+     * @param {Object} [relationships] - The relationships of the part the containers are in
+     *   (see readRelationships)
+     * @param {boolean} [skipTextBoxes] - Leave out pictures inside a text box (w:txbxContent),
+     *   as in a header or footer, whose text boxes aren't converted
      */
-    async extractImages() {
-        const references = [
-            ...Array.from(this.document.getElementsByTagNameNS(DRAWING_NS, 'blip'))
+    async extractImages(containers = [this.document], relationships = this.relationships, skipTextBoxes = false) {
+        const references = containers.flatMap(container => [
+            ...Array.from(container.getElementsByTagNameNS(DRAWING_NS, 'blip'))
                 .map(blip => [blip, blip.getAttributeNS(RELATIONSHIPS_NS, 'embed')]),
-            ...Array.from(this.document.getElementsByTagNameNS(VML_NS, 'imagedata'))
+            ...Array.from(container.getElementsByTagNameNS(VML_NS, 'imagedata'))
                 .map(imageData => [imageData, imageData.getAttributeNS(RELATIONSHIPS_NS, 'id')])
-        ];
+        ]);
         const embeds = new Set(references
-            .filter(([element, id]) => id && this.isInReadBranch(element))
+            .filter(([element, id]) => id && this.isInReadBranch(element) && !(skipTextBoxes && this.isInTextBox(element, null)))
             .map(([, id]) => id));
         for (const id of embeds) {
-            if (!Object.prototype.hasOwnProperty.call(this.relationships, id)) continue;
-            const { type, path } = this.relationships[id];
+            if (!Object.prototype.hasOwnProperty.call(relationships, id)) continue;
+            const { type, path } = relationships[id];
             if (type !== PART_RELATIONSHIP_TYPE + 'image' || !path || this.images[path]) continue;
             const file = this.zip.file(path);
             if (!file) continue;
@@ -950,16 +1166,19 @@ class DocxParser {
     }
 
     /**
-     * Whether an XML part holds any non-whitespace text (w:t)
+     * Whether an XML part holds any non-whitespace text (w:t, or an equation's m:t), or a
+     * picture, text box, chart or shape (see PICTURE_ELEMENTS)
      * @param {string} path - Part name
      * @returns {Promise<boolean>} false for a missing or unreadable part
      */
-    async partHasText(path) {
+    async partHasContent(path) {
         const file = path && this.zip.file(path);
         if (!file) return false;
         try {
             const doc = parseXml(await this.readXmlPart(file));
-            return Array.from(doc.getElementsByTagNameNS(WORD_NS, 't')).some(t => (t.textContent || '').trim() !== '');
+            return PICTURE_ELEMENTS.some(name => doc.getElementsByTagNameNS(WORD_NS, name).length > 0) ||
+                [WORD_NS, MATH_NS].some(namespace => Array.from(doc.getElementsByTagNameNS(namespace, 't'))
+                    .some(t => (t.textContent || '').trim() !== ''));
         } catch (error) {
             rethrowFatal(error);
             console.warn(`Could not read ${path}:`, error);
@@ -1002,11 +1221,11 @@ class DocxParser {
      * Parse the default header and footer of the document's final section, the section the
      * page setup comes from. A section without its own default header or footer uses the
      * previous section's (ECMA-376 Part 1, 17.10.5). Header and footer content that isn't
-     * converted is noted once for the document (headersFooters): text in a first-page,
-     * even-page or other section's header or footer, and fields, pictures, text boxes and
-     * tables in the converted ones.
+     * converted is noted once for the document (headersFooters): text or pictures in a
+     * first-page, even-page or other section's header or footer, and fields, text boxes,
+     * watermarks and tables in the converted ones. Pictures in the converted ones are kept.
      * @returns {Promise<{header: Array<Object>|null, footer: Array<Object>|null}>} Parsed
-     *   paragraphs, or null when there is no text to write
+     *   paragraphs, or null when there is no text or picture to write
      */
     async parseHeadersFooters() {
         const sections = this.bodySections();
@@ -1034,6 +1253,7 @@ class DocxParser {
                 lost = lost || dropped;
             } finally {
                 this.location = { kind: 'document' };
+                this.partRelationships = null;
             }
         }
 
@@ -1042,7 +1262,7 @@ class DocxParser {
             if (lost) break;
             if (!path || path === converted[kind] || checked.has(path)) continue;
             checked.add(path);
-            lost = await this.partHasText(path);
+            lost = await this.partHasContent(path);
         }
 
         if (lost) this.addFinding('headersFooters', '', { kind: 'document' });
@@ -1050,14 +1270,15 @@ class DocxParser {
     }
 
     /**
-     * Parse the top-level paragraphs of a header or footer part like body paragraphs. Fields,
-     * pictures, text boxes and tables are left out: a field's displayed result is dropped, not
-     * kept as static text.
+     * Parse the top-level paragraphs of a header or footer part like body paragraphs, pictures
+     * included: they resolve through the part's own relationships, and only the ones it shows
+     * are decoded. Fields, text boxes, watermarks and tables are left out: a field's displayed
+     * result is dropped, not kept as static text.
      * @param {string} path - The part's name
      * @param {'header'|'footer'} kind - Which part it is: its root is w:hdr or w:ftr
      * @returns {Promise<{paragraphs: Array<Object>|null, dropped: boolean}>} paragraphs is null
-     *   when the part is missing, unreadable or has no non-whitespace text left; dropped says
-     *   whether any content was left out
+     *   when the part is missing, unreadable or has no non-whitespace text or picture left;
+     *   dropped says whether any content was left out
      */
     async parseHeaderFooterPart(path, kind) {
         const file = this.zip.file(path);
@@ -1076,21 +1297,28 @@ class DocxParser {
 
         let dropped = false;
         const blocks = this.contentChildren(root);
-        const hasContent = element => HEADER_FOOTER_DRAWINGS.some(name => element.getElementsByTagNameNS(WORD_NS, name).length > 0) ||
+        const hasContent = element => PICTURE_ELEMENTS.some(name => element.getElementsByTagNameNS(WORD_NS, name).length > 0) ||
             Array.from(element.getElementsByTagNameNS(WORD_NS, 't')).some(t => (t.textContent || '').trim() !== '');
         if (blocks.some(block => block.localName === 'tbl' && hasContent(block))) dropped = true;
+        // Embedded content from another program (w:altChunk) isn't converted
+        if (blocks.some(block => block.localName === 'altChunk')) dropped = true;
         const paragraphs = blocks.filter(block => block.localName === 'p');
 
-        // Simple fields, with the result runs inside them, and pictures and text boxes
+        // Simple fields, with the result runs inside them, and watermarks
         const remove = elements => {
             for (const element of elements) {
                 dropped = true;
                 element.remove();
             }
         };
+        const isWatermark = element => Array.from(element.getElementsByTagNameNS(VML_NS, '*'))
+            .some(shape => WATERMARK_SHAPE_IDS.test(shape.getAttribute('id') || ''));
         for (const para of paragraphs) {
             remove(Array.from(para.getElementsByTagNameNS(WORD_NS, 'fldSimple')));
-            for (const name of HEADER_FOOTER_DRAWINGS) remove(Array.from(para.getElementsByTagNameNS(WORD_NS, name)));
+            for (const name of PICTURE_ELEMENTS) remove(Array.from(para.getElementsByTagNameNS(WORD_NS, name)).filter(isWatermark));
+            // A text box's paragraphs aren't parsed (see parseParagraph); a picture beside it in
+            // the same drawing still is (see parseDrawing)
+            if (para.getElementsByTagNameNS(WORD_NS, 'txbxContent').length > 0) dropped = true;
         }
 
         // Complex fields: everything from a w:fldChar begin to its matching end, the field
@@ -1114,18 +1342,40 @@ class DocxParser {
         }
 
         const hasText = paragraphs.some(para => this.paragraphRuns(para)
-            .some(run => childElements(run, 'sym').length > 0 ||
-                childElements(run, 't').some(t => (t.textContent || '').trim() !== '')));
-        if (!hasText) return { paragraphs: null, dropped };
-
-        // Every paragraph is written, as in a table cell (see paragraphIsWritten)
-        const parsed = paragraphs.map(para => {
-            const paragraph = this.parseParagraph(para, this.paragraphRuns(para), true);
-            paragraph.runs = paragraph.runs.filter(run => HEADER_FOOTER_RUN_TYPES.includes(run.type));
-            return paragraph;
+            .some(run => run.namespaceURI === MATH_NS ? this.mathText(run).trim() !== ''
+                : childElements(run, 'sym').length > 0 || childElements(run, 't').some(t => (t.textContent || '').trim() !== '')));
+        // The runs the paragraphs show: not deleted or moved away (see paragraphRuns), nor hidden
+        const shownRuns = paragraphs.flatMap(para => {
+            const styleRun = this.paragraphStyle(childElement(para, 'pPr')).run;
+            return this.paragraphRuns(para)
+                .filter(run => run.namespaceURI === WORD_NS && !this.parseRunFormatting(run, styleRun).hidden);
         });
-        // A part whose only text is hidden (w:vanish) shows nothing in Word
-        if (!parsed.some(paragraph => paragraphText(paragraph).trim() !== '')) return { paragraphs: null, dropped };
+        const hasPicture = shownRuns.some(run => PICTURE_ELEMENTS.some(name => Array.from(run.getElementsByTagNameNS(WORD_NS, name))
+            .some(element => this.isInReadBranch(element) && !this.isInTextBox(element, run))));
+        if (!hasText && !hasPicture) {
+            // Nothing is left to parse, but a part emptied by unaccepted deletions still has changes to report
+            for (const para of paragraphs) {
+                if (this.hasRevisions(para)) this.addFinding('trackedChanges');
+            }
+            return { paragraphs: null, dropped };
+        }
+
+        // The pictures those runs show, through the part's own relationships: a header's r:embed
+        // ids name entries of its _rels/header1.xml.rels, not of the document's
+        this.partRelationships = await this.readRelationships(path);
+        await this.extractImages(shownRuns, this.partRelationships, true);
+
+        // Every paragraph is written, as in a table cell (see paragraphIsWritten), except one
+        // Word's Accept All removes (see parseParagraphBlocks)
+        const parsed = paragraphs.flatMap(para => {
+            const paragraph = this.parseParagraph(para, this.paragraphRuns(para), true);
+            if (paragraphMarkDeleted(para) && nothingLeft(paragraph.runs)) return [];
+            if (paragraph.runs.some(run => run.omittedPictures)) dropped = true;
+            paragraph.runs = paragraph.runs.filter(run => HEADER_FOOTER_RUN_TYPES.includes(run.type));
+            return [paragraph];
+        });
+        // A part whose only text is hidden (w:vanish), or whose pictures are all missing, shows nothing
+        if (!parsed.some(paragraph => paragraph.runs.some(showsContent))) return { paragraphs: null, dropped };
         return { paragraphs: parsed, dropped };
     }
 
@@ -1159,10 +1409,16 @@ class DocxParser {
         let para = element;
         while (para && !(para.namespaceURI === WORD_NS && para.localName === 'p')) para = para.parentElement;
         if (!para) return '';
-        if (!this.documentParagraphs) {
-            this.documentParagraphs = Array.from(this.document.getElementsByTagNameNS(WORD_NS, 'p'));
+        // The paragraphs of the part the element is in: the main document, or a header or footer
+        let paragraphs;
+        if (para.ownerDocument === this.document) {
+            if (!this.documentParagraphs) {
+                this.documentParagraphs = Array.from(this.document.getElementsByTagNameNS(WORD_NS, 'p'));
+            }
+            paragraphs = this.documentParagraphs;
+        } else {
+            paragraphs = Array.from(para.ownerDocument.getElementsByTagNameNS(WORD_NS, 'p'));
         }
-        const paragraphs = this.documentParagraphs;
         const index = paragraphs.indexOf(para);
         for (let distance = 0; distance < paragraphs.length; distance++) {
             for (const i of distance === 0 ? [index] : [index - distance, index + distance]) {
@@ -1200,6 +1456,13 @@ class DocxParser {
                 if (id === '0' || id === '-1' || SEPARATOR_NOTE_TYPES.includes(note.getAttribute('w:type'))) continue;
 
                 const findings = [];
+                // Prune the note's own XML before both passes. Removing the whole row also
+                // keeps its text out of the plain-text fallback and finding examples.
+                for (const row of Array.from(note.getElementsByTagNameNS(WORD_NS, 'tr'))) {
+                    if (!note.contains(row) || !tableRowDeleted(childElement(row, 'trPr'))) continue;
+                    row.remove();
+                    findings.push(['trackedChanges', '']);
+                }
                 notes[id] = this.noteText(note, findings);
                 this.noteFindings[type][id] = findings;
                 this.noteParagraphs[type][id] = this.parseNoteParagraphs(note);
@@ -1215,19 +1478,39 @@ class DocxParser {
      * Plain text of a footnote or endnote: the text of its runs in document order, with one
      * space between paragraphs. A tab (w:tab, w:ptab) or line break (w:br, w:cr) in a run becomes a
      * space, so the words on either side of it stay apart. A symbol (w:sym) becomes its Unicode
-     * text (see symbolText). A hidden run (w:vanish, resolved through the paragraph and character
-     * styles as in the body) adds nothing.
+     * text (see symbolText), and an equation (m:oMath) its linear text (see mathText). A hidden run
+     * (w:vanish, resolved through the paragraph and character styles as in the body) adds nothing.
      * @param {Element} note - The w:footnote or w:endnote element
      * @param {Array<[string, string]>} [findings] - Receives a [code, example] pair for each symbol
-     *   (symbols) and for each paragraph with hidden content (hiddenText)
+     *   (symbols), each equation (equations), each paragraph with hidden content (hiddenText), with
+     *   unaccepted changes (trackedChanges, see hasRevisions), with subscript text (subscript) and
+     *   with a border (paragraphBorders, see hasParagraphBorder)
      * @returns {string}
      */
     noteText(note, findings = []) {
         let text = '';
         for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
-            const style = this.paragraphStyle(childElement(para, 'pPr'));
+            const start = text.length;
+            const pPr = childElement(para, 'pPr');
+            const style = this.paragraphStyle(pPr);
             const hidden = { found: false, text: '' };
-            for (const run of para.getElementsByTagNameNS(WORD_NS, 'r')) {
+            let subscript = false;
+            // Runs, and equations in place of the runs inside them. Deleted and moved-away runs
+            // are left out, as in the body (see paragraphRuns).
+            const runs = Array.from(para.getElementsByTagName('*')).filter(element =>
+                ((element.namespaceURI === WORD_NS && element.localName === 'r') ||
+                    (element.namespaceURI === MATH_NS && element.localName === 'oMath')) && !isInEquation(element, para) &&
+                !isDeletedRun(element, para));
+            for (const run of runs) {
+                if (run.namespaceURI === MATH_NS) {
+                    // Its hidden runs add their text to hidden
+                    const math = this.equationText(run, style.run, hidden);
+                    if (math.trim() !== '') {
+                        text += math;
+                        findings.push(['equations', shortExample(math)]);
+                    }
+                    continue;
+                }
                 const formatting = this.parseRunFormatting(run, style.run);
                 if (formatting.hidden) {
                     const { shows, text: hiddenText } = hiddenRunContent(run);
@@ -1237,6 +1520,7 @@ class DocxParser {
                     }
                     continue;
                 }
+                const runStart = text.length;
                 for (const child of run.getElementsByTagNameNS(WORD_NS, '*')) {
                     if (child.localName === 't') {
                         text += child.textContent || '';
@@ -1248,8 +1532,14 @@ class DocxParser {
                         text += ' ';
                     }
                 }
+                if (formatting.vertAlign === 'subscript' && text.slice(runStart).trim() !== '') subscript = true;
             }
             if (hidden.found) findings.push(['hiddenText', shortExample(hidden.text)]);
+            if (this.hasRevisions(para)) findings.push(['trackedChanges', shortExample(text.slice(start).trim())]);
+            if (subscript) findings.push(['subscript', shortExample(text.slice(start).trim())]);
+            if (this.hasParagraphBorder(style.paragraph, this.readParagraphProperties(pPr))) {
+                findings.push(['paragraphBorders', shortExample(text.slice(start).trim())]);
+            }
             text += ' ';
         }
         return text.trim();
@@ -1275,9 +1565,10 @@ class DocxParser {
             for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
                 const style = this.paragraphStyle(childElement(para, 'pPr'));
                 const paragraphRun = 'fontSize' in this.styles.defaults.run ? style.run : { fontSize: NOTE_FONT_SIZE, ...style.run };
-                paragraphs.push(this.paragraphRuns(para)
-                    .flatMap(run => this.parseRun(run, paragraphRun))
-                    .filter(item => NOTE_RUN_TYPES.includes(item.type)));
+                const items = this.paragraphRuns(para).flatMap(run => this.parseRun(run, paragraphRun));
+                // A paragraph Word's Accept All removes (see parseParagraphBlocks) is left out
+                if (paragraphMarkDeleted(para) && nothingLeft(items)) continue;
+                paragraphs.push(items.filter(item => NOTE_RUN_TYPES.includes(item.type)));
             }
         } finally {
             this.parsingNote = parsingNote;
@@ -1509,6 +1800,36 @@ class DocxParser {
     }
 
     /**
+     * Read the theme part's (word/theme/theme1.xml) major and minor Latin typefaces
+     * (a:fontScheme a:majorFont / a:minorFont a:latin@typeface), which a w:rFonts
+     * w:asciiTheme names. Without a theme part, or with a malformed one, both stay null,
+     * and a w:asciiTheme that names them is ignored (see readRunProperties).
+     */
+    async parseThemeFonts() {
+        const themeFile = this.zip.file(this.relatedPart('theme', 'word/theme/theme1.xml'));
+        if (!themeFile) return;
+
+        try {
+            const root = parseXml(await this.readXmlPart(themeFile)).documentElement;
+            if (!root || root.namespaceURI !== DRAWING_NS || root.localName !== 'theme') {
+                throw new Error('The theme part is not a well-formed a:theme part');
+            }
+            const themeElements = childElement(root, 'themeElements', DRAWING_NS);
+            const fontScheme = themeElements && childElement(themeElements, 'fontScheme', DRAWING_NS);
+            for (const slot of ['major', 'minor']) {
+                const font = fontScheme && childElement(fontScheme, `${slot}Font`, DRAWING_NS);
+                const latin = font && childElement(font, 'latin', DRAWING_NS);
+                const typeface = latin && (latin.getAttribute('typeface') || '').trim();
+                this.themeFonts[slot] = typeface || null;
+            }
+        } catch (error) {
+            rethrowFatal(error);
+            this.themeFonts = { major: null, minor: null };
+            console.warn('Could not parse the theme:', error);
+        }
+    }
+
+    /**
      * Parse the styles part (word/styles.xml): the document defaults (w:docDefaults),
      * the paragraph and character styles, each with the properties it sets itself, and
      * the table styles' borders. w:basedOn chains are resolved on first use (see
@@ -1598,6 +1919,10 @@ class DocxParser {
             const tabs = chain.flatMap(style => style.paragraph.tabs || []);
             if (tabs.length > 0) paragraph.tabs = tabs;
             else delete paragraph.tabs;
+            // Border edges inherit one by one, not as a whole w:pBdr
+            const borderEdges = Object.assign({}, ...chain.map(style => style.paragraph.borderEdges));
+            if (Object.keys(borderEdges).length > 0) paragraph.borderEdges = borderEdges;
+            else delete paragraph.borderEdges;
 
             resolved.set(styleId, {
                 run: Object.assign({}, ...chain.map(style => style.run)),
@@ -1644,8 +1969,21 @@ class DocxParser {
         const u = childElement(rPr, 'u');
         if (u && u.hasAttribute('w:val')) props.underline = u.getAttribute('w:val') !== 'none';
 
+        // Superscript or subscript (w:vertAlign); an explicit baseline cancels an inherited one
+        const vertAlign = childElement(rPr, 'vertAlign');
+        const vertAlignVal = vertAlign && vertAlign.getAttribute('w:val');
+        if (VERTICAL_ALIGNMENTS.includes(vertAlignVal)) props.vertAlign = vertAlignVal;
+
+        // The Latin font: a theme font (w:asciiTheme) wins over w:ascii in the same w:rFonts
+        // (ECMA-376 Part 1, 17.3.2.26). One the theme doesn't give falls back to w:ascii, else
+        // leaves the font to the layer underneath.
         const rFonts = childElement(rPr, 'rFonts');
-        if (rFonts && rFonts.getAttribute('w:ascii')) props.fontFamily = rFonts.getAttribute('w:ascii');
+        if (rFonts) {
+            const slot = THEME_FONT_SLOTS[rFonts.getAttribute('w:asciiTheme')];
+            const themeFont = slot && this.themeFonts[slot];
+            if (themeFont) props.fontFamily = themeFont;
+            else if (rFonts.getAttribute('w:ascii')) props.fontFamily = rFonts.getAttribute('w:ascii');
+        }
 
         // Font size is in half-points
         const sz = childElement(rPr, 'sz');
@@ -1694,11 +2032,12 @@ class DocxParser {
         if (ind) {
             if (ind.hasAttribute('w:left')) props.leftIndent = this.twipsToPoints(ind.getAttribute('w:left'));
             if (ind.hasAttribute('w:right')) props.rightIndent = this.twipsToPoints(ind.getAttribute('w:right'));
-            if (ind.hasAttribute('w:firstLine')) {
+            // A hanging indent is a negative first-line indent (see hangingIndent). It replaces an
+            // inherited first-line indent, and wins over w:firstLine on the same w:ind (ECMA-376 17.3.1.12).
+            if (ind.hasAttribute('w:hanging')) {
+                props.firstLineIndent = -this.twipsToPoints(ind.getAttribute('w:hanging')) || 0;
+            } else if (ind.hasAttribute('w:firstLine')) {
                 props.firstLineIndent = this.twipsToPoints(ind.getAttribute('w:firstLine'));
-            } else if (ind.hasAttribute('w:hanging')) {
-                // A hanging indent can't be represented, but it still replaces a first-line indent
-                props.firstLineIndent = 0;
             }
         }
 
@@ -1727,6 +2066,22 @@ class DocxParser {
         const outlineLvl = childElement(pPr, 'outlineLvl');
         const outlineLevel = outlineLvl ? parseInt(outlineLvl.getAttribute('w:val'), 10) : NaN;
         if (Number.isInteger(outlineLevel)) props.outlineLevel = outlineLevel;
+
+        // Page break before (w:pageBreakBefore), which starts a body paragraph on a new page (see bodyPageBreakBefore)
+        const pageBreakBefore = childElement(pPr, 'pageBreakBefore');
+        if (pageBreakBefore) props.pageBreakBefore = this.isOn(pageBreakBefore);
+
+        // Paragraph borders (w:pBdr), which the UDF can't draw: whether each edge it sets draws a
+        // line. Edges inherit one by one (see resolveStyle and hasParagraphBorder).
+        const pBdr = childElement(pPr, 'pBdr');
+        if (pBdr) {
+            const edges = {};
+            for (const edge of PARAGRAPH_BORDER_EDGES) {
+                const element = childElement(pBdr, edge);
+                if (element) edges[edge] = !INVISIBLE_BORDER_STYLES.includes(element.getAttribute('w:val') || 'nil');
+            }
+            if (Object.keys(edges).length > 0) props.borderEdges = edges;
+        }
 
         return props;
     }
@@ -1874,6 +2229,10 @@ class DocxParser {
             return this.parseBodyBlocks(body);
         } finally {
             this.location = { kind: 'document' };
+            // A change to the final section's properties (margins, orientation, headers), which
+            // are converted as they now are, belongs to the whole document
+            const sectPr = childElement(body, 'sectPr');
+            if (sectPr && childElement(sectPr, 'sectPrChange')) this.addFinding('trackedChanges', '', { kind: 'document' });
         }
     }
 
@@ -1882,9 +2241,10 @@ class DocxParser {
      * so its findings say where they are. Body paragraphs and tables are numbered from 1 in
      * document order, empty paragraphs included; a cell is located by its table, its row and its
      * w:tc position in that row. Text boxes and nested tables aren't counted: their findings take
-     * the location of the paragraph that anchors the text box, or of the outer table's cell. Each
+     * the location of the paragraph that anchors the text box, or of the outermost table's cell. Each
      * location names the last heading before it with an outline level, else the last petition
-     * heading before it (see headingKind).
+     * heading before it (see headingKind). Embedded content (w:altChunk), which isn't converted,
+     * is numbered as a body paragraph, so its finding names where it starts.
      * @param {Element} body - The w:body element
      * @returns {Array<Object>} Parsed paragraphs and tables in document order (see parseBlocks)
      */
@@ -1896,24 +2256,93 @@ class DocxParser {
             return heading === null ? {} : { heading };
         };
 
-        for (const child of this.contentChildren(body)) {
+        // Each section break's w:sectPr, and the w:sectPr of the section that starts after it, whose
+        // w:type says whether that section starts on a new page
+        const children = this.contentChildren(body);
+        const finalSection = childElements(body, 'sectPr').pop() || null;
+        const breaks = children.map(child => child.localName === 'p' ? sectionBreakOf(child) : null).filter(Boolean);
+        const nextSection = new Map(breaks.map((sectPr, i) => [sectPr, i + 1 < breaks.length ? breaks[i + 1] : finalSection]));
+
+        for (const child of children) {
             if (child.localName === 'p') {
                 this.location = { kind: 'paragraph', paragraph: ++this.body.paragraphs, ...headingOf() };
-                const paragraphs = this.parseParagraphBlocks(child);
-                elements.push(...paragraphs);
-                // A heading names the places after it, not its own
-                const kind = this.headingKind(child, paragraphs[0]);
-                if (kind) this.body.headings[kind] = shortExample(paragraphText(paragraphs[0]));
+                const { paragraph, blocks } = this.parseParagraphBlocks(child);
+                // Page breaks are block-level pageBreak items between the paragraphs and tables: the
+                // generator writes one only when something follows it, and never two in a row
+                if (paragraph && this.bodyPageBreakBefore(child)) elements.push({ type: 'pageBreak' });
+                elements.push(...blocks);
+                const sectPr = sectionBreakOf(child);
+                if (paragraph && sectPr) {
+                    const start = sectionStart(nextSection.get(sectPr));
+                    if (PAGE_SECTION_STARTS.includes(start)) elements.push({ type: 'pageBreak' });
+                    if (PARITY_SECTION_STARTS.includes(start) || this.sectionLayoutDiffers(sectPr, finalSection) ||
+                        hasColumns(sectPr)) {
+                        this.addFinding('sectionLayout', shortExample(paragraphText(paragraph)));
+                    }
+                }
+                // A heading names the places after it, not its own. A paragraph left out isn't one.
+                const kind = paragraph && this.headingKind(child, paragraph);
+                if (kind) this.body.headings[kind] = shortExample(paragraphText(paragraph));
             } else if (child.localName === 'tbl') {
                 const table = ++this.body.tables;
                 const heading = headingOf();
-                elements.push(this.parseTable(child, false, (row, cell) => {
+                const parsed = this.parseTable(child, (row, cell) => {
                     this.location = { kind: 'cell', table, row, cell, ...heading };
-                }));
+                });
+                if (parsed) elements.push(parsed);
+            } else if (child.localName === 'altChunk') {
+                // Embedded content takes a body paragraph's place: Word shows it where its first paragraph would be
+                this.location = { kind: 'paragraph', paragraph: ++this.body.paragraphs, ...headingOf() };
+                this.reportEmbeddedChunk(child);
             }
         }
 
+        // The final section's columns: the <pageFormat> is written from its page setup, but not its columns
+        if (finalSection && hasColumns(finalSection)) this.addFinding('sectionLayout', '', { kind: 'document' });
+
         return elements;
+    }
+
+    /**
+     * Whether a body paragraph starts on a new page (w:pageBreakBefore): its own w:pPr, else its
+     * paragraph style chain, else the document defaults. An explicit off turns an inherited one off.
+     * @param {Element} para - The w:p element
+     * @returns {boolean}
+     */
+    bodyPageBreakBefore(para) {
+        const pPr = childElement(para, 'pPr');
+        const layers = [this.readParagraphProperties(pPr), this.paragraphStyle(pPr).paragraph, this.styles.defaults.paragraph];
+        const layer = layers.find(props => props.pageBreakBefore !== undefined);
+        return layer ? layer.pageBreakBefore : false;
+    }
+
+    /**
+     * Whether a section's page setup differs from the final section's, which the <pageFormat> is
+     * written from: its orientation, its page width or height (w:pgSz), or its top, right, bottom
+     * or left margin (w:pgMar). Values are compared as parsed, in twips, so one written in other
+     * units isn't a difference. Only values both sections set are compared: one either leaves out, or that can't
+     * be read, isn't a known difference. The orientation is compared when both have a w:pgSz.
+     * @param {Element} sectPr - The section's w:sectPr
+     * @param {Element|null} finalSection - The body's final w:sectPr
+     * @returns {boolean}
+     */
+    sectionLayoutDiffers(sectPr, finalSection) {
+        const setup = section => {
+            const pgSz = section && childElement(section, 'pgSz');
+            const pgMar = section && childElement(section, 'pgMar');
+            // To the twip, so the same length written in other units compares equal
+            const read = (el, attribute) => {
+                const points = el ? this.measureToPoints(el.getAttribute(attribute)) : null;
+                return points === null ? null : Math.round(points * 20);
+            };
+            const [width, height] = PAGE_SIZE_ATTRIBUTES.map(attribute => read(pgSz, attribute));
+            const landscape = pgSz ? pgSz.getAttribute('w:orient') === 'landscape' ||
+                (width !== null && height !== null && width > height) : null;
+            return [landscape, width, height, ...PAGE_MARGIN_ATTRIBUTES.map(attribute => read(pgMar, attribute))];
+        };
+        const own = setup(sectPr);
+        const final = setup(finalSection);
+        return own.some((value, i) => value !== null && final[i] !== null && value !== final[i]);
     }
 
     /**
@@ -1963,9 +2392,10 @@ class DocxParser {
     }
 
     /**
-     * Parse the block-level content (paragraphs and tables) of a body, cell or text box
+     * Parse the block-level content (paragraphs and tables) of a body, cell or text box. Embedded
+     * content (w:altChunk) is reported (see reportEmbeddedChunk), not converted.
      * @param {Element} container - The containing element
-     * @param {boolean} [inCell] - Whether the content ends up in a table cell, where a table is nested
+     * @param {boolean} [inCell] - Whether the content ends up in a table cell
      * @returns {Array<Object>} Parsed paragraphs and tables in document order
      */
     parseBlocks(container, inCell = false) {
@@ -1975,9 +2405,12 @@ class DocxParser {
             const localName = child.localName;
 
             if (localName === 'p') {
-                elements.push(...this.parseParagraphBlocks(child, inCell));
+                elements.push(...this.parseParagraphBlocks(child, inCell).blocks);
             } else if (localName === 'tbl') {
-                elements.push(this.parseTable(child, inCell));
+                const table = this.parseTable(child);
+                if (table) elements.push(table);
+            } else if (localName === 'altChunk') {
+                this.reportEmbeddedChunk(child);
             }
         }
 
@@ -1985,29 +2418,58 @@ class DocxParser {
     }
 
     /**
-     * Parse a paragraph, then the blocks of the text boxes anchored in it, which follow it
+     * Parse a paragraph, then the blocks of the text boxes anchored in it, which follow it. A
+     * paragraph whose mark is deleted and which has nothing left once its deleted runs are dropped
+     * is left out, as Word's Accept All removes it; its text boxes are still parsed.
      * @param {Element} para - The w:p element
      * @param {boolean} [inCell] - Whether the content ends up in a table cell
-     * @returns {Array<Object>} The parsed paragraph first, then the text boxes' paragraphs and tables
+     * @returns {{paragraph: Object|null, blocks: Array<Object>}} The parsed paragraph, null when it
+     *   is left out, and the blocks: the paragraph first, then the text boxes' paragraphs and tables
      */
     parseParagraphBlocks(para, inCell = false) {
         const runs = this.paragraphRuns(para);
-        const elements = [this.parseParagraph(para, runs, inCell)];
+        let paragraph = this.parseParagraph(para, runs, inCell);
+        if (paragraphMarkDeleted(para) && nothingLeft(paragraph.runs)) paragraph = null;
+        const blocks = paragraph ? [paragraph] : [];
         for (const run of runs) {
             for (const textBox of this.findTextBoxes(run)) {
-                elements.push(...this.parseBlocks(textBox, inCell));
+                blocks.push(...this.parseBlocks(textBox, inCell));
             }
         }
-        return elements;
+        return { paragraph, blocks };
+    }
+
+    /**
+     * Whether a paragraph holds Track Changes revision marks (see PARAGRAPH_REVISION_ELEMENTS):
+     * in its runs, its inline wrappers or its properties. The paragraphs of a text box anchored
+     * in it are left to their own parse, and only the read branch of mc:AlternateContent counts.
+     * @param {Element} element - The w:p element, or an element inside it
+     * @returns {boolean}
+     */
+    hasRevisions(element) {
+        for (const child of element.children) {
+            if (child.namespaceURI === MARKUP_COMPATIBILITY_NS && child.localName === 'AlternateContent') {
+                const branch = this.alternateContentBranch(child);
+                if (branch && this.hasRevisions(branch)) return true;
+            } else if (child.namespaceURI === WORD_NS && child.localName === 'txbxContent') {
+                continue;
+            } else if (child.namespaceURI === WORD_NS && PARAGRAPH_REVISION_ELEMENTS.includes(child.localName)) {
+                return true;
+            } else if (this.hasRevisions(child)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
      * Collect the runs of a paragraph, including runs inside inline wrappers
      * (hyperlinks, insertions, content controls, smart tags, fields, ...).
-     * Deleted and moved-away text is skipped.
+     * Deleted and moved-away text is skipped. An equation (m:oMath, also each one in an
+     * m:oMathPara) is collected whole in place of its runs: parseRun writes it as linear text.
      * @param {Element} container - The paragraph or an inline wrapper
      * @param {Array<Element>} [runs] - Accumulator
-     * @returns {Array<Element>} w:r elements in document order
+     * @returns {Array<Element>} w:r and m:oMath elements in document order
      */
     paragraphRuns(container, runs = []) {
         const skipped = ['pPr', 'rPr', 'sdtPr', 'sdtEndPr', 'customXmlPr', 'smartTagPr', 'del', 'moveFrom'];
@@ -2018,8 +2480,10 @@ class DocxParser {
                     const branch = this.alternateContentBranch(child);
                     if (branch) this.paragraphRuns(branch, runs);
                 }
+            } else if (child.namespaceURI === MATH_NS && child.localName === 'oMath') {
+                runs.push(child);
             } else if (child.namespaceURI !== WORD_NS) {
-                // e.g. Office Math (m:oMath), which can hold w:r
+                // e.g. an m:oMathPara, which holds equations
                 this.paragraphRuns(child, runs);
             } else if (child.localName === 'r') {
                 runs.push(child);
@@ -2109,8 +2573,12 @@ class DocxParser {
         Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, own);
         paragraph.lineSpacing = this.lineSpacing(paragraph);
 
-        // The outline level only locates findings (see headingKind); it isn’t written
+        // The outline level only locates findings (see headingKind); it isn’t written. Page break
+        // before is written as a page break ahead of a body paragraph (see bodyPageBreakBefore).
+        // Borders can't be written; they are reported below.
         delete paragraph.outlineLevel;
+        delete paragraph.pageBreakBefore;
+        delete paragraph.borderEdges;
 
         // Tab stops: each layer adds to or clears the stops of the layers under it
         delete paragraph.tabs;
@@ -2132,6 +2600,8 @@ class DocxParser {
             }
         }
 
+        this.hangingIndent(paragraph);
+
         // Get runs (text with formatting). Hidden runs add nothing; their text is collected for the finding.
         const hidden = { found: false, text: '' };
         for (const run of runs) {
@@ -2139,9 +2609,18 @@ class DocxParser {
         }
         if (hidden.found) this.addFinding('hiddenText', shortExample(hidden.text));
 
-        // Line heights and tab stops the conversion loses, with the paragraph's text as the hint.
-        // A paragraph the generator doesn't write as one has no line height or stops to lose.
+        // Unaccepted changes: the paragraph is converted as if they were accepted
+        if (this.hasRevisions(para)) this.addFinding('trackedChanges', shortExample(paragraphText(paragraph)));
+
+        // Subscript text, written on the baseline (see parseRun)
+        if (paragraph.runs.some(run => run.subscript && run.text.trim() !== '')) this.addFinding('subscript', shortExample(paragraphText(paragraph)));
+
+        // Line heights, tab stops and borders the conversion loses, with the paragraph's text as the hint.
+        // A paragraph the generator doesn't write as one has no line height, stops or borders to lose.
         if (paragraphIsWritten(paragraph, inCell)) {
+            if (this.hasParagraphBorder(style.paragraph, own)) {
+                this.addFinding('paragraphBorders', shortExample(paragraphText(paragraph)));
+            }
             if (LOST_LINE_RULES.includes(paragraph.lineRule)) {
                 this.addFinding('lineSpacing', shortExample(paragraphText(paragraph)));
             }
@@ -2154,18 +2633,69 @@ class DocxParser {
     }
 
     /**
+     * Settle a paragraph's hanging indent (a negative firstLineIndent, see readParagraphProperties).
+     * A list paragraph keeps no first-line indent, as before: its ListLevel drives the editor's
+     * list indentation, and how that combines with a negative FirstLineIndent is unverified.
+     * Any other paragraph keeps it, clamped so that the first line starts no further left than
+     * the margin, and gets the tab stop Word implies at the left indent: a left stop without a
+     * leader, unless one of its own stops lies past the first line's start and up to the left indent.
+     * List paragraphs are those with numbering whose level is a list (format other than none).
+     * @param {Object} paragraph - The parsed paragraph, with its numbering and tabStops resolved
+     */
+    hangingIndent(paragraph) {
+        if (!(paragraph.firstLineIndent < 0)) return;
+        const numbering = paragraph.numbering;
+        if (numbering && numbering.format !== 'none') {
+            paragraph.firstLineIndent = 0;
+            return;
+        }
+
+        const leftIndent = Math.max(paragraph.leftIndent || 0, 0);
+        paragraph.firstLineIndent = Math.max(paragraph.firstLineIndent, -leftIndent) || 0;
+        if (paragraph.firstLineIndent === 0) return;
+
+        // Indents are whole points (see twipsToPoints), so a stop is compared at the point it rounds to:
+        // the w:pos="2268" stop of a w:left="2268" paragraph (113.4 against 113) is at the left indent
+        const firstLineStart = leftIndent + paragraph.firstLineIndent;
+        const stops = paragraph.tabStops || [];
+        const between = stop => Math.round(stop.position) > firstLineStart && Math.round(stop.position) <= leftIndent;
+        if (stops.some(between)) return;
+        paragraph.tabStops = [...stops, { position: leftIndent, alignment: 0, leader: 0 }]
+            .sort((a, b) => a.position - b.position);
+    }
+
+    /**
+     * Whether a paragraph draws a border line (w:pBdr), which the UDF can't write: an edge whose
+     * line style isn't nil or none, from the document defaults, the paragraph style chain or the
+     * paragraph's own w:pPr. Each edge inherits on its own, so an edge set to none hides only that edge.
+     * @param {Object} styleParagraph - The paragraph style's paragraph properties (see resolveStyle)
+     * @param {Object} own - The paragraph's own properties (see readParagraphProperties)
+     * @returns {boolean}
+     */
+    hasParagraphBorder(styleParagraph, own) {
+        const edges = { ...this.styles.defaults.paragraph.borderEdges, ...styleParagraph.borderEdges, ...own.borderEdges };
+        return Object.values(edges).some(Boolean);
+    }
+
+    /**
      * Parse a run element (text with formatting)
      * @param {Element} run - The run element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @param {{found: boolean, text: string}} [hidden] - Set when the run is hidden (w:vanish) and
      *   holds content: found becomes true and the run's text is appended to text
      * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image,
-     *   footnoteRef, endnoteRef). Empty for a hidden run: Word neither shows nor prints it.
+     *   footnoteRef, endnoteRef). Empty for a hidden run: Word neither shows nor prints it. Text of
+     *   a superscript run has superscript: true; text of a subscript run has subscript: true and is
+     *   written on the baseline, as the UDF has no subscript.
      */
     parseRun(run, paragraphRun = {}, hidden = null) {
+        if (run.namespaceURI === MATH_NS) return this.parseEquation(run, paragraphRun, hidden);
         const items = [];
-        // hidden, caps, smallCaps and lang decide how the run's text is written; they aren't text attributes
-        const { hidden: isHidden, caps, smallCaps, lang, ...formatting } = this.parseRunFormatting(run, paragraphRun);
+        // hidden, caps, smallCaps and lang decide how the run's text is written, and vertAlign whether
+        // it is superscript or subscript; they aren't text attributes
+        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, ...formatting } = this.parseRunFormatting(run, paragraphRun);
+        if (vertAlign === 'superscript') formatting.superscript = true;
+        else if (vertAlign === 'subscript') formatting.subscript = true;
 
         if (isHidden) {
             const { shows, text } = hiddenRunContent(run);
@@ -2247,6 +2777,211 @@ class DocxParser {
         }
 
         return items;
+    }
+
+    /**
+     * Parse an equation (m:oMath) into a text item of its linear text (see mathText), reported as
+     * an equations finding. The text takes the paragraph's run formatting, as a run without its
+     * own w:rPr would; All Caps doesn't change it, as x and X are different variables. Its hidden
+     * runs are left out (see mathText). Each equation after the first in an m:oMathPara starts a
+     * new line, as Word shows it.
+     * @param {Element} oMath - The m:oMath element
+     * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
+     * @param {{found: boolean, text: string}} [hidden] - See parseRun; set by the equation's hidden runs
+     * @returns {Array<Object>} Empty for an equation with no text, or one all hidden
+     */
+    parseEquation(oMath, paragraphRun = {}, hidden = null) {
+        const text = this.equationText(oMath, paragraphRun, hidden);
+        if (text.trim() === '') return [];
+        // hidden, caps, smallCaps, lang and vertAlign don't apply to the equation's text as a whole
+        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, ...formatting } = this.parseRunFormatting(oMath, paragraphRun);
+
+        this.addFinding('equations', shortExample(text));
+        const items = [];
+        const parent = oMath.parentElement;
+        if (parent && parent.namespaceURI === MATH_NS && parent.localName === 'oMathPara' &&
+            childElements(parent, 'oMath', MATH_NS)[0] !== oMath) {
+            items.push({ type: 'break' });
+        }
+        items.push({ ...formatting, text });
+        return items;
+    }
+
+    /**
+     * Linear text of an equation (see mathText). An equation whose runs with text are all hidden
+     * has none: the operators and brackets of its structures (a fraction's /, a script's ^) would
+     * be all that is left.
+     * @param {Element} oMath - The m:oMath element
+     * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
+     * @param {{found: boolean, text: string}} [hidden] - Set when a hidden run has text, which is appended
+     * @returns {string}
+     */
+    equationText(oMath, paragraphRun = {}, hidden = null) {
+        const hiddenRuns = { found: false, text: '' };
+        const visible = { found: false };
+        const text = this.mathText(oMath, { paragraphRun, hidden: hiddenRuns, visible });
+        if (hiddenRuns.found && hidden) {
+            hidden.found = true;
+            hidden.text += hiddenRuns.text;
+        }
+        return hiddenRuns.found && !visible.found ? '' : text;
+    }
+
+    /**
+     * Linear text of an Office Math element, close to Word's own linear format: a fraction
+     * (m:f) is num/den, scripts are base^sup, base_sub and base_sub^sup, a radical (m:rad)
+     * √(x) or d√(x) with a degree that isn't hidden, a delimiter (m:d) its parts between its
+     * begin and end characters, joined by its separator, an n-ary operator (m:nary) the
+     * operator, its limits as _sub and ^sup, a space and its body, and a function (m:func) its
+     * name, a space and its argument. A fraction without a bar is binom(n, k), and a matrix
+     * (m:m) keeps its rows and cells as matrix([a, b], [c, d]). A fraction part, base, script,
+     * degree or limit is wrapped in parentheses unless it is simple (see mathOperand).
+     * Other structures (accents, bars, boxes, equation arrays, limits, ...) are read in document order.
+     * A hidden run (m:r or w:r whose w:rPr, character style or paragraph style resolves w:vanish
+     * on, see parseRunFormatting) adds nothing.
+     * @param {Element} element - An m:oMath, or an element inside one
+     * @param {{paragraphRun?: Object, hidden?: {found: boolean, text: string}|null,
+     *   visible?: {found: boolean}|null}} [context] - paragraphRun: run properties from the paragraph's
+     *   style; hidden: set when a hidden run has text, which is appended to hidden.text; visible:
+     *   set when a run that isn't hidden has text other than whitespace
+     * @returns {string}
+     */
+    mathText(element, context = {}) {
+        const ns = element.namespaceURI;
+        const name = element.localName;
+        const children = el => this.mathChildrenText(el, context);
+        if (ns === MARKUP_COMPATIBILITY_NS) {
+            const branch = name === 'AlternateContent' ? this.alternateContentBranch(element) : null;
+            return branch ? children(branch) : '';
+        }
+        if ((ns === MATH_NS || ns === WORD_NS) && name === 'r') {
+            const isHidden = this.parseRunFormatting(element, context.paragraphRun || {}).hidden;
+            const text = this.mathChildrenText(element, { ...context, hidden: null, visible: null });
+            if (isHidden) {
+                if (context.hidden && text !== '') {
+                    context.hidden.found = true;
+                    context.hidden.text += text;
+                }
+                return '';
+            }
+            if (context.visible && text.trim() !== '') context.visible.found = true;
+            return text;
+        }
+        if (ns === WORD_NS) {
+            if (name === 't') return element.textContent || '';
+            if (name === 'sym') return symbolText(element).text;
+            if (MATH_SKIPPED_WORD_ELEMENTS.includes(name)) return '';
+            return children(element);
+        }
+        if (ns !== MATH_NS) return children(element);
+        // Properties (m:rPr, m:fPr, m:ctrlPr, ...) show no text
+        if (name.endsWith('Pr')) return '';
+
+        const part = partName => {
+            const el = childElement(element, partName, MATH_NS);
+            return el ? children(el) : '';
+        };
+        const operand = partName => this.mathOperand(childElement(element, partName, MATH_NS), context);
+        const hidden = (properties, flag) => {
+            const pr = childElement(element, properties, MATH_NS);
+            return mathIsOn(pr && childElement(pr, flag, MATH_NS));
+        };
+
+        switch (name) {
+            case 't':
+                return element.textContent || '';
+            case 'f': {
+                const properties = childElement(element, 'fPr', MATH_NS);
+                const type = properties && childElement(properties, 'type', MATH_NS);
+                if (type && type.getAttributeNS(MATH_NS, 'val') === 'noBar') {
+                    return `binom(${part('num')}, ${part('den')})`;
+                }
+                return `${operand('num')}/${operand('den')}`;
+            }
+            case 'sSup':
+                return `${operand('e')}^${operand('sup')}`;
+            case 'sSub':
+                return `${operand('e')}_${operand('sub')}`;
+            case 'sSubSup':
+                return `${operand('e')}_${operand('sub')}^${operand('sup')}`;
+            case 'rad': {
+                const degree = hidden('radPr', 'degHide') ? '' : operand('deg');
+                return `${degree}√(${part('e')})`;
+            }
+            case 'd': {
+                const begin = mathCharacter(element, 'dPr', 'begChr', '(');
+                const end = mathCharacter(element, 'dPr', 'endChr', ')');
+                const separator = mathCharacter(element, 'dPr', 'sepChr', '|');
+                const parts = childElements(element, 'e', MATH_NS).map(children);
+                return `${begin}${parts.join(separator)}${end}`;
+            }
+            case 'nary': {
+                const sub = hidden('naryPr', 'subHide') ? '' : operand('sub');
+                const sup = hidden('naryPr', 'supHide') ? '' : operand('sup');
+                const body = part('e');
+                return `${mathCharacter(element, 'naryPr', 'chr', '∫')}${sub ? `_${sub}` : ''}${sup ? `^${sup}` : ''}` +
+                    (body ? ` ${body}` : '');
+            }
+            case 'func':
+                return `${part('fName')} ${part('e')}`;
+            case 'm': {
+                // Rows and cells can sit in the selected branch of mc:AlternateContent.
+                const matrixParts = (parent, name) => Array.from(parent.children).flatMap(child => {
+                    if (child.namespaceURI === MATH_NS && child.localName === name) return [child];
+                    if (child.namespaceURI !== MARKUP_COMPATIBILITY_NS || child.localName !== 'AlternateContent') return [];
+                    const branch = this.alternateContentBranch(child);
+                    return branch ? matrixParts(branch, name) : [];
+                });
+                const rows = matrixParts(element, 'mr').map(row =>
+                    `[${matrixParts(row, 'e').map(children).join(', ')}]`);
+                return `matrix(${rows.join(', ')})`;
+            }
+            default:
+                return children(element);
+        }
+    }
+
+    /**
+     * Linear text of an element's children, in document order (see mathText)
+     * @param {Element} element
+     * @param {Object} [context] - See mathText
+     * @returns {string}
+     */
+    mathChildrenText(element, context = {}) {
+        return Array.from(element.children).map(child => this.mathText(child, context)).join('');
+    }
+
+    /**
+     * Linear text of a fraction part, base, script, degree or limit, wrapped in parentheses
+     * unless it is empty, a single run of letters or digits or a decimal number (A/365, but
+     * (a+b)/2 and x^(n+1)), or already one delimiter (m:d) with both a begin and an end character
+     * @param {Element|null} part - e.g. m:num, m:sup
+     * @param {Object} [context] - See mathText
+     * @returns {string} '' for a missing part
+     */
+    mathOperand(part, context = {}) {
+        if (!part) return '';
+        const text = this.mathChildrenText(part, context);
+        if (text === '' || SIMPLE_MATH_OPERAND.test(text)) return text;
+        const shown = Array.from(part.children).filter(child => !(child.namespaceURI === MATH_NS && child.localName.endsWith('Pr')));
+        const bracketed = d => d.namespaceURI === MATH_NS && d.localName === 'd' &&
+            mathCharacter(d, 'dPr', 'begChr', '(') !== '' && mathCharacter(d, 'dPr', 'endChr', ')') !== '';
+        if (shown.length === 1 && bracketed(shown[0])) return text;
+        return `(${text})`;
+    }
+
+    /**
+     * Report embedded content from another program (w:altChunk: HTML, RTF, MHT or another
+     * .docx), which isn't converted, as an embeddedContent finding at this.location. The example
+     * is the file name of the part it embeds.
+     * @param {Element} altChunk - The w:altChunk element
+     */
+    reportEmbeddedChunk(altChunk) {
+        this.embeddedChunks++;
+        const id = altChunk.getAttributeNS(RELATIONSHIPS_NS, 'id');
+        const relationship = id && Object.prototype.hasOwnProperty.call(this.relationships, id) ? this.relationships[id] : null;
+        const target = relationship ? (relationship.path || relationship.target || '') : '';
+        this.addFinding('embeddedContent', shortExample(target.split('/').pop()));
     }
 
     /**
@@ -2351,6 +3086,7 @@ class DocxParser {
             .filter(blip => !this.isInTextBox(blip, drawing) && this.isInReadBranch(blip));
         if (blips.length > 0) {
             this.embedPicture(image, blips[0].getAttributeNS(RELATIONSHIPS_NS, 'embed'), drawing);
+            if (blips.length > 1) image.omittedPictures = true;
         } else if (drawing.getElementsByTagNameNS(WORD_NS, 'txbxContent').length === 0) {
             // A chart, SmartArt diagram or shape with no picture and no text box to keep
             this.addFinding('unconvertedDrawing', this.nearestParagraphText(drawing));
@@ -2393,11 +3129,13 @@ class DocxParser {
      * and keeps no data, so the generator skips it.
      * @param {Object} image - The parsed image
      * @param {string} relationshipId - r:embed of an a:blip, or r:id of a v:imagedata
-     * @param {Element} element - The picture's element in the main document part, for the location hint
+     * @param {Element} element - The picture's element, for the location hint
      */
     embedPicture(image, relationshipId, element) {
-        const relationship = relationshipId && Object.prototype.hasOwnProperty.call(this.relationships, relationshipId)
-            ? this.relationships[relationshipId] : null;
+        // A header's or footer's pictures resolve through that part's relationships
+        const relationships = this.partRelationships || this.relationships;
+        const relationship = relationshipId && Object.prototype.hasOwnProperty.call(relationships, relationshipId)
+            ? relationships[relationshipId] : null;
         const path = relationship && relationship.path;
         if (path && this.images[path]) {
             image.data = this.images[path];
@@ -2422,16 +3160,20 @@ class DocxParser {
     }
 
     /**
-     * Parse a table element. In a table of the document itself, the generator writes a cell
-     * that continues the vertical merge above it empty, so nothing in such a cell is recorded
-     * as a finding. A nested table is flattened to paragraphs instead, those cells included.
+     * Parse a table element, at this.tableDepth + 1 levels of tables deep. A table within
+     * MAX_TABLE_DEPTH levels, nested in a cell or not, is written as a table: the generator
+     * writes a cell that continues the vertical merge above it empty, so nothing in such a cell
+     * is recorded as a finding. A table nested deeper is flattened into its cell's paragraphs
+     * instead (see parseCellBlocks), those cells included, and its borders aren't written.
      * @param {Element} tbl - The table element
-     * @param {boolean} [nested] - Whether the table is in a cell of another table
      * @param {function(number, number): void} [enterCell] - Called with a cell's 1-based row and
      *   w:tc position in that row before its content is parsed (see parseBodyBlocks)
-     * @returns {Object} Parsed table
+     * @returns {Object} Parsed table; each cell has its content as blocks (paragraphs and
+     *   written nested tables, in document order) and as paragraphs (see flattenToParagraphs)
      */
-    parseTable(tbl, nested = false, enterCell = null) {
+    parseTable(tbl, enterCell = null) {
+        const depth = this.tableDepth + 1;
+        const flattened = depth > MAX_TABLE_DEPTH;
         const table = {
             type: 'table',
             rows: [],
@@ -2452,13 +3194,39 @@ class DocxParser {
         const edges = this.tableBorders(childElement(tbl, 'tblPr'));
 
         // Get rows and cells (only this table's own, not those of nested tables). The cells'
-        // properties come first: they decide which cells continue a vertical merge.
+        // properties come first: they decide which cells continue a vertical merge. A row marked
+        // deleted is left out, as Word's Accept All removes it, before borders and merges are
+        // resolved; rows keep Word's numbers (deleted rows counted) for locating findings.
         const cellElements = [];
+        const rowNumbers = [];
+        const changedRows = [];
+        // The numbers of the deleted rows before each kept row, and after the last one
+        const deletedRows = [[]];
+        let rowNumber = 0;
         for (const tr of this.contentChildren(tbl)) {
             if (tr.localName !== 'tr') continue;
+            rowNumber++;
+            const trPr = childElement(tr, 'trPr');
+            if (tableRowDeleted(trPr)) {
+                deletedRows[deletedRows.length - 1].push(rowNumber);
+                continue;
+            }
             const tcs = this.contentChildren(tr).filter(tc => tc.localName === 'tc');
             cellElements.push(tcs);
+            rowNumbers.push(rowNumber);
+            changedRows.push(Boolean(trPr) && ROW_REVISION_ELEMENTS.some(name => childElement(trPr, name)));
+            deletedRows.push([]);
             table.rows.push({ type: 'row', cells: tcs.map(tc => this.parseTableCell(tc)) });
+        }
+        // A deleted row is reported at its first cell, in document order with the kept rows' findings
+        const reportDeleted = rows => rows.forEach(number => {
+            if (enterCell) enterCell(number, 1);
+            this.addFinding('trackedChanges');
+        });
+        // Every row deleted: Word's Accept All removes the table
+        if (rowNumber > 0 && table.rows.length === 0) {
+            reportDeleted(deletedRows[0]);
+            return null;
         }
 
         this.resolveCellBorders(table, edges, cellElements);
@@ -2467,18 +3235,41 @@ class DocxParser {
         }
 
         const merges = verticalMerges(table);
-        table.rows.forEach((row, i) => row.cells.forEach((cell, j) => {
-            const discarded = !nested && merges[i][j].joinsAbove;
-            if (enterCell) enterCell(i + 1, j + 1);
-            if (discarded) this.inDiscardedCell = true;
-            try {
-                cell.paragraphs = this.parseCellParagraphs(cellElements[i][j]);
-            } finally {
-                if (discarded) this.inDiscardedCell = false;
-            }
-            // A nested table is flattened to paragraphs, so its borders aren't written
-            if (!nested && table.border !== 'borderNone') this.checkCellBorders(cell, merges[i][j], discarded);
-        }));
+        this.tableDepth = depth;
+        const firstText = paragraphs => paragraphs.map(paragraphText).find(text => text.trim() !== '') || '';
+        try {
+            table.rows.forEach((row, i) => {
+                reportDeleted(deletedRows[i]);
+                row.cells.forEach((cell, j) => {
+                    const discarded = !flattened && merges[i][j].joinsAbove;
+                    if (enterCell) enterCell(rowNumbers[i], j + 1);
+                    // A cell of a nested table may be in a cell written empty: that stays so
+                    const wasDiscarded = this.inDiscardedCell;
+                    if (discarded) this.inDiscardedCell = true;
+                    try {
+                        cell.blocks = this.parseCellBlocks(cellElements[i][j]);
+                        cell.paragraphs = this.flattenToParagraphs(cell.blocks);
+                        // An inserted, deleted or merged cell, or a cell formatting change
+                        const tcPr = childElement(cellElements[i][j], 'tcPr');
+                        if (tcPr && CELL_REVISION_ELEMENTS.some(name => childElement(tcPr, name))) {
+                            this.addFinding('trackedChanges', shortExample(firstText(cell.paragraphs)));
+                        }
+                    } finally {
+                        this.inDiscardedCell = wasDiscarded;
+                    }
+                    // A flattened table's borders aren't written
+                    if (!flattened && table.border !== 'borderNone') this.checkCellBorders(cell, merges[i][j], discarded);
+                });
+                // An inserted row, or a row formatting change, located at its first cell
+                if (changedRows[i]) {
+                    if (enterCell) enterCell(rowNumbers[i], 1);
+                    this.addFinding('trackedChanges', shortExample(firstText(row.cells.flatMap(cell => cell.paragraphs))));
+                }
+            });
+            reportDeleted(deletedRows[table.rows.length]);
+        } finally {
+            this.tableDepth = depth - 1;
+        }
 
         return table;
     }
@@ -2641,13 +3432,14 @@ class DocxParser {
     }
 
     /**
-     * Parse a table cell's properties. Its paragraphs are added by parseTable.
+     * Parse a table cell's properties. Its content is added by parseTable.
      * @param {Element} tc - The table cell element
      * @returns {Object} Parsed cell, without content
      */
     parseTableCell(tc) {
         const cell = {
             type: 'cell',
+            blocks: [],
             paragraphs: [],
             colspan: 1,
             rowspan: 1,
@@ -2695,19 +3487,25 @@ class DocxParser {
     }
 
     /**
-     * Parse the paragraphs of a table cell. Nested tables can't be represented yet, so
-     * their paragraphs are flattened into the cell in reading order.
+     * Parse the content of a cell of the table being parsed (at this.tableDepth): its paragraphs
+     * and the tables nested in it, in document order. A nested table past MAX_TABLE_DEPTH is
+     * flattened into the cell's paragraphs in reading order, and reported.
      * @param {Element} tc - The table cell element
-     * @returns {Array<Object>} Parsed paragraphs
+     * @returns {Array<Object>} Parsed paragraphs and tables
      */
-    parseCellParagraphs(tc) {
-        const blocks = this.parseBlocks(tc, true);
-        for (const block of blocks) {
-            if (block.type !== 'table') continue;
-            const firstText = this.flattenToParagraphs([block]).map(paragraphText).find(text => text.trim() !== '');
+    parseCellBlocks(tc) {
+        const blocks = [];
+        for (const block of this.parseBlocks(tc, true)) {
+            if (block.type !== 'table' || this.tableDepth < MAX_TABLE_DEPTH) {
+                blocks.push(block);
+                continue;
+            }
+            const paragraphs = this.flattenToParagraphs([block]);
+            const firstText = paragraphs.map(paragraphText).find(text => text.trim() !== '');
             this.addFinding('nestedTables', shortExample(firstText || ''));
+            blocks.push(...paragraphs);
         }
-        return this.flattenToParagraphs(blocks);
+        return blocks;
     }
 
     /**
@@ -2724,7 +3522,7 @@ class DocxParser {
             } else if (block.type === 'table') {
                 for (const row of block.rows) {
                     for (const cell of row.cells) {
-                        // Cell paragraphs are already flattened
+                        // Cell paragraphs are already flattened, nested tables included
                         paragraphs.push(...cell.paragraphs);
                     }
                 }

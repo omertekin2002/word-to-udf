@@ -370,3 +370,4 @@ const PICTURE_NS = 'http://schemas.openxmlformats.org/drawingml/2006/picture';
 const WORDML_DRAWING_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing';
 const MARKUP_COMPATIBILITY_NS = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
 const VML_NS = 'urn:schemas-microsoft-com:vml';
+const MATH_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math';

@@ -51,6 +51,8 @@ class UdfGenerator {
         this.collectedEndnotes = []; // Endnotes, appended after everything else
         this.endnoteCounter = 0; // Endnotes are numbered on their own
         this.endnoteFormat = 'lowerRoman';
+        this.pendingPageBreak = false; // A section break or page break before waiting for what follows it
+        this.bodyStart = 0; // How many elements come before the body's (the header)
     }
 
     /**
@@ -70,20 +72,30 @@ class UdfGenerator {
         this.endnoteFormat = document.endnoteFormat || 'lowerRoman';
         this.pageSetup = document.pageSetup || {};
 
-        // Header text comes first in the content, before the body (UDF: <header> is the first element)
+        // Header text and pictures come first in the content, before the body (UDF: <header> is the first element)
         if (document.header) {
             this.elements.push(this.headerFooterElement('header', document.header));
         }
         const headerLength = this.content.length;
 
-        // Process all document elements
+        // Process all document elements. A block-level page break (a section break, or a paragraph's
+        // page break before) is written when the next paragraph or table is: one that ends the
+        // document writes none.
+        this.pendingPageBreak = false;
+        this.bodyStart = this.elements.length;
         for (const element of document.elements) {
+            if (element.type === 'pageBreak') {
+                this.pendingPageBreak = true;
+                continue;
+            }
+            if (element.type === 'paragraph' || element.type === 'table') this.writePendingPageBreak();
             if (element.type === 'paragraph') {
                 this.processParagraph(element);
             } else if (element.type === 'table') {
                 this.processTable(element);
             }
         }
+        this.pendingPageBreak = false;
 
         // Append footnotes section at the end if there are any
         if (this.collectedFootnotes.length > 0) {
@@ -102,7 +114,7 @@ class UdfGenerator {
             this.currentOffset += 1;
         }
 
-        // Footer text comes last, after the body and the notes (UDF: <footer> is the last element)
+        // Footer text and pictures come last, after the body and the notes (UDF: <footer> is the last element)
         if (document.footer) {
             this.elements.push(this.headerFooterElement('footer', document.footer));
         }
@@ -200,10 +212,10 @@ class UdfGenerator {
     }
 
     /**
-     * Write header or footer paragraphs, with their text added to the content at the current
-     * offset, as body paragraphs are
+     * Write header or footer paragraphs, with their text and pictures added to the content at
+     * the current offset, as body paragraphs are: a picture is an <image> covering one U+FFFC
      * @param {'header'|'footer'} tag - The element to write
-     * @param {Array<Object>} paragraphs - Parsed paragraphs, holding only text, tabs and line breaks
+     * @param {Array<Object>} paragraphs - Parsed paragraphs, holding only text, tabs, line breaks and pictures
      * @returns {string} The <header> or <footer> element
      */
     headerFooterElement(tag, paragraphs) {
@@ -215,6 +227,18 @@ class UdfGenerator {
         } finally {
             this.elements = bodyElements;
         }
+    }
+
+    /**
+     * Write the block-level page break waiting for the paragraph or table about to be written (see
+     * generate), as a manual page break is. None before the body's first element, which already
+     * starts the first page, nor right after a page break, which would add a blank page.
+     */
+    writePendingPageBreak() {
+        if (!this.pendingPageBreak) return;
+        this.pendingPageBreak = false;
+        if (this.elements.length === this.bodyStart || this.elements[this.elements.length - 1] === '<page-break />') return;
+        this.writePageBreak();
     }
 
     /**
@@ -456,6 +480,8 @@ class UdfGenerator {
         if (run.italic) attrs.push('italic="true"');
         if (run.underline) attrs.push('underline="true"');
         if (run.strike) attrs.push('strikethrough="true"');
+        // Superscript (w:vertAlign), as note marks are written; the size stays the run's own
+        if (run.superscript) attrs.push('superscript="true"');
 
         if (run.color) {
             // Convert hex color to RGB integer
@@ -470,10 +496,20 @@ class UdfGenerator {
     }
 
     /**
-     * Process a table element
+     * Process a table of the document itself
      * @param {Object} table - Parsed table
      */
     processTable(table) {
+        this.elements.push(this.tableElement(table));
+    }
+
+    /**
+     * The <table> element of a parsed table, its cells' text added to the content in reading
+     * order. A table nested in a cell is written the same way, in its place in the cell.
+     * @param {Object} table - Parsed table
+     * @returns {string} The element
+     */
+    tableElement(table) {
         const columnCount = table.columnWidths.length ||
             (table.rows[0] ? table.rows[0].cells.length : 1);
 
@@ -548,8 +584,7 @@ class UdfGenerator {
             rowElements.push(`<row rowName="row${i + 1}" rowType="dataRow">${cellElements.join('')}</row>`);
         }
 
-        const tableElement = `<table tableName="Table" columnCount="${columnCount}" columnSpans="${columnSpans}" border="${border}">${rowElements.join('')}</table>`;
-        this.elements.push(tableElement);
+        return `<table tableName="Table" columnCount="${columnCount}" columnSpans="${columnSpans}" border="${border}">${rowElements.join('')}</table>`;
     }
 
     /**
@@ -575,15 +610,22 @@ class UdfGenerator {
     }
 
     /**
-     * Process a table cell
-     * @param {Object} cell - Parsed cell
+     * Process a table cell: its paragraphs, and the tables nested in it, in document order
+     * @param {Object} cell - Parsed cell: its blocks (paragraphs and tables), else its paragraphs
      * @returns {string} Cell content elements
      */
     processTableCell(cell) {
         const cellElements = [];
+        const blocks = cell.blocks || cell.paragraphs;
 
-        for (let i = 0; i < cell.paragraphs.length; i++) {
-            const paragraph = cell.paragraphs[i];
+        for (let i = 0; i < blocks.length; i++) {
+            // A nested table's cells add their own text; no line break follows the table
+            if (blocks[i].type === 'table') {
+                cellElements.push(this.tableElement(blocks[i]));
+                continue;
+            }
+
+            const paragraph = blocks[i];
             const paraElements = [];
 
             for (const run of paragraph.runs) {
@@ -623,8 +665,8 @@ class UdfGenerator {
 
             cellElements.push(this.buildParagraphElement(paragraph, paraElements));
 
-            // Add newline between paragraphs (except last)
-            if (i < cell.paragraphs.length - 1) {
+            // Add newline between paragraphs, and before a nested table (except last)
+            if (i < blocks.length - 1) {
                 this.content += '\n';
                 this.currentOffset += 1;
             }

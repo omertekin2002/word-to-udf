@@ -148,6 +148,9 @@ test('dava dilekçesi: heading, party block, footnotes and signature keep their 
         assert.equal(el.closest('paragraph').querySelectorAll('tab').length, 2, `${label} line keeps its tabs`);
         // PARTY_TABS: left stops at 1985 and 2268 twips line up the colon and the value
         assert.equal(el.closest('paragraph').getAttribute('TabSet'), '99.3:0:0,113.4:0:0', `${label} line keeps its tab stops`);
+        // w:left="2268" w:hanging="2268": the label starts at the margin, wrapped lines under the value
+        assert.equal(el.closest('paragraph').getAttribute('LeftIndent'), '113.0', `${label} line's left indent`);
+        assert.equal(el.closest('paragraph').getAttribute('FirstLineIndent'), '-113.0', `${label} line hangs`);
     }
 
     for (const number of ['1', '2']) {
@@ -179,6 +182,26 @@ test('icra/itiraz dilekçesi: list levels, page break and justified text', async
     const reasons = itiraz.texts.find(text => text.startsWith('Açıklanan nedenlerle'));
     assert.equal(paragraphOf(doc, content, reasons).getAttribute('Alignment'), '3');
     assert.equal(paragraphOf(doc, content, 'Ad Soyad').getAttribute('Alignment'), '2');
+});
+
+test('icra/itiraz dilekçesi: the paragraph deleted with Track Changes leaves no empty paragraph, and is noted', async () => {
+    const { doc, content, parsed } = await converted(itiraz);
+    // The list item before the deleted paragraph is followed straight by the one after it
+    const before = paragraphOf(doc, content, 'Takibe konu borcun ');
+    const after = paragraphOf(doc, content, 'İşlemiş faiz ve uygulanan faiz oranı hukuka aykırıdır.');
+    assert.equal(before.nextElementSibling, after);
+    assert.deepEqual(findingSummaries(parsed.findings).map(finding => [finding.code, finding.count]), [['trackedChanges', 2]]);
+});
+
+test('ekli tablo dilekçesi: the row deleted with Track Changes leaves no row, and is noted', async () => {
+    const { doc, content, parsed } = await converted(tablo);
+    const rows = [...doc.querySelectorAll('elements table row')];
+    const rowText = row => [...row.querySelectorAll('[startOffset]')].map(el => textOf(el, content)).join('').trim();
+    assert.equal(rows.length, tablo.tableShape.length);
+    assert.ok(rows.every(row => rowText(row) !== ''), 'no row is left empty');
+    const third = rows.findIndex(row => rowText(row).startsWith('3'));
+    assert.ok(rowText(rows[third + 1]).startsWith('4'), 'row 4 follows row 3');
+    assert.deepEqual(findingSummaries(parsed.findings).map(finding => [finding.code, finding.count]), [['trackedChanges', 1]]);
 });
 
 test('ekli tablo dilekçesi: table shape, merged total row and in-cell line break', async () => {

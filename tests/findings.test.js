@@ -9,6 +9,9 @@ const r = text => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
 const tc = inner => `<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${inner}</w:tc>`;
 const tbl = rows => '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>' +
     rows.map(cells => `<w:tr>${cells.map(tc).join('')}</w:tr>`).join('') + '</w:tbl>';
+// Content in a cell of a table in a cell of another table. In a body table's cell, a table in it
+// is the 4th level of tables, past the depth limit: it is flattened into its cell and reported
+const inTwoTables = inner => tbl([[tbl([[inner]])]]);
 const picture = (rId = 'rId_image1') => '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>' +
     '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
     `<pic:pic><pic:blipFill><a:blip r:embed="${rId}"/></pic:blipFill></pic:pic>` +
@@ -98,14 +101,15 @@ test('an earlier section\'s footer the final section inherits is converted, with
     assert.deepEqual(findings, []);
 });
 
-test('a page number field, a table or a picture in the converted header or footer gives the finding', async () => {
+test('a page number field, a table or a text box in the converted header or footer gives the finding', async () => {
     const pageField = '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r>' +
         '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>';
     const cases = {
         'PAGE field': ['footer', p(r('Sayfa ') + pageField)],
         'NUMPAGES simple field': ['footer', p(r('Toplam ') + '<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>3</w:t></w:r></w:fldSimple>')],
         table: ['header', tbl([[p(r('Hücre')), p('')]]) + p(r('Üst bilgi'))],
-        picture: ['header', p(r('Üst bilgi') + picture('rIdLogo'))]
+        'text box': ['header', p(r('Üst bilgi') + '<w:r><w:pict><v:shape style="width:100pt;height:50pt"><v:textbox>' +
+            `<w:txbxContent>${p(r('Kutu'))}</w:txbxContent></v:textbox></v:shape></w:pict></w:r>`)]
     };
     for (const [name, [kind, inner]] of Object.entries(cases)) {
         const findings = await findingsOf(p(r('Gövde')), {
@@ -153,25 +157,32 @@ test('the comments part is found through its relationship, and at word/comments.
     assert.deepEqual(findings, [{ code: 'comments', count: 1, examples: [] }]);
 });
 
-test('a table nested in a cell gives nestedTables with the nested table\'s text, and converts as before', async () => {
+test('tables nested within the depth limit are written as tables and give no nestedTables', async () => {
+    assert.deepEqual(await findingsOf(tbl([[p(r('Dış')) + tbl([[p(r('İç'))]]) + p('')]])), []);
+    assert.deepEqual(await findingsOf(tbl([[p(r('Dış')) + tbl([[p(r('Orta')) + tbl([[p(r('İç'))]])]]) + p('')]])), []);
+});
+
+test('a table nested past the depth limit gives nestedTables with its text, and is flattened into its cell', async () => {
     const nested = tbl([[p('') + p(r('İç tablo metni')), p(r('İkinci hücre'))]]);
-    const body = tbl([[p(r('Dış hücre')) + nested, p(r('Yan hücre'))]]);
+    const third = tbl([[p(r('Dış hücre')) + nested, p(r('Yan hücre'))]]);
+    const body = tbl([[tbl([[third]])]]);
     const { parsed, content } = await convert(await buildDocx(body));
 
     assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'nestedTables', count: 1, examples: ['İç tablo metni'] }]);
-    // Flattened into the containing cell in reading order, as before
-    const cellTexts = plain(parsed.elements[0].rows[0].cells).map(cell =>
-        cell.paragraphs.map(para => para.runs.map(run => run.text || '').join('')));
+    // Flattened into the containing cell of the 3rd table in reading order
+    const deepest = parsed.elements[0].rows[0].cells[0].blocks[0].rows[0].cells[0].blocks[0];
+    const cellTexts = plain(deepest.rows[0].cells).map(cell =>
+        cell.blocks.map(block => block.type === 'paragraph' ? block.runs.map(run => run.text || '').join('') : block.type));
     assert.deepEqual(cellTexts, [['Dış hücre', '', 'İç tablo metni', 'İkinci hücre'], ['Yan hücre']]);
     const order = ['Dış hücre', 'İç tablo metni', 'İkinci hücre', 'Yan hücre'].map(text => content.indexOf(text));
     assert.ok(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), JSON.stringify(content));
 });
 
-test('nested table examples are cut to about 40 characters, and a table nested two deep counts at each level', async () => {
+test('nested table examples are cut to about 40 characters, and a table nested two past the limit counts at each level', async () => {
     const long = 'Bu iç tablonun ilk paragrafı kırk karakterden uzundur ve kesilir';
     const deepest = tbl([[p(r('En içteki'))]]);
     const middle = tbl([[p(r(long)) + deepest]]);
-    const findings = await findingsOf(tbl([[p(r('Dış')) + middle]]));
+    const findings = await findingsOf(tbl([[p(r('Dış')) + inTwoTables(middle)]]));
 
     assert.equal(findings.length, 1);
     assert.equal(findings[0].code, 'nestedTables');
@@ -181,7 +192,7 @@ test('nested table examples are cut to about 40 characters, and a table nested t
 });
 
 test('examples are capped at 3 and not repeated, while the count includes every occurrence', async () => {
-    const cellWith = text => tbl([[p(r('Dış')) + tbl([[p(r(text))]])]]);
+    const cellWith = text => tbl([[p(r('Dış')) + inTwoTables(tbl([[p(r(text))]]))]]);
     const findings = await findingsOf(['A', 'B', 'A', 'C', 'D'].map(cellWith).join(''));
     assert.deepEqual(findings, [{ code: 'nestedTables', count: 5, examples: ['A', 'B', 'C'] }]);
 });
@@ -226,7 +237,7 @@ test('PNG and JPEG pictures give no finding, whatever their extension', async ()
 });
 
 test('findings come in a fixed order, each code once', async () => {
-    const body = tbl([[p(r('Dış')) + tbl([[p(r('İç'))]])]]) + p(r('Resim') + picture('rId_yok')) +
+    const body = tbl([[p(r('Dış')) + inTwoTables(tbl([[p(r('İç'))]]))]]) + p(r('Resim') + picture('rId_yok')) +
         p(picture('rId_image1') + picture('rId_image2'));
     const findings = await findingsOf(body, {
         sectPr: '<w:headerReference w:type="first" r:id="rIdHeader1"/><w:footerReference w:type="default" r:id="rIdFooter1"/>',
@@ -255,7 +266,7 @@ test('the same parser gives no findings for a clean document after one with find
 
 test('the generator ignores findings: the UDF is the same with or without them', async () => {
     const { DocxParser, UdfGenerator } = loadConverter();
-    const docx = await buildDocx(tbl([[p(r('Dış')) + tbl([[p(r('İç'))]])]]) + p(picture()),
+    const docx = await buildDocx(tbl([[p(r('Dış')) + inTwoTables(tbl([[p(r('İç'))]]))]]) + p(picture()),
         { media: { 'image1.png': IMAGES.gif } });
     const parsed = await new DocxParser().parse(docx);
     assert.equal(parsed.findings.length, 2);
@@ -266,7 +277,8 @@ test('the generator ignores findings: the UDF is the same with or without them',
 
 // None of the petition fixtures has headers, comments, nested tables, pictures, endnotes, exact or
 // at-least line heights, or bar stops and underscore or heavy leaders. Only the dava dilekçesi has footnotes,
-// and Wingdings check boxes in its EKLER list.
+// and Wingdings check boxes in its EKLER list. The icra/itiraz dilekçesi has a tracked deletion in one
+// paragraph and a paragraph deleted whole; the ekli tablo dilekçesi a deleted table row.
 const EXPECTED_FIXTURE_FINDINGS = {
     'dava dilekçesi': [{
         code: 'notesMoved',
@@ -277,8 +289,8 @@ const EXPECTED_FIXTURE_FINDINGS = {
         count: 3,
         examples: ['Wingdings F0FE → ☑', 'Wingdings F0A8 → □']
     }],
-    'icra/itiraz dilekçesi': [],
-    'ekli tablo dilekçesi': [],
+    'icra/itiraz dilekçesi': [{ code: 'trackedChanges', count: 2, examples: ['Takibe konu borcun ödendiği banka dekont…'] }],
+    'ekli tablo dilekçesi': [{ code: 'trackedChanges', count: 1, examples: [] }],
     'cevap dilekçesi': []
 };
 
@@ -528,9 +540,28 @@ test('a continuation cell with no merge above it is converted, so its findings c
     assert.deepEqual(findingSummaries(parsed.findings), lossyFindings('Sahipsiz devam'));
 });
 
-test('a nested table is flattened with its joined cells, so their findings count', async () => {
+test('a nested table\'s joined cell is written empty too, so its findings don\'t count', async () => {
+    const nested = mergeColumn([['restart', p(r('İç başlık'))], ['continue', lossy('Yazılmayan iç devam')]]);
+    const { parsed, content } = await convert(await buildDocx(tbl([[nested + p(''), p(r('Yan hücre'))]])));
+
+    assert.ok(!content.includes('Yazılmayan iç devam'), JSON.stringify(content));
+    assert.deepEqual(findingSummaries(parsed.findings), []);
+});
+
+test('a joined nested cell doesn\'t end the outer joined cell: what follows it in that cell gives no findings', async () => {
+    const nested = mergeColumn([['restart', p(r('İç'))], ['continue', p(r('İç devam'))]]);
+    const { parsed, content } = await convert(await buildDocx(mergeColumn([
+        ['restart', p(r('Birleşik'))],
+        ['continue', nested + lossy('Sonra yazılmayan')]
+    ])));
+
+    assert.deepEqual(findingSummaries(parsed.findings), []);
+    assert.equal(content.trim(), 'Birleşik');
+});
+
+test('a table nested past the limit is flattened with its joined cells, so their findings count', async () => {
     const nested = mergeColumn([['restart', p(r('İç başlık'))], ['continue', lossy('Düzleştirilen devam')]]);
-    const { parsed, content } = await convert(await buildDocx(tbl([[nested, p(r('Yan hücre'))]])));
+    const { parsed, content } = await convert(await buildDocx(tbl([[inTwoTables(nested), p(r('Yan hücre'))]])));
 
     assert.ok(content.includes('Düzleştirilen devam'), JSON.stringify(content));
     assert.deepEqual(findingSummaries(parsed.findings), [
@@ -643,11 +674,12 @@ test('lineSpacing and tabStops are recorded for exactly the paragraphs the gener
 });
 
 test('paragraphs and footnotes that are never converted give no finding', async () => {
-    // A deleted footnote reference, and tab stops and line heights only in a style no paragraph uses
+    // A deleted footnote reference, and tab stops and line heights only in a style no paragraph uses.
+    // The deletion is an unaccepted change, the only thing reported.
     const findings = await findingsOf(
         p(r('Metin') + `<w:del w:id="1" w:author="Y">${footnoteRef(1)}</w:del>`),
         { footnotes: { 1: p(r('Silinen')) }, styles: paraStyle('Unused', spacing('exact') + tabsOf(stop('bar', 720))) });
-    assert.deepEqual(findings, []);
+    assert.deepEqual(findings, [{ code: 'trackedChanges', count: 1, examples: ['Metin'] }]);
 });
 
 test('the new findings come in FINDING_CODES order after the existing ones', async () => {
@@ -722,8 +754,9 @@ test('body paragraphs are numbered from 1, empty ones included, and an extra par
     assert.deepEqual(locationsOf(await locatedFindingsOf(withTable), 'lineSpacing'), [{ kind: 'paragraph', paragraph: 2 }]);
 });
 
-test('a finding in a cell names its table, row and cell; a nested table reports the outer cell', async () => {
-    const third = [p(r('Görünen') + hiddenRun('Gizli hücre')) + tbl([[p(r('İç') + hiddenRun('İç gizli')), p('')]]), p('')];
+test('a finding in a cell names its table, row and cell; nested tables report the outermost cell', async () => {
+    const third = [p(r('Görünen') + hiddenRun('Gizli hücre')) +
+        inTwoTables(tbl([[p(r('İç') + hiddenRun('İç gizli')), p('')]])), p('')];
     const body = p(r('Giriş')) + tbl([[p(r('Bir')), p(r('İki'))]]) + p('') +
         tbl([[p(r('A')), p(r('B'))], [p(r('C')), exact('D')], third]);
     const findings = await locatedFindingsOf(body);

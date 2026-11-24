@@ -251,12 +251,18 @@ async function oversizedDocx() {
     return declareSize(await buildDocx('<w:p><w:r><w:t>Dilekçe metni</w:t></w:r></w:p>'), 'word/document.xml', 200 * 1024 * 1024);
 }
 
+// A .docx whose body is only a chunk embedded by another program (w:altChunk) and empty paragraphs
+async function embeddedOnlyDocx() {
+    return buildDocx('<w:p/><w:altChunk r:id="rId_afchunk"/>', { chunks: { 'afchunk.mht': 'MIME-Version: 1.0\r\n\r\n<p>Dilekçe</p>' } });
+}
+
 const NAMED_FAILURES = [
     ['a damaged .docx', 'error.corrupt', truncatedDocx],
     ['a password-protected .docx', 'error.encrypted', async () => compoundFile(['EncryptionInfo', 'EncryptedPackage'])],
     ['a .doc renamed to .docx', 'error.legacyDoc', async () => compoundFile(['WordDocument', '1Table'])],
     ['a Strict Open XML .docx', 'error.strict', strictDocx],
-    ['a .docx too large to convert', 'error.tooLarge', oversizedDocx]
+    ['a .docx too large to convert', 'error.tooLarge', oversizedDocx],
+    ['a .docx whose only content is embedded by another program', 'error.embeddedOnly', embeddedOnlyDocx]
 ];
 
 for (const [what, key, build] of NAMED_FAILURES) {
@@ -305,7 +311,8 @@ test('every finding code the parser reports has a TR and an EN message, and app.
     const { strings, run } = await loadPage({ app: true });
     const codes = run('FINDING_CODES');
     assert.deepEqual([...codes], ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
-        'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders']);
+        'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
+        'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'paragraphBorders']);
     const keys = run('FINDING_KEYS');
     assert.deepEqual(Object.keys(keys).sort(), [...codes].sort());
     for (const code of codes) {
@@ -321,7 +328,8 @@ test('every finding code the parser reports has a TR and an EN message, and app.
     assert.match(strings.en['notes.count'], /\{count\}/);
 });
 
-// A document with a first-page header, two comments, a nested table whose text looks like markup, and a GIF picture
+// A document with a first-page header, two comments, a table nested past the depth limit whose text looks like
+// markup, and a GIF picture
 async function docxWithFindings() {
     const p = inner => `<w:p>${inner}</w:p>`;
     const r = text => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
@@ -331,7 +339,7 @@ async function docxWithFindings() {
         '<pic:pic><pic:blipFill><a:blip r:embed="rId_image1"/></pic:blipFill></pic:pic>' +
         '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
     const comment = (id, text) => `<w:comment w:id="${id}" w:author="Yazar">${p(r(text))}</w:comment>`;
-    return buildDocx(p(r('Dilekçe metni')) + tbl([p(r('Dış')) + tbl([p(r('&lt;img src=x&gt; iç tablo'))])]) + p(picture), {
+    return buildDocx(p(r('Dilekçe metni')) + tbl([p(r('Dış')) + tbl([tbl([tbl([p(r('&lt;img src=x&gt; iç tablo'))])])])]) + p(picture), {
         sectPr: '<w:headerReference w:type="first" r:id="rIdHeader1"/><w:titlePg/>',
         media: { 'image1.gif': Buffer.from('GIF89a', 'latin1') },
         parts: [
@@ -453,6 +461,36 @@ test('hidden text, moved notes, lost line heights and lost tab stops are listed 
     assert.deepEqual(labelTexts(), labels('en'));
     assert.equal(document.getElementById('conversionNotesHelp').textContent, strings.en['notes.locationHelp']);
     assert.notEqual(strings.tr['notes.tabStops'], strings.en['notes.tabStops']);
+});
+
+test('unaccepted tracked changes are listed in both languages, with their places', async () => {
+    const { window, document, strings } = await loadPage({ app: true });
+    const rev = 'w:id="1" w:author="Avukat"';
+    const r = text => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+    const deleted = text => `<w:del ${rev}><w:r><w:delText>${text}</w:delText></w:r></w:del>`;
+    const docx = await buildDocx(
+        `<w:p>${r('Kabul ')}<w:ins ${rev}>${r('edilmemiş ekleme')}</w:ins></w:p>` +
+        `<w:p><w:pPr><w:rPr><w:del ${rev}/></w:rPr></w:pPr>${deleted('Silinen paragraf')}</w:p>` +
+        '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>' +
+        `<w:tr><w:tc><w:p>${r('Kalan satır')}</w:p></w:tc></w:tr>` +
+        `<w:tr><w:trPr><w:del ${rev}/></w:trPr><w:tc><w:p>${deleted('Silinen satır')}</w:p></w:tc></w:tr></w:tbl>`);
+    window.app.processFile(fileOf('dilekce.docx', docx));
+    await window.app.handleConvert();
+
+    const expected = lang => [{
+        code: 'trackedChanges', text: strings[lang]['notes.trackedChanges'], count: strings[lang]['notes.count'].replace('{count}', '3'),
+        examples: [
+            where(strings[lang], ['paragraph', { paragraph: 1 }], '“Kabul edilmemiş ekleme”'),
+            where(strings[lang], ['paragraph', { paragraph: 2 }]),
+            where(strings[lang], ['cell', { table: 1, row: 2, cell: 1 }])
+        ]
+    }];
+    assert.ok(visible(document.getElementById('conversionNotes')));
+    assert.deepEqual(noteItems(document), expected('tr'));
+    assert.match(strings.tr['notes.trackedChanges'], /Gözden Geçir › Kabul Et/);
+    document.querySelector('[data-set-lang="en"]').click();
+    assert.deepEqual(noteItems(document), expected('en'));
+    assert.match(strings.en['notes.trackedChanges'], /Review › Accept/);
 });
 
 test('converted and left-out symbols are listed in both languages, with unquoted font and code examples', async () => {

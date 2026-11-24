@@ -64,18 +64,17 @@ test('rows and cells wrapped in content controls are kept', async () => {
     assert.deepEqual(cellTexts(doc, content), ['A1', 'B1', 'A2', 'B2']);
 });
 
-test('a nested table is flattened into its cell and its text appears once', async () => {
+test('a nested table is written as a <table> in its cell, in place, and its text appears once', async () => {
     const { doc, content, parsed } = await convertBody(
         tbl([[p(r('Outer')) + tbl([[p(r('Inner'))]]) + p(r('Tail'))]]));
 
     assert.equal(parsed.elements.length, 1);
-    assert.equal(parsed.elements[0].rows.length, 1);
-    assert.equal(doc.querySelectorAll('elements table').length, 1);
-    assert.equal(doc.querySelectorAll('elements table row').length, 1);
-    assert.equal(doc.querySelectorAll('elements cell').length, 1);
+    assert.equal(doc.querySelectorAll('elements > table').length, 1);
+    assert.equal(doc.querySelectorAll('elements table').length, 2);
     assert.equal(occurrences(content, 'Inner'), 1, JSON.stringify(content));
 
-    const cell = doc.querySelector('elements cell');
+    const cell = doc.querySelector('elements > table > row > cell');
+    assert.deepEqual([...cell.children].map(el => el.tagName), ['paragraph', 'table', 'paragraph']);
     assert.deepEqual(contentElements(doc, cell).map(el => textOf(el, content)), ['Outer', 'Inner', 'Tail']);
 });
 
@@ -91,6 +90,13 @@ test('table, grid and cell properties come from the element itself, not a nested
     assert.equal(table.border, 'borderCell');
     assert.deepEqual([...table.columnWidths], [200]);
     assert.equal(table.rows[0].cells[0].colspan, 1);
+
+    // And the nested table's come from its own elements
+    const nested = table.rows[0].cells[0].blocks[1];
+    assert.equal(nested.type, 'table');
+    assert.deepEqual([...nested.columnWidths], [50, 50, 50]);
+    assert.equal(nested.rows[0].cells[0].colspan, 3);
+    assert.equal(nested.rows[0].cells[0].borders.top, null);
 });
 
 test('text-box text appears once, after the anchoring paragraph', async () => {

@@ -36,12 +36,14 @@ const NAMESPACES = [
     'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"',
     'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"',
     'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"',
-    'xmlns:v="urn:schemas-microsoft-com:vml"'
+    'xmlns:v="urn:schemas-microsoft-com:vml"',
+    'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
 ].join(' ');
 
 const RELATIONSHIP_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/';
 const WORDML_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.';
 const MEDIA_CONTENT_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif' };
+const CHUNK_CONTENT_TYPES = { mht: 'message/rfc822', html: 'text/html', htm: 'text/html', rtf: 'application/rtf' };
 
 /**
  * Build a minimal .docx in memory. Optional parts get the content-type override and
@@ -56,9 +58,19 @@ const MEDIA_CONTENT_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/
  * @param {string} [options.numbering] - Contents of <w:numbering> in word/numbering.xml
  * @param {string} [options.sectPr] - Contents of the body's final <w:sectPr>, e.g. a <w:endnotePr>
  * @param {string} [options.settings] - Contents of <w:settings> in word/settings.xml, e.g. a <w:endnotePr>
- * @param {Array<{name: string, root: string, type: string, id: string, inner: string}>} [options.parts] - More
+ * @param {Object<string,string>} [options.chunks] - File name under word/ -> contents of an embedded chunk
+ *   (w:altChunk). Each gets an aFChunk relationship with id `rId_<name without extension>`, e.g.
+ *   afchunk.mht -> rId_afchunk
+ * @param {Array<{name: string, root: string, type: string, id: string, inner: string, rels?: Object<string,string>}>} [options.parts] - More
  *   parts under word/, e.g. { name: 'header1.xml', root: 'hdr', type: 'header', id: 'rIdHeader1', inner: '<w:p>...</w:p>' }:
- *   `inner` goes in the <w:{root}> root, `type` names both the relationship and the content type
+ *   `inner` goes in the <w:{root}> root, `type` names both the relationship and the content type. `rels` gives
+ *   the part its own image relationships, in word/_rels/<name>.rels: id -> target relative to the part,
+ *   e.g. { rIdLogo: 'media/logo.png' }
+ * @param {{major?: string, minor?: string}|string} [options.theme] - A theme part, word/theme/theme1.xml, whose
+ *   font scheme gives these major and minor Latin typefaces (an omitted one has no a:latin), or a string
+ *   that is the whole part as it is
+ * @param {Object<string,Buffer>} [options.files] - More package parts, path -> bytes, with no relationship, e.g.
+ *   { 'word/media/logo.png': PNG } for a picture only a header relates to
  * @returns {Promise<Buffer>}
  */
 async function buildDocx(bodyXml, options = {}) {
@@ -66,11 +78,19 @@ async function buildDocx(bodyXml, options = {}) {
     const defaults = [];
     const overrides = [];
     const rels = [];
-    const wordPart = (name, rootTag, inner, type = rootTag, id = `rId_${rootTag}`) => {
+    const wordPart = (name, rootTag, inner, type = rootTag, id = `rId_${rootTag}`, partRels = null) => {
         parts.push([`word/${name}`,
             `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:${rootTag} ${NAMESPACES}>${inner}</w:${rootTag}>`]);
         overrides.push(`<Override PartName="/word/${name}" ContentType="${WORDML_CONTENT_TYPE}${type}+xml"/>`);
         rels.push(`<Relationship Id="${id}" Type="${RELATIONSHIP_TYPE}${type}" Target="${name}"/>`);
+        if (partRels) {
+            parts.push([`word/_rels/${name}.rels`,
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+                Object.entries(partRels).map(([relId, target]) =>
+                    `<Relationship Id="${relId}" Type="${RELATIONSHIP_TYPE}image" Target="${target}"/>`).join('') +
+                '</Relationships>']);
+        }
     };
 
     const sectPr = options.sectPr === undefined ? '' : `<w:sectPr>${options.sectPr}</w:sectPr>`;
@@ -80,7 +100,12 @@ async function buildDocx(bodyXml, options = {}) {
     if (options.styles !== undefined) wordPart('styles.xml', 'styles', options.styles);
     if (options.numbering !== undefined) wordPart('numbering.xml', 'numbering', options.numbering);
     if (options.settings !== undefined) wordPart('settings.xml', 'settings', options.settings);
-    for (const { name, root, type, id, inner } of options.parts || []) wordPart(name, root, inner, type, id);
+    for (const { name, root, type, id, inner, rels: partRels } of options.parts || []) wordPart(name, root, inner, type, id, partRels);
+    if (options.theme !== undefined) {
+        parts.push(['word/theme/theme1.xml', typeof options.theme === 'string' ? options.theme : themePart(options.theme)]);
+        overrides.push('<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>');
+        rels.push(`<Relationship Id="rId_theme" Type="${RELATIONSHIP_TYPE}theme" Target="theme/theme1.xml"/>`);
+    }
 
     // Notes parts start with Word's separator and continuation separator notes
     for (const type of ['footnote', 'endnote']) {
@@ -104,6 +129,21 @@ async function buildDocx(bodyXml, options = {}) {
                 `ContentType="${MEDIA_CONTENT_TYPES[extension] || 'application/octet-stream'}"/>`;
             if (!defaults.includes(entry)) defaults.push(entry);
         }
+    }
+
+    for (const [name, data] of Object.entries(options.files || {})) {
+        parts.push([name, data]);
+        const extension = name.split('.').pop().toLowerCase();
+        const entry = `<Default Extension="${extension}" ContentType="${MEDIA_CONTENT_TYPES[extension] || 'application/octet-stream'}"/>`;
+        if (!defaults.includes(entry)) defaults.push(entry);
+    }
+
+    for (const [name, data] of Object.entries(options.chunks || {})) {
+        parts.push([`word/${name}`, data]);
+        rels.push(`<Relationship Id="rId_${name.replace(/\.[^.]*$/, '')}" Type="${RELATIONSHIP_TYPE}aFChunk" Target="${name}"/>`);
+        const extension = name.split('.').pop().toLowerCase();
+        const entry = `<Default Extension="${extension}" ContentType="${CHUNK_CONTENT_TYPES[extension] || 'application/octet-stream'}"/>`;
+        if (!defaults.includes(entry)) defaults.push(entry);
     }
 
     if (rels.length > 0) {
@@ -131,6 +171,21 @@ async function buildDocx(bodyXml, options = {}) {
     for (const [name, data] of parts) zip.file(name, data);
 
     return zip.generateAsync({ type: 'nodebuffer' });
+}
+
+/**
+ * A theme part (a:theme) whose font scheme gives these Latin typefaces
+ * @param {{major?: string, minor?: string}} fonts - An omitted one has no a:latin
+ * @returns {string}
+ */
+function themePart({ major, minor }) {
+    const font = (slot, typeface) => `<a:${slot}Font>` +
+        (typeface === undefined ? '' : `<a:latin typeface="${typeface}" panose="020F0302020204030204"/>`) +
+        '<a:ea typeface=""/><a:cs typeface=""/>' + `</a:${slot}Font>`;
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme"><a:themeElements>' +
+        '<a:fontScheme name="Office">' + font('major', major) + font('minor', minor) + '</a:fontScheme>' +
+        '</a:themeElements></a:theme>';
 }
 
 /**

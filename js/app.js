@@ -6,6 +6,7 @@
 // Messages for the parse failures DocxParser tells apart with error.code
 const PARSE_FAILURE_KEYS = {
     corrupt: 'error.corrupt',
+    embeddedOnly: 'error.embeddedOnly',
     encrypted: 'error.encrypted',
     legacyDoc: 'error.legacyDoc',
     strict: 'error.strict',
@@ -26,14 +27,21 @@ const FINDING_KEYS = {
     lineSpacing: 'notes.lineSpacing',
     tabStops: 'notes.tabStops',
     symbols: 'notes.symbols',
-    tableBorders: 'notes.tableBorders'
+    tableBorders: 'notes.tableBorders',
+    equations: 'notes.equations',
+    embeddedContent: 'notes.embeddedContent',
+    trackedChanges: 'notes.trackedChanges',
+    sectionLayout: 'notes.sectionLayout',
+    subscript: 'notes.subscript',
+    paragraphBorders: 'notes.paragraphBorders'
 };
 
 // The conversion's real steps, in order; the bar fills one share per step
 const PROGRESS_STAGES = ['progress.parsing', 'progress.converting', 'progress.complete'];
 
 // Findings whose examples are document text, shown in quotes; the others are format names
-const QUOTED_EXAMPLE_CODES = ['hiddenText', 'nestedTables', 'missingImage', 'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops'];
+const QUOTED_EXAMPLE_CODES = ['hiddenText', 'nestedTables', 'missingImage', 'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops',
+    'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'paragraphBorders'];
 
 // What separates the parts of a location line
 const LOCATION_SEPARATOR = ' · ';

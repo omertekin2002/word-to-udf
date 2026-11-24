@@ -106,7 +106,7 @@ const DOCUMENTED = {
  */
 const UNDOCUMENTED_EXCEPTIONS = {
     content: [
-        'superscript', // footnote and endnote reference marks and note numbers
+        'superscript', // footnote and endnote reference marks and note numbers, and superscript runs (w:vertAlign)
         'strikethrough' // w:strike
     ]
 };
@@ -129,20 +129,40 @@ const borders = (tag, val, ...edges) =>
     `<w:${tag}>${edges.map(edge => `<w:${edge} w:val="${val}" w:sz="4" w:space="0" w:color="auto"/>`).join('')}</w:${tag}>`;
 const ALL_EDGES = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'];
 const grid = columns => `<w:tblGrid>${'<w:gridCol w:w="2000"/>'.repeat(columns)}</w:tblGrid>`;
-const drawing = '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>' +
+const picture = rId => '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>' +
     '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
-    '<pic:pic><pic:blipFill><a:blip r:embed="rId_image1"/></pic:blipFill></pic:pic>' +
+    `<pic:pic><pic:blipFill><a:blip r:embed="${rId}"/></pic:blipFill></pic:pic>` +
     '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+const drawing = picture('rId_image1');
 const footnoteRef = id => `<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="${id}"/></w:r>`;
-const part = (kind, inner) => ({
-    name: `${kind}1.xml`, root: kind === 'header' ? 'hdr' : 'ftr', type: kind, id: `rId_${kind}1`, inner
+const part = (kind, inner, rels) => ({
+    name: `${kind}1.xml`, root: kind === 'header' ? 'hdr' : 'ftr', type: kind, id: `rId_${kind}1`, inner, rels
 });
 
 const FEATURES = [
     {
+        // Tracked changes are converted as accepted: inserted text kept, a deleted paragraph and row left out
+        name: 'tracked changes',
+        body: p(r('Kalan ') + '<w:ins w:id="1" w:author="A"><w:r><w:t>eklenen</w:t></w:r></w:ins>' +
+            '<w:del w:id="2" w:author="A"><w:r><w:delText>silinen</w:delText></w:r></w:del>') +
+            '<w:p><w:pPr><w:rPr><w:del w:id="3" w:author="A"/></w:rPr></w:pPr>' +
+            '<w:del w:id="4" w:author="A"><w:r><w:delText>Silinen paragraf</w:delText></w:r></w:del></w:p>' +
+            '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>' +
+            '<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>' + p(r('Kalan satır')) + '</w:tc></w:tr>' +
+            '<w:tr><w:trPr><w:del w:id="5" w:author="A"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>' +
+            '<w:p><w:del w:id="6" w:author="A"><w:r><w:delText>Silinen satır</w:delText></w:r></w:del></w:p></w:tc></w:tr></w:tbl>'
+    },
+    {
+        // An equation is written as ordinary text in its linear form
+        name: 'equation',
+        body: p(r('Faiz: ') + '<m:oMath><m:f><m:num><m:r><m:t>A</m:t></m:r></m:num>' +
+            '<m:den><m:r><m:t>365</m:t></m:r></m:den></m:f></m:oMath>' + r(' TL'))
+    },
+    {
         name: 'run formatting',
         body: p(r('Bold', '<w:b/>') + r('Italic', '<w:i/>') + r('Underline', '<w:u w:val="single"/>') +
             r('Strike', '<w:strike/>') + r('Colour', '<w:color w:val="FF0000"/>') +
+            r('m') + r('2', '<w:vertAlign w:val="superscript"/>') + r('H') + r('2', '<w:vertAlign w:val="subscript"/>') +
             r('Highlight', '<w:highlight w:val="yellow"/>') +
             r('Font', '<w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="28"/>') +
             '<w:r><w:t>Line</w:t><w:br/><w:t>break</w:t></w:r>', '<w:jc w:val="center"/>')
@@ -204,6 +224,19 @@ const FEATURES = [
             `<w:tr>${cell('Text')}<w:tc></w:tc></w:tr></w:tbl>` + p(r('After the table'))
     },
     {
+        // A <table> inside a <cell>, between the cell's paragraphs ("Hücreler paragraflar ve iç
+        // içe tablolar içerebilir"), with its own merged, shaded and partly bordered cells
+        name: 'table nested in a table cell',
+        body: `<w:tbl><w:tblPr>${borders('tblBorders', 'nil', ...ALL_EDGES)}</w:tblPr>${grid(1)}<w:tr><w:tc>` +
+            p(r('Parties')) +
+            `<w:tbl><w:tblPr>${borders('tblBorders', 'double', ...ALL_EDGES)}</w:tblPr>${grid(2)}` +
+            '<w:tr>' + cell('Claimant', '<w:vMerge w:val="restart"/><w:shd w:val="clear" w:color="auto" w:fill="D9D9D9"/>') +
+            cell('Name', '<w:vAlign w:val="bottom"/>') + '</w:tr>' +
+            '<w:tr>' + cell('', '<w:vMerge/>') + cell('Address') + '</w:tr>' +
+            '<w:tr>' + cell('Signature', '<w:gridSpan w:val="2"/>') + '</w:tr></w:tbl>' +
+            p(r('End of cell')) + '</w:tc></w:tr></w:tbl>' + p(r('After the table'))
+    },
+    {
         name: 'table cell with a tab, a picture and a footnote mark',
         body: `<w:tbl>${grid(1)}<w:tr><w:tc>` +
             p(r('Label') + '<w:r><w:tab/></w:r>' + drawing + r('Noted') + footnoteRef(1)) +
@@ -244,6 +277,7 @@ const FEATURES = [
         }
     },
     {
+        // The header's logo is an <image> inside <header>, related through the header part's own rels
         name: 'header and footer',
         body: p(r('Body')),
         options: {
@@ -251,7 +285,9 @@ const FEATURES = [
                 '<w:footerReference w:type="default" r:id="rId_footer1"/>' +
                 '<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>' +
                 '<w:pgMar w:top="1418" w:right="1134" w:bottom="1418" w:left="1701" w:header="709" w:footer="709" w:gutter="0"/>',
-            parts: [part('header', p(r('Header text'))), part('footer', p(r('Footer text')))]
+            parts: [part('header', p(picture('rIdLogo') + r('Header text')), { rIdLogo: 'media/logo.png' }),
+                part('footer', p(r('Footer text')))],
+            files: { 'word/media/logo.png': PNG }
         }
     }
 ];
@@ -327,6 +363,11 @@ test('the corpus writes every documented element and attribute the generator is 
     assert.deepEqual(missing, [],
         `the corpus no longer exercises ${missing.join(', ')}: add a feature body that writes it, ` +
         "or move it to `unused` if the generator shouldn't write it");
+});
+
+test('the corpus writes an <image> inside <header>, as Docs.md\'s Üstbilgi section shows', async () => {
+    const { doc } = (await corpus()).find(result => result.name === 'header and footer');
+    assert.equal(doc.querySelectorAll('elements > header > paragraph > image').length, 1);
 });
 
 test('the vocabulary check names an undocumented element or attribute', () => {
