@@ -285,8 +285,6 @@ const PARAGRAPH_REVISION_ELEMENTS = ['ins', 'del', 'moveTo', 'moveFrom', 'rPrCha
     'sectPrChange'];
 // In a row's w:trPr: an inserted or deleted row, or a row formatting change
 const ROW_REVISION_ELEMENTS = ['ins', 'del', 'trPrChange'];
-// In a row's w:trPr: a deleted row, which Word's Accept All removes
-const DELETED_ROW_ELEMENTS = ['del'];
 // In a cell's w:tcPr: an inserted, deleted or merged cell, or a cell formatting change
 const CELL_REVISION_ELEMENTS = ['cellIns', 'cellDel', 'cellMerge', 'tcPrChange'];
 // In w:pPr/w:rPr: a deleted or moved-away paragraph mark, which Word's Accept All removes
@@ -564,6 +562,13 @@ function paragraphMarkDeleted(para) {
     const pPr = childElement(para, 'pPr');
     const rPr = pPr && childElement(pPr, 'rPr');
     return Boolean(rPr) && DELETED_MARK_ELEMENTS.some(name => childElement(rPr, name));
+}
+
+/**
+ * Whether Accept All removes this row and its contents (w:trPr/w:del)
+ */
+function tableRowDeleted(trPr) {
+    return Boolean(trPr && childElement(trPr, 'del'));
 }
 
 /**
@@ -1365,6 +1370,7 @@ class DocxParser {
         const parsed = paragraphs.flatMap(para => {
             const paragraph = this.parseParagraph(para, this.paragraphRuns(para), true);
             if (paragraphMarkDeleted(para) && nothingLeft(paragraph.runs)) return [];
+            if (paragraph.runs.some(run => run.omittedPictures)) dropped = true;
             paragraph.runs = paragraph.runs.filter(run => HEADER_FOOTER_RUN_TYPES.includes(run.type));
             return [paragraph];
         });
@@ -1450,6 +1456,13 @@ class DocxParser {
                 if (id === '0' || id === '-1' || SEPARATOR_NOTE_TYPES.includes(note.getAttribute('w:type'))) continue;
 
                 const findings = [];
+                // Prune the note's own XML before both passes. Removing the whole row also
+                // keeps its text out of the plain-text fallback and finding examples.
+                for (const row of Array.from(note.getElementsByTagNameNS(WORD_NS, 'tr'))) {
+                    if (!note.contains(row) || !tableRowDeleted(childElement(row, 'trPr'))) continue;
+                    row.remove();
+                    findings.push(['trackedChanges', '']);
+                }
                 notes[id] = this.noteText(note, findings);
                 this.noteFindings[type][id] = findings;
                 this.noteParagraphs[type][id] = this.parseNoteParagraphs(note);
@@ -2820,9 +2833,10 @@ class DocxParser {
      * √(x) or d√(x) with a degree that isn't hidden, a delimiter (m:d) its parts between its
      * begin and end characters, joined by its separator, an n-ary operator (m:nary) the
      * operator, its limits as _sub and ^sup, a space and its body, and a function (m:func) its
-     * name, a space and its argument. A fraction part, base, script, degree or limit is wrapped
-     * in parentheses unless it is simple (see mathOperand). Any other structure (accents, bars,
-     * boxes, matrices, equation arrays, limits, ...) is its text in document order.
+     * name, a space and its argument. A fraction without a bar is binom(n, k), and a matrix
+     * (m:m) keeps its rows and cells as matrix([a, b], [c, d]). A fraction part, base, script,
+     * degree or limit is wrapped in parentheses unless it is simple (see mathOperand).
+     * Other structures (accents, bars, boxes, equation arrays, limits, ...) are read in document order.
      * A hidden run (m:r or w:r whose w:rPr, character style or paragraph style resolves w:vanish
      * on, see parseRunFormatting) adds nothing.
      * @param {Element} element - An m:oMath, or an element inside one
@@ -2876,8 +2890,14 @@ class DocxParser {
         switch (name) {
             case 't':
                 return element.textContent || '';
-            case 'f':
+            case 'f': {
+                const properties = childElement(element, 'fPr', MATH_NS);
+                const type = properties && childElement(properties, 'type', MATH_NS);
+                if (type && type.getAttributeNS(MATH_NS, 'val') === 'noBar') {
+                    return `binom(${part('num')}, ${part('den')})`;
+                }
                 return `${operand('num')}/${operand('den')}`;
+            }
             case 'sSup':
                 return `${operand('e')}^${operand('sup')}`;
             case 'sSub':
@@ -2904,6 +2924,18 @@ class DocxParser {
             }
             case 'func':
                 return `${part('fName')} ${part('e')}`;
+            case 'm': {
+                // Rows and cells can sit in the selected branch of mc:AlternateContent.
+                const matrixParts = (parent, name) => Array.from(parent.children).flatMap(child => {
+                    if (child.namespaceURI === MATH_NS && child.localName === name) return [child];
+                    if (child.namespaceURI !== MARKUP_COMPATIBILITY_NS || child.localName !== 'AlternateContent') return [];
+                    const branch = this.alternateContentBranch(child);
+                    return branch ? matrixParts(branch, name) : [];
+                });
+                const rows = matrixParts(element, 'mr').map(row =>
+                    `[${matrixParts(row, 'e').map(children).join(', ')}]`);
+                return `matrix(${rows.join(', ')})`;
+            }
             default:
                 return children(element);
         }
@@ -3054,6 +3086,7 @@ class DocxParser {
             .filter(blip => !this.isInTextBox(blip, drawing) && this.isInReadBranch(blip));
         if (blips.length > 0) {
             this.embedPicture(image, blips[0].getAttributeNS(RELATIONSHIPS_NS, 'embed'), drawing);
+            if (blips.length > 1) image.omittedPictures = true;
         } else if (drawing.getElementsByTagNameNS(WORD_NS, 'txbxContent').length === 0) {
             // A chart, SmartArt diagram or shape with no picture and no text box to keep
             this.addFinding('unconvertedDrawing', this.nearestParagraphText(drawing));
@@ -3174,7 +3207,7 @@ class DocxParser {
             if (tr.localName !== 'tr') continue;
             rowNumber++;
             const trPr = childElement(tr, 'trPr');
-            if (trPr && DELETED_ROW_ELEMENTS.some(name => childElement(trPr, name))) {
+            if (tableRowDeleted(trPr)) {
                 deletedRows[deletedRows.length - 1].push(rowNumber);
                 continue;
             }

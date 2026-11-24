@@ -392,6 +392,22 @@ for (const [name, run, size] of [['inline', pictureRun(), [72, 36]], ['anchored'
     });
 }
 
+test('grouped pictures in a header keep the first image and report omitted images', async () => {
+    const group = 'http://schemas.microsoft.com/office/word/2010/wordprocessingGroup';
+    const picture = id => `<pic:pic><pic:blipFill><a:blip r:embed="${id}"/></pic:blipFill></pic:pic>`;
+    const drawing = '<w:r><w:drawing><wp:anchor><wp:extent cx="914400" cy="457200"/>' +
+        `<a:graphic><a:graphicData uri="${group}"><wpg:wgp xmlns:wpg="${group}"><wpg:cNvGrpSpPr/><wpg:grpSpPr/>` +
+        picture('rIdLogo') + picture('rIdSecond') + '</wpg:wgp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+    const { doc, parsed } = await convertBody(p(r('Metin')), {
+        sectPr: reference('header'),
+        parts: [part('header', p(drawing), 1, { ...LOGO_RELS, rIdSecond: 'media/second.png' })],
+        files: { ...LOGO, 'word/media/second.png': OTHER_PNG }
+    });
+    assert.equal(doc.querySelectorAll('header image').length, 1);
+    assert.equal(doc.querySelector('header image').getAttribute('imageData'), PNG.toString('base64'));
+    assert.deepEqual(findingSummaries(parsed.findings), [{ code: 'headersFooters', count: 1, examples: [] }]);
+});
+
 test('a header picture resolves through the header part\'s rels, not a document relationship with the same id', async () => {
     // The document relates rIdLogo to another picture; the header's own rels point rIdLogo at logo.png
     const docx = await buildDocx(p(r('Gövde')), {

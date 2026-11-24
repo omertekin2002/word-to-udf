@@ -69,7 +69,12 @@ const LINEAR_FORMS = [
     ['a function', func(mr('sin'), mr('x')), 'sin x'],
     ['an accent, by its text', el('acc', `<m:accPr>${chr('chr', '̂')}${ctrlPr}</m:accPr>` + el('e', mr('x'))), 'x'],
     ['a bar, by its text', el('bar', `<m:barPr><m:pos m:val="top"/>${ctrlPr}</m:barPr>` + el('e', mr('x+y'))), 'x+y'],
-    ['a matrix, by its text in reading order', el('m', el('mr', el('e', mr('a')) + el('e', mr('b'))) + el('mr', el('e', mr('c')) + el('e', mr('d')))), 'abcd'],
+    ['a matrix with distinct rows and entries',
+        el('m', el('mr', el('e', mr('1')) + el('e', mr('2'))) + el('mr', el('e', mr('3')) + el('e', mr('4')))),
+        'matrix([1, 2], [3, 4])'],
+    ['a binomial coefficient inside parentheses',
+        delim('', el('f', '<m:fPr><m:type m:val="noBar"/></m:fPr>' + el('num', mr('5')) + el('den', mr('2')))),
+        '(binom(5, 2))'],
     ['nested structures', frac(sup(mr('x'), mr('2')), func(mr('cos'), mr('y'))), '(x^2)/(cos y)']
 ];
 
@@ -80,6 +85,18 @@ for (const [what, math, linear] of LINEAR_FORMS) {
         assert.deepEqual(finding(parsed, 'equations').examples, [linear]);
     });
 }
+
+test('matrix rows and cells can come from selected compatibility branches', async () => {
+    const alternate = (choice, fallback, requires) => '<mc:AlternateContent>' +
+        `<mc:Choice Requires="${requires}">${choice}</mc:Choice><mc:Fallback>${fallback}</mc:Fallback>` +
+        '</mc:AlternateContent>';
+    const row = (...values) => el('mr', values.map(value => el('e', mr(value))).join(''));
+    const math = el('m', alternate(row('ignored'), row('1', '2'), 'unsupported') +
+        el('mr', alternate(el('e', mr('3')), el('e', mr('ignored')), 'w') + el('e', mr('4'))));
+    const { content, parsed } = await convertBody(p(oMath(math)));
+    assert.equal(content, 'matrix([1, 2], [3, 4])');
+    assert.deepEqual(finding(parsed, 'equations').examples, [content]);
+});
 
 test('runs deleted inside an equation are left out, inserted ones kept', async () => {
     const math = oMath(mr('x') + `<w:del w:id="1" w:author="Y"><m:r><m:t>+1</m:t></m:r></w:del>` +

@@ -375,6 +375,22 @@ test('in a footnote, deleted and moved-away text and a deleted paragraph are lef
     assert.equal(content, expected.content);
 });
 
+for (const kind of ['footnote', 'endnote']) {
+    test(`a deleted row in a ${kind} is omitted from the export and note text`, async () => {
+        const body = p(r('Metin') + `<w:r><w:${kind}Reference w:id="1"/></w:r>`);
+        const kept = [p(r('Güncel tutar')), p(r('200 TL'))];
+        const removed = { trPr: rowDeleted, cells: [p(r('Eski tutar')), p(r('100 TL'))] };
+        const note = rows => ({ [`${kind}s`]: { 1: p(`<w:r><w:${kind}Ref/></w:r>`) + tbl(rows) } });
+        const { xml, parsed } = await convertBody(body, note([kept, removed]));
+        assert.equal(xml, (await convertBody(body, note([kept]))).xml);
+        assert.equal(parsed[`${kind}s`][1], 'Güncel tutar 200 TL');
+        assert.deepEqual(finding(parsed), {
+            code: 'trackedChanges', count: 1, examples: [],
+            occurrences: [{ example: '', location: { kind: 'paragraph', paragraph: 1, note: { kind } } }]
+        });
+    });
+}
+
 test('the note only reports: the .udf is the same with or without it', async () => {
     const { loadConverter, buildDocx } = require('./helpers');
     const JSZip = require('jszip');
