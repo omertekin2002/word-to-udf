@@ -198,6 +198,15 @@ const TABLE_EDGES = {
     insideV: ['insideV']
 };
 
+// Table alignments (w:tblPr/w:jc w:val) that don't put the table at the left margin. left, start
+// and none are the default; the UDF's <table> has no alignment (see tablePlacement)
+const MOVED_TABLE_ALIGNMENTS = ['center', 'right', 'end'];
+
+// How far a table's indent (w:tblInd, in twips) may be from 0 before it is reported (see
+// tablePlacement): ⅛ in. Word 2007–2010 indent a table by -108 or -115 twips by default, only so
+// that the cell text lines up with the margin.
+const TABLE_INDENT_TOLERANCE = 180;
+
 // Cell edges a w:tcBorders sets
 const CELL_EDGES = {
     top: TABLE_EDGES.top,
@@ -257,7 +266,7 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 // conversion drops or simplifies, so the user can fix it in Word before filing
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
     'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
-    'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'doubleStrikethrough',
+    'tablePlacement', 'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'doubleStrikethrough',
     'underlineStyles', 'listMarkers', 'paragraphBorders', 'paragraphShading', 'hyperlinks'];
 
 // The scheme a link's address starts with (http://, https://, ftp://, ..., or mailto:), left off its
@@ -2013,8 +2022,8 @@ class DocxParser {
     /**
      * Parse the styles part (word/styles.xml): the document defaults (w:docDefaults),
      * the paragraph and character styles, each with the properties it sets itself, and
-     * the table styles' borders. w:basedOn chains are resolved on first use (see
-     * resolveStyle and tableBorders).
+     * the table styles' borders, alignment and indent. w:basedOn chains are resolved on first
+     * use (see resolveStyle and resolvedTableStyle).
      */
     async parseStyles() {
         const stylesFile = this.zip.file(this.relatedPart('styles', 'word/styles.xml'));
@@ -2050,7 +2059,8 @@ class DocxParser {
                     definitions.set(id, {
                         basedOn: basedOn ? basedOn.getAttribute('w:val') : null,
                         borders: this.readBorders(tblPr && childElement(tblPr, 'tblBorders'), TABLE_EDGES),
-                        cellBorders: this.readBorders(tcPr && childElement(tcPr, 'tcBorders'), CELL_EDGES)
+                        cellBorders: this.readBorders(tcPr && childElement(tcPr, 'tcBorders'), CELL_EDGES),
+                        placement: this.readTablePlacement(tblPr)
                     });
                     if (this.styles.defaultTable === null && this.isOn(style, 'w:default', false)) {
                         this.styles.defaultTable = id;
@@ -3575,7 +3585,10 @@ class DocxParser {
             }
         }
 
-        const edges = this.tableBorders(childElement(tbl, 'tblPr'));
+        const tblPr = childElement(tbl, 'tblPr');
+        const edges = this.tableBorders(tblPr);
+        // Where the table's first cell is: a nested table's findings are located at its outer cell
+        const startLocation = this.location;
 
         // Get rows and cells (only this table's own, not those of nested tables). The cells'
         // properties come first: they decide which cells continue a vertical merge. A row marked
@@ -3651,6 +3664,14 @@ class DocxParser {
                 }
             });
             reportDeleted(deletedRows[table.rows.length]);
+            // A table written as a table that Word doesn't draw at the left margin, inline: the
+            // <table> has no alignment, indent or position. Located at its first cell, with the
+            // first text of the cells the generator writes.
+            if (!flattened && this.tableMoved(tblPr)) {
+                const shown = table.rows.flatMap((row, i) => row.cells.filter((cell, j) => !merges[i][j].joinsAbove));
+                const location = enterCell ? (enterCell(1, 1), this.location) : startLocation;
+                this.addFinding('tablePlacement', shortExample(firstText(shown.flatMap(cell => cell.paragraphs))), location);
+            }
         } finally {
             this.tableDepth = depth - 1;
         }
@@ -3712,6 +3733,72 @@ class DocxParser {
     }
 
     /**
+     * A table's style (w:tblStyle, else the default table style) with its w:basedOn chain applied
+     * underneath it: the nearest style that sets each border edge, cell border edge, alignment and
+     * indent wins. Resolved once per style.
+     * @param {Element|null} tblPr - The table's w:tblPr
+     * @returns {{borders: Object<string,?Object>, cells: Object<string,?Object>,
+     *   placement: {jc?: string, ind?: {w: number, type: string}}}|null} Only what the chain
+     *   sets (see readBorders and readTablePlacement); null without a styles part
+     */
+    resolvedTableStyle(tblPr) {
+        if (!this.styles.loaded) return null;
+        const tblStyle = tblPr && childElement(tblPr, 'tblStyle');
+        const id = tblStyle && tblStyle.getAttribute('w:val');
+        const definitions = this.styles.definitions.table;
+        const styleId = definitions.has(id) ? id : this.styles.defaultTable;
+        const resolved = this.styles.resolved.table;
+        if (!resolved.has(styleId)) {
+            const chain = [];
+            for (let sid = styleId; definitions.has(sid) && !chain.includes(definitions.get(sid)); sid = definitions.get(sid).basedOn) {
+                chain.unshift(definitions.get(sid));
+            }
+            resolved.set(styleId, {
+                borders: Object.assign({}, ...chain.map(style => style.borders)),
+                cells: Object.assign({}, ...chain.map(style => style.cellBorders)),
+                placement: Object.assign({}, ...chain.map(style => style.placement))
+            });
+        }
+        return resolved.get(styleId);
+    }
+
+    /**
+     * Read the alignment (w:jc) and indent (w:tblInd) a table's or table style's w:tblPr sets
+     * @param {Element|null} tblPr - The w:tblPr
+     * @returns {{jc?: string, ind?: {w: number, type: string}}} Only what it sets: jc is the
+     *   w:jc w:val; ind is the w:tblInd width in twips (0 when missing or not a whole number) and
+     *   its w:type (dxa when missing)
+     */
+    readTablePlacement(tblPr) {
+        const placement = {};
+        const jc = tblPr && childElement(tblPr, 'jc');
+        if (jc && jc.hasAttribute('w:val')) placement.jc = jc.getAttribute('w:val');
+        const ind = tblPr && childElement(tblPr, 'tblInd');
+        if (ind) {
+            const w = (ind.getAttribute('w:w') || '').trim();
+            placement.ind = { w: /^-?\d+$/.test(w) ? Number(w) : 0, type: ind.getAttribute('w:type') || 'dxa' };
+        }
+        return placement;
+    }
+
+    /**
+     * Whether Word draws a table somewhere other than at the left margin, inline with the text
+     * (see tablePlacement): its alignment, resolved through its table style chain to its own
+     * w:tblPr (see resolvedTableStyle), is center, right or end; its indent, resolved the same
+     * way, is a dxa width more than TABLE_INDENT_TOLERANCE from 0 (nil is 0; pct and auto aren't
+     * read); or it floats (w:tblpPr)
+     * @param {Element|null} tblPr - The table's w:tblPr
+     * @returns {boolean}
+     */
+    tableMoved(tblPr) {
+        if (tblPr && childElement(tblPr, 'tblpPr')) return true;
+        const style = this.resolvedTableStyle(tblPr);
+        const { jc, ind } = Object.assign({}, style && style.placement, this.readTablePlacement(tblPr));
+        if (MOVED_TABLE_ALIGNMENTS.includes(jc)) return true;
+        return Boolean(ind) && ind.type === 'dxa' && Math.abs(ind.w) > TABLE_INDENT_TOLERANCE;
+    }
+
+    /**
      * The line each of a table's six edges draws: its table style (w:tblStyle, else the default
      * table style) with its w:basedOn chain, then the table's own w:tblBorders. The nearest
      * layer that sets an edge wins, and an edge nothing sets has no line. Without a styles
@@ -3728,23 +3815,9 @@ class DocxParser {
     tableBorders(tblPr) {
         let base;
         let cells = {};
-        if (this.styles.loaded) {
-            const tblStyle = tblPr && childElement(tblPr, 'tblStyle');
-            const id = tblStyle && tblStyle.getAttribute('w:val');
-            const definitions = this.styles.definitions.table;
-            const styleId = definitions.has(id) ? id : this.styles.defaultTable;
-            const resolved = this.styles.resolved.table;
-            if (!resolved.has(styleId)) {
-                const chain = [];
-                for (let sid = styleId; definitions.has(sid) && !chain.includes(definitions.get(sid)); sid = definitions.get(sid).basedOn) {
-                    chain.unshift(definitions.get(sid));
-                }
-                resolved.set(styleId, {
-                    borders: Object.assign({}, ...chain.map(style => style.borders)),
-                    cells: Object.assign({}, ...chain.map(style => style.cellBorders))
-                });
-            }
-            ({ borders: base, cells } = resolved.get(styleId));
+        const style = this.resolvedTableStyle(tblPr);
+        if (style) {
+            ({ borders: base, cells } = style);
         } else {
             base = Object.fromEntries(Object.keys(TABLE_EDGES).map(edge => [edge, DEFAULT_BORDER_LINE]));
         }
