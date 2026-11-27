@@ -41,7 +41,9 @@ const HIGHLIGHT_COLORS = {
 };
 
 // On/off properties that toggle, rather than override, between the paragraph and
-// character style levels (ECMA-376 Part 1, 17.7.3)
+// character style levels (ECMA-376 Part 1, 17.7.3). Double strikethrough (w:dstrike) isn't
+// one: unlike w:strike, the standard doesn't call it a toggle property (17.3.2.9), so a later
+// layer simply overrides it.
 const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike', 'hidden', 'caps', 'smallCaps'];
 
 // Run children that hold a picture, text box, chart or shape: DrawingML w:drawing, and the
@@ -255,7 +257,8 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 // conversion drops or simplifies, so the user can fix it in Word before filing
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
     'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
-    'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'paragraphBorders'];
+    'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'doubleStrikethrough',
+    'paragraphBorders'];
 
 // Vertical alignments a run can have (w:vertAlign w:val, ST_VerticalAlignRun, ECMA-376 Part 1, 17.18.96).
 // Superscript is written; subscript has no UDF attribute, so it stays on the baseline and is reported.
@@ -1496,8 +1499,8 @@ class DocxParser {
      * @param {Element} note - The w:footnote or w:endnote element
      * @param {Array<[string, string]>} [findings] - Receives a [code, example] pair for each symbol
      *   (symbols), each equation (equations), each paragraph with hidden content (hiddenText), with
-     *   unaccepted changes (trackedChanges, see hasRevisions), with subscript text (subscript) and
-     *   with a border (paragraphBorders, see hasParagraphBorder)
+     *   unaccepted changes (trackedChanges, see hasRevisions), with subscript text (subscript), with
+     *   double-struck text (doubleStrikethrough) and with a border (paragraphBorders, see hasParagraphBorder)
      * @returns {string}
      */
     noteText(note, findings = []) {
@@ -1508,6 +1511,7 @@ class DocxParser {
             const style = this.paragraphStyle(pPr);
             const hidden = { found: false, text: '' };
             let subscript = false;
+            let doubleStruck = false;
             // Runs, and equations in place of the runs inside them. Deleted and moved-away runs
             // are left out, as in the body (see paragraphRuns).
             const runs = Array.from(para.getElementsByTagName('*')).filter(element =>
@@ -1521,6 +1525,7 @@ class DocxParser {
                     if (math.trim() !== '') {
                         text += math;
                         findings.push(['equations', shortExample(math)]);
+                        if (this.parseRunFormatting(run, style.run).doubleStrike) doubleStruck = true;
                     }
                     continue;
                 }
@@ -1545,11 +1550,14 @@ class DocxParser {
                         text += ' ';
                     }
                 }
-                if (formatting.vertAlign === 'subscript' && text.slice(runStart).trim() !== '') subscript = true;
+                const shown = text.slice(runStart).trim() !== '';
+                if (formatting.vertAlign === 'subscript' && shown) subscript = true;
+                if (formatting.doubleStrike && shown) doubleStruck = true;
             }
             if (hidden.found) findings.push(['hiddenText', shortExample(hidden.text)]);
             if (this.hasRevisions(para)) findings.push(['trackedChanges', shortExample(text.slice(start).trim())]);
             if (subscript) findings.push(['subscript', shortExample(text.slice(start).trim())]);
+            if (doubleStruck) findings.push(['doubleStrikethrough', shortExample(text.slice(start).trim())]);
             if (this.hasParagraphBorder(style.paragraph, this.readParagraphProperties(pPr))) {
                 findings.push(['paragraphBorders', shortExample(text.slice(start).trim())]);
             }
@@ -1977,8 +1985,8 @@ class DocxParser {
         const props = {};
         if (!rPr) return props;
 
-        const onOff = [['b', 'bold'], ['i', 'italic'], ['strike', 'strike'], ['vanish', 'hidden'],
-            ['caps', 'caps'], ['smallCaps', 'smallCaps']];
+        const onOff = [['b', 'bold'], ['i', 'italic'], ['strike', 'strike'], ['dstrike', 'doubleStrike'],
+            ['vanish', 'hidden'], ['caps', 'caps'], ['smallCaps', 'smallCaps']];
         for (const [name, key] of onOff) {
             const el = childElement(rPr, name);
             if (el) props[key] = this.isOn(el);
@@ -2672,8 +2680,9 @@ class DocxParser {
 
         // Get runs (text with formatting). Hidden runs add nothing; their text is collected for the finding.
         const hidden = { found: false, text: '' };
+        const doubleStruck = { found: false };
         for (const run of runs) {
-            paragraph.runs.push(...this.parseRun(run, style.run, hidden));
+            paragraph.runs.push(...this.parseRun(run, style.run, hidden, doubleStruck));
         }
         if (hidden.found) this.addFinding('hiddenText', shortExample(hidden.text));
 
@@ -2682,6 +2691,9 @@ class DocxParser {
 
         // Subscript text, written on the baseline (see parseRun)
         if (paragraph.runs.some(run => run.subscript && run.text.trim() !== '')) this.addFinding('subscript', shortExample(paragraphText(paragraph)));
+
+        // Double-struck text, written with a single strikethrough (see parseRun)
+        if (doubleStruck.found) this.addFinding('doubleStrikethrough', shortExample(paragraphText(paragraph)));
 
         // Line heights, tab stops and borders the conversion loses, with the paragraph's text as the hint.
         // A paragraph the generator doesn't write as one has no line height, stops or borders to lose.
@@ -2751,19 +2763,24 @@ class DocxParser {
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @param {{found: boolean, text: string}} [hidden] - Set when the run is hidden (w:vanish) and
      *   holds content: found becomes true and the run's text is appended to text
+     * @param {{found: boolean}} [doubleStruck] - found becomes true when the run is double-struck
+     *   (w:dstrike) and shows text other than whitespace
      * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image,
      *   footnoteRef, endnoteRef). Empty for a hidden run: Word neither shows nor prints it. Text of
      *   a superscript run has superscript: true; text of a subscript run has subscript: true and is
-     *   written on the baseline, as the UDF has no subscript.
+     *   written on the baseline, as the UDF has no subscript. Text of a double-struck run (w:dstrike)
+     *   has strike: true, as the UDF has no double strikethrough.
      */
-    parseRun(run, paragraphRun = {}, hidden = null) {
-        if (run.namespaceURI === MATH_NS) return this.parseEquation(run, paragraphRun, hidden);
+    parseRun(run, paragraphRun = {}, hidden = null, doubleStruck = null) {
+        if (run.namespaceURI === MATH_NS) return this.parseEquation(run, paragraphRun, hidden, doubleStruck);
         const items = [];
-        // hidden, caps, smallCaps and lang decide how the run's text is written, and vertAlign whether
-        // it is superscript or subscript; they aren't text attributes
-        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, ...formatting } = this.parseRunFormatting(run, paragraphRun);
+        // hidden, caps, smallCaps and lang decide how the run's text is written, vertAlign whether
+        // it is superscript or subscript, and doubleStrike whether it is struck; they aren't text attributes
+        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, doubleStrike, ...formatting } =
+            this.parseRunFormatting(run, paragraphRun);
         if (vertAlign === 'superscript') formatting.superscript = true;
         else if (vertAlign === 'subscript') formatting.subscript = true;
+        if (doubleStrike) formatting.strike = true;
 
         if (isHidden) {
             const { shows, text } = hiddenRunContent(run);
@@ -2844,6 +2861,9 @@ class DocxParser {
             }
         }
 
+        if (doubleStrike && doubleStruck && items.some(item => item.type === 'text' && item.text.trim() !== '')) {
+            doubleStruck.found = true;
+        }
         return items;
     }
 
@@ -2856,13 +2876,20 @@ class DocxParser {
      * @param {Element} oMath - The m:oMath element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @param {{found: boolean, text: string}} [hidden] - See parseRun; set by the equation's hidden runs
+     * @param {{found: boolean}} [doubleStruck] - See parseRun; set when the equation is double-struck
      * @returns {Array<Object>} Empty for an equation with no text, or one all hidden
      */
-    parseEquation(oMath, paragraphRun = {}, hidden = null) {
+    parseEquation(oMath, paragraphRun = {}, hidden = null, doubleStruck = null) {
         const text = this.equationText(oMath, paragraphRun, hidden);
         if (text.trim() === '') return [];
-        // hidden, caps, smallCaps, lang and vertAlign don't apply to the equation's text as a whole
-        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, ...formatting } = this.parseRunFormatting(oMath, paragraphRun);
+        // hidden, caps, smallCaps, lang and vertAlign don't apply to the equation's text as a whole;
+        // double strikethrough is written as a strikethrough, as for a run
+        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, doubleStrike, ...formatting } =
+            this.parseRunFormatting(oMath, paragraphRun);
+        if (doubleStrike) {
+            formatting.strike = true;
+            if (doubleStruck) doubleStruck.found = true;
+        }
 
         this.addFinding('equations', shortExample(text));
         const items = [];
