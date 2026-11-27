@@ -35,7 +35,8 @@ const FINDING_KEYS = {
     subscript: 'notes.subscript',
     doubleStrikethrough: 'notes.doubleStrikethrough',
     listMarkers: 'notes.listMarkers',
-    paragraphBorders: 'notes.paragraphBorders'
+    paragraphBorders: 'notes.paragraphBorders',
+    hyperlinks: 'notes.hyperlinks'
 };
 
 // The conversion's real steps, in order; the bar fills one share per step
@@ -44,7 +45,7 @@ const PROGRESS_STAGES = ['progress.parsing', 'progress.converting', 'progress.co
 // Findings whose examples are document text, shown in quotes; the others are format names
 const QUOTED_EXAMPLE_CODES = ['hiddenText', 'nestedTables', 'missingImage', 'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops',
     'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'doubleStrikethrough',
-    'listMarkers', 'paragraphBorders'];
+    'listMarkers', 'paragraphBorders', 'hyperlinks'];
 
 // What separates the parts of a location line
 const LOCATION_SEPARATOR = ' · ';

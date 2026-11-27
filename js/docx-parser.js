@@ -258,7 +258,15 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
     'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
     'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'doubleStrikethrough',
-    'listMarkers', 'paragraphBorders'];
+    'listMarkers', 'paragraphBorders', 'hyperlinks'];
+
+// The scheme a link's address starts with (http://, https://, ftp://, ..., or mailto:), left off its
+// hyperlinks example and when checking whether the link's text shows the address
+const LINK_SCHEME = /^(?:[a-z][a-z0-9+.-]*:\/\/|mailto:)/i;
+
+// Switches of a HYPERLINK field instruction that take an argument (ECMA-376 Part 1, 17.16.5.25): the
+// bookmark (\l), the tooltip (\o) and the target frame (\t). The others (\m, \n) take none.
+const HYPERLINK_SWITCHES_WITH_ARGUMENT = ['\\l', '\\o', '\\t'];
 
 // Vertical alignments a run can have (w:vertAlign w:val, ST_VerticalAlignRun, ECMA-376 Part 1, 17.18.96).
 // Superscript is written; subscript has no UDF attribute, so it stays on the baseline and is reported.
@@ -355,6 +363,40 @@ function imageFormat(bytes) {
 function shortExample(text) {
     const collapsed = text.replace(/\s+/g, ' ').trim();
     return collapsed.length > MAX_EXAMPLE_LENGTH ? `${collapsed.slice(0, MAX_EXAMPLE_LENGTH).trimEnd()}…` : collapsed;
+}
+
+/**
+ * The address a HYPERLINK field instruction links to: its first argument that is neither a switch
+ * nor a switch's argument, e.g. the address in HYPERLINK "<address>" \o "tip"
+ * @param {string} instruction - The field instruction (w:instrText of a complex field, w:instr of a simple one)
+ * @returns {string} '' for another field type, or a link to a bookmark only (HYPERLINK \l "name")
+ */
+function hyperlinkFieldAddress(instruction) {
+    const match = /^\s*HYPERLINK(?=[\s"]|$)([\s\S]*)$/i.exec(instruction);
+    if (!match) return '';
+    const tokens = Array.from(match[1].matchAll(/"([^"]*)"|(\S+)/g), ([, quoted, bare]) => ({ quoted: quoted !== undefined, text: quoted ?? bare }));
+    for (let i = 0; i < tokens.length; i++) {
+        const { quoted, text } = tokens[i];
+        if (!quoted && text.startsWith('\\')) {
+            if (HYPERLINK_SWITCHES_WITH_ARGUMENT.includes(text.toLowerCase())) i++;
+            continue;
+        }
+        if (text.trim() !== '') return text.trim();
+    }
+    return '';
+}
+
+/**
+ * Whether a link's text already shows its address: it contains the address, compared ignoring case,
+ * a leading scheme (see LINK_SCHEME), a leading www. and trailing slashes, so a text showing
+ * www.<domain> shows the address https://www.<domain>/
+ * @param {string} text - The link's shown text
+ * @param {string} address - Where it links to
+ * @returns {boolean}
+ */
+function linkShowsAddress(text, address) {
+    const core = address.trim().replace(LINK_SCHEME, '').replace(/^www\./i, '').replace(/\/+$/, '').toLowerCase();
+    return text.toLowerCase().includes(core);
 }
 
 /**
@@ -1501,6 +1543,15 @@ class DocxParser {
 
         try {
             const notesDoc = parseXml(await this.readXmlPart(notesFile));
+            // The notes' links resolve through the notes part's own relationships. Notes whose
+            // relationships can't be read are still converted; only their links go unreported.
+            let relationships = {};
+            try {
+                relationships = await this.readRelationships(notesFile.name);
+            } catch (error) {
+                rethrowFatal(error);
+                console.warn(`Could not read the ${type}s' relationships:`, error);
+            }
 
             for (const note of notesDoc.getElementsByTagNameNS(WORD_NS, type)) {
                 const id = note.getAttribute('w:id');
@@ -1516,7 +1567,7 @@ class DocxParser {
                     row.remove();
                     findings.push(['trackedChanges', '']);
                 }
-                notes[id] = this.noteText(note, findings);
+                notes[id] = this.noteText(note, findings, relationships);
                 this.noteFindings[type][id] = findings;
                 this.noteParagraphs[type][id] = this.parseNoteParagraphs(note);
             }
@@ -1537,10 +1588,12 @@ class DocxParser {
      * @param {Array<[string, string]>} [findings] - Receives a [code, example] pair for each symbol
      *   (symbols), each equation (equations), each paragraph with hidden content (hiddenText), with
      *   unaccepted changes (trackedChanges, see hasRevisions), with subscript text (subscript), with
-     *   double-struck text (doubleStrikethrough) and with a border (paragraphBorders, see hasParagraphBorder)
+     *   double-struck text (doubleStrikethrough), with a border (paragraphBorders, see hasParagraphBorder),
+     *   and for each link whose address its text doesn't show (hyperlinks, see unshownLinkAddresses)
+     * @param {Object} [relationships] - The notes part's relationships (see readRelationships)
      * @returns {string}
      */
-    noteText(note, findings = []) {
+    noteText(note, findings = [], relationships = {}) {
         let text = '';
         for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
             const start = text.length;
@@ -1592,6 +1645,9 @@ class DocxParser {
                 if (formatting.doubleStrike && shown) doubleStruck = true;
             }
             if (hidden.found) findings.push(['hiddenText', shortExample(hidden.text)]);
+            for (const example of this.unshownLinkAddresses(para, this.paragraphRuns(para), style.run, relationships)) {
+                findings.push(['hyperlinks', example]);
+            }
             if (this.hasRevisions(para)) findings.push(['trackedChanges', shortExample(text.slice(start).trim())]);
             if (subscript) findings.push(['subscript', shortExample(text.slice(start).trim())]);
             if (doubleStruck) findings.push(['doubleStrikethrough', shortExample(text.slice(start).trim())]);
@@ -2743,6 +2799,12 @@ class DocxParser {
         }
         if (hidden.found) this.addFinding('hiddenText', shortExample(hidden.text));
 
+        // Links whose address the text doesn't show: the UDF has no links, so the address is lost.
+        // A header's or footer's links resolve through that part's relationships.
+        for (const example of this.unshownLinkAddresses(para, runs, style.run, this.partRelationships || this.relationships)) {
+            this.addFinding('hyperlinks', example);
+        }
+
         // Unaccepted changes: the paragraph is converted as if they were accepted
         if (this.hasRevisions(para)) this.addFinding('trackedChanges', shortExample(paragraphText(paragraph)));
 
@@ -2803,6 +2865,92 @@ class DocxParser {
         if (stops.some(between)) return;
         paragraph.tabStops = [...stops, { position: leftIndent, alignment: 0, leader: 0 }]
             .sort((a, b) => a.position - b.position);
+    }
+
+    /**
+     * The links a paragraph shows whose address its text doesn't show (see linkShowsAddress), as
+     * hyperlinks examples: a w:hyperlink whose r:id names an external relationship of the part it is
+     * in, and a HYPERLINK field, complex (w:fldChar begin, its w:instrText, separate, the result, end)
+     * or simple (w:fldSimple), a field nested in another field's result included. A link's text is
+     * what its runs show: hidden runs add nothing, and deleted and moved-away runs aren't among the
+     * runs (see paragraphRuns). Internal links (w:anchor only, HYPERLINK \l), links with no text and a
+     * w:hyperlink whose relationship is missing aren't listed. Only reads: nothing is recorded.
+     * @param {Element} para - The w:p element
+     * @param {Array<Element>} runs - Its runs (see paragraphRuns)
+     * @param {Object} styleRun - Run properties from the paragraph's style (see resolveStyle)
+     * @param {Object} relationships - The relationships of the part the paragraph is in (see readRelationships)
+     * @returns {Array<string>} One example per link, in the order the links start: the link's text,
+     *   then → and its address without the scheme, e.g. Yargıtay kararı → example.org/karar
+     */
+    unshownLinkAddresses(para, runs, styleRun, relationships) {
+        const links = [];
+        const newLink = address => {
+            const link = { address, text: '' };
+            links.push(link);
+            return link;
+        };
+        // The link of each w:hyperlink and w:fldSimple met, null for one that isn't an external link
+        const wrapperLinks = new Map();
+        const wrapperLink = element => {
+            if (!wrapperLinks.has(element)) {
+                let address = '';
+                if (element.localName === 'hyperlink') {
+                    const id = element.getAttributeNS(RELATIONSHIPS_NS, 'id');
+                    const relationship = id && Object.prototype.hasOwnProperty.call(relationships, id) ? relationships[id] : null;
+                    // An external target has no part name (see readRelationships)
+                    if (relationship && relationship.target && relationship.path === null) address = relationship.target.trim();
+                } else {
+                    address = hyperlinkFieldAddress(element.getAttribute('w:instr') || '');
+                }
+                wrapperLinks.set(element, address ? newLink(address) : null);
+            }
+            return wrapperLinks.get(element);
+        };
+        // The complex fields open at this point, outermost first
+        const fields = [];
+
+        for (const run of runs) {
+            if (run.namespaceURI !== WORD_NS) continue;
+            // The links of the w:hyperlink and w:fldSimple elements around the run, outermost first
+            const around = [];
+            for (let element = run.parentElement; element && element !== para; element = element.parentElement) {
+                if (element.namespaceURI === WORD_NS && (element.localName === 'hyperlink' || element.localName === 'fldSimple')) {
+                    around.unshift(element);
+                }
+            }
+            const wrappers = around.map(wrapperLink).filter(Boolean);
+            const hidden = this.parseRunFormatting(run, styleRun).hidden;
+
+            for (const child of run.children) {
+                if (child.namespaceURI !== WORD_NS) continue;
+                const field = fields[fields.length - 1];
+                if (child.localName === 'fldChar') {
+                    const type = child.getAttribute('w:fldCharType');
+                    if (type === 'begin') {
+                        fields.push({ instruction: '', inResult: false, link: null });
+                    } else if (type === 'separate' && field && !field.inResult) {
+                        field.inResult = true;
+                        const address = hyperlinkFieldAddress(field.instruction);
+                        if (address) field.link = newLink(address);
+                    } else if (type === 'end') {
+                        fields.pop();
+                    }
+                } else if (child.localName === 'instrText') {
+                    if (field && !field.inResult) field.instruction += child.textContent || '';
+                } else if (!hidden && (child.localName === 't' || NOTE_WHITESPACE_ELEMENTS.includes(child.localName))) {
+                    const text = child.localName === 't' ? child.textContent || '' : ' ';
+                    for (const link of wrappers) link.text += text;
+                    // A field's result shows the results of the fields nested in it
+                    for (const open of fields) {
+                        if (open.link) open.link.text += text;
+                    }
+                }
+            }
+        }
+
+        return links
+            .filter(({ text, address }) => text.trim() !== '' && !linkShowsAddress(text, address))
+            .map(({ text, address }) => shortExample(`${text.trim()} → ${address.replace(LINK_SCHEME, '')}`));
     }
 
     /**
