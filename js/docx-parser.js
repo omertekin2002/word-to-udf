@@ -258,7 +258,7 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
     'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
     'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'doubleStrikethrough',
-    'paragraphBorders'];
+    'listMarkers', 'paragraphBorders'];
 
 // Vertical alignments a run can have (w:vertAlign w:val, ST_VerticalAlignRun, ECMA-376 Part 1, 17.18.96).
 // Superscript is written; subscript has no UDF attribute, so it stays on the baseline and is reported.
@@ -369,13 +369,50 @@ function symbolText(sym, runFont = '') {
     const font = (sym.getAttribute('w:font') || runFont || '').trim();
     const char = (sym.getAttribute('w:char') || '').trim().toUpperCase();
     const code = /^[0-9A-F]{1,4}$/.test(char) ? parseInt(char, 16) : -1;
-    const table = SYMBOL_FONTS[font.toLowerCase()];
-    // F0xx is the private use form of the code, 00xx the plain one
-    const highByte = code >> 8;
-    const text = table && code >= 0 && (highByte === 0xF0 || highByte === 0) &&
-        Object.prototype.hasOwnProperty.call(table, code & 0xFF) ? table[code & 0xFF] : '';
+    const text = symbolFontCharacter(font, code);
     const label = `${font || '?'} ${char || '?'}`;
     return { text, example: shortExample(text ? `${label} → ${text}` : label) };
+}
+
+/**
+ * Unicode text of a character code in a symbol font, from SYMBOL_FONTS
+ * @param {string} font - The font name
+ * @param {number} code - The character code: F0xx, the private use form, or 00xx, the plain one
+ * @returns {string} '' when the font has no table, or its table doesn't list the code
+ */
+function symbolFontCharacter(font, code) {
+    const table = SYMBOL_FONTS[font.trim().toLowerCase()];
+    const highByte = code >> 8;
+    return table && code >= 0 && (highByte === 0xF0 || highByte === 0) &&
+        Object.prototype.hasOwnProperty.call(table, code & 0xFF) ? table[code & 0xFF] : '';
+}
+
+/**
+ * The character a bullet list level draws: its level text (w:lvlText), read through its font
+ * (w:lvl/w:rPr/w:rFonts) when that is a symbol font in SYMBOL_FONTS, as for w:sym. A level text
+ * of one character a symbol font's table lists becomes that table's character; one in the private
+ * use form (F0xx) the table doesn't list has none; any other level text is drawn as written.
+ * @param {string} lvlText - The level text
+ * @param {string} font - The level's font, or ''
+ * @returns {string} The bullet as Unicode text, '' when it has no equivalent
+ */
+function bulletCharacter(lvlText, font) {
+    const characters = Array.from(lvlText);
+    if (!SYMBOL_FONTS[font.trim().toLowerCase()] || characters.length !== 1) return lvlText;
+    const code = characters[0].codePointAt(0);
+    const text = symbolFontCharacter(font, code);
+    if (text) return text;
+    return code >> 8 === 0xF0 ? '' : lvlText;
+}
+
+/**
+ * The whole number in an element's w:val, such as w:start's
+ * @param {Element|null} element
+ * @returns {number|null} null without the element, or for a w:val that isn't a whole number
+ */
+function integerValue(element) {
+    const value = element ? (element.getAttribute('w:val') || '').trim() : '';
+    return /^-?\d+$/.test(value) ? Number(value) : null;
 }
 
 /**
@@ -1665,7 +1702,7 @@ class DocxParser {
 
     /**
      * Parse list definitions from the numbering part (word/numbering.xml) into
-     * this.numbering[numId][ilvl] = { format, lvlText }
+     * this.numbering[numId][ilvl] = { format, lvlText, bullet, picture, start } (see parseLevel)
      */
     async parseNumbering() {
         const numberingFile = this.zip.file(this.relatedPart('numbering', 'word/numbering.xml'));
@@ -1688,10 +1725,14 @@ class DocxParser {
                 const abstractNumId = childElement(num, 'abstractNumId');
                 const levels = { ...(abstractNumId && abstractLevels[abstractNumId.getAttribute('w:val')]) };
 
-                // A level override replaces the whole abstract level, defaults included
+                // A level override replaces the whole abstract level, defaults included. A start
+                // override (Word's Restart at or Set Numbering Value) replaces only its start value.
                 for (const override of childElements(num, 'lvlOverride')) {
+                    const ilvl = override.getAttribute('w:ilvl') || '0';
                     const lvl = childElement(override, 'lvl');
-                    if (lvl) levels[override.getAttribute('w:ilvl') || '0'] = this.parseLevel(lvl);
+                    if (lvl) levels[ilvl] = this.parseLevel(lvl);
+                    const start = integerValue(childElement(override, 'startOverride'));
+                    if (start !== null && levels[ilvl]) levels[ilvl] = { ...levels[ilvl], start };
                 }
 
                 this.numbering[num.getAttribute('w:numId')] = levels;
@@ -1792,9 +1833,12 @@ class DocxParser {
     }
 
     /**
-     * Read the number format and level text of a numbering level
+     * Read the number format, level text, bullet and start value of a numbering level
      * @param {Element} lvl - The w:lvl element
-     * @returns {{format?: string, lvlText?: string}} Only the values the level sets
+     * @returns {{format?: string, lvlText?: string, bullet?: string, picture?: boolean, start?: number}}
+     *   Only the values the level sets. A bullet level (numFmt bullet) also has bullet, the character
+     *   its level text draws (see bulletCharacter), and picture, true for a picture bullet
+     *   (w:lvlPicBulletId). start is the w:start value.
      */
     parseLevel(lvl) {
         const level = {};
@@ -1802,6 +1846,16 @@ class DocxParser {
         if (numFmt && numFmt.hasAttribute('w:val')) level.format = numFmt.getAttribute('w:val');
         const lvlText = childElement(lvl, 'lvlText');
         if (lvlText && lvlText.hasAttribute('w:val')) level.lvlText = lvlText.getAttribute('w:val');
+        if (level.format === 'bullet') {
+            // The level's font: w:ascii, else w:hAnsi
+            const rPr = childElement(lvl, 'rPr');
+            const rFonts = rPr && childElement(rPr, 'rFonts');
+            const font = rFonts ? rFonts.getAttribute('w:ascii') || rFonts.getAttribute('w:hAnsi') || '' : '';
+            level.bullet = bulletCharacter(level.lvlText || '', font);
+            if (childElement(lvl, 'lvlPicBulletId')) level.picture = true;
+        }
+        const start = integerValue(childElement(lvl, 'start'));
+        if (start !== null) level.start = start;
         return level;
     }
 
@@ -2673,6 +2727,9 @@ class DocxParser {
                 // A level without w:numFmt is decimal
                 paragraph.numbering.format = definition.format || 'decimal';
                 paragraph.numbering.lvlText = definition.lvlText || '';
+                for (const key of ['bullet', 'picture', 'start']) {
+                    if (definition[key] !== undefined) paragraph.numbering[key] = definition[key];
+                }
             }
         }
 
@@ -2698,6 +2755,10 @@ class DocxParser {
         // Line heights, tab stops and borders the conversion loses, with the paragraph's text as the hint.
         // A paragraph the generator doesn't write as one has no line height, stops or borders to lose.
         if (paragraphIsWritten(paragraph, inCell)) {
+            // A list marker the UDF list attributes approximate (see listMarkerApproximated)
+            if (paragraph.numbering && listMarkerApproximated(paragraph.numbering)) {
+                this.addFinding('listMarkers', shortExample(paragraphText(paragraph)));
+            }
             if (this.hasParagraphBorder(style.paragraph, own)) {
                 this.addFinding('paragraphBorders', shortExample(paragraphText(paragraph)));
             }

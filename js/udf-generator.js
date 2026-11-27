@@ -419,8 +419,10 @@ class UdfGenerator {
     }
 
     /**
-     * Build the list attributes of a list paragraph
-     * @param {Object} numbering - Paragraph numbering (level, numId and, if numbering.xml defines it, format and lvlText)
+     * Build the list attributes of a list paragraph. A bullet level gets the documented BulletType
+     * that draws its bullet character (see bulletType), or BULLET_TYPE_ELLIPSE when none does.
+     * @param {Object} numbering - Paragraph numbering (level, numId and, if numbering.xml defines it,
+     *   format, lvlText and bullet)
      * @returns {string} Attributes string, with a leading space, or '' if the level isn't a list
      */
     buildListAttrs(numbering) {
@@ -435,7 +437,10 @@ class UdfGenerator {
         }
 
         if (format === 'none') return '';
-        if (format === 'bullet') return ` Bulleted="true" BulletType="BULLET_TYPE_ELLIPSE"${list}`;
+        if (format === 'bullet') {
+            const type = (!numbering.picture && bulletType(numbering.bullet)) || 'BULLET_TYPE_ELLIPSE';
+            return ` Bulleted="true" BulletType="${type}"${list}`;
+        }
         return ` Numbered="true" NumberType="${this.numberType(numbering)}"${list}`;
     }
 

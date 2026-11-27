@@ -362,6 +362,56 @@ function paragraphIsWritten(paragraph, inCell = false) {
   return !paragraph.runs.some(run => run.type === 'pageBreak') || paragraph.runs.some(becomesText);
 }
 
+// The bullet characters each documented BulletType draws (Docs.md, "Madde İşareti Türleri":
+// ELLIPSE •, RECTANGLE ■, ARROW ➤, DIAMOND ◆, DIAMOND_2 ◊, TRIANGLE ▲, RECTANGLE_D □), with the
+// Word bullet glyphs closest to each. A bullet character not listed has no documented equivalent.
+const BULLET_TYPES = {
+  BULLET_TYPE_ELLIPSE: ['•', '●', '⋅', '·'],
+  BULLET_TYPE_RECTANGLE: ['■', '▪'],
+  BULLET_TYPE_RECTANGLE_D: ['□', '❑', '❒'],
+  BULLET_TYPE_DIAMOND: ['◆', '♦', '❖', '⬩'],
+  BULLET_TYPE_DIAMOND_2: ['◊'],
+  BULLET_TYPE_TRIANGLE: ['▲'],
+  BULLET_TYPE_ARROW: ['➤', '➢', '►']
+};
+
+// Number formats (w:numFmt) a UDF NumberType family keeps, and the characters after a level's
+// placeholder that its NumberType keeps: "." (DOT) and ")" (PARENTHESIS) for every family, and
+// "-" (TRE) for decimal only
+const LIST_NUMBER_FORMATS = ['decimal', 'lowerLetter', 'upperLetter', 'lowerRoman', 'upperRoman'];
+
+/**
+ * The documented BulletType for a list level's bullet character
+ * @param {string} [bullet] - The level's bullet as Unicode text (see DocxParser.parseLevel)
+ * @returns {string|null} BULLET_TYPE_* value, or null when no documented type draws it
+ */
+function bulletType(bullet) {
+  if (!bullet) return null;
+  const type = Object.keys(BULLET_TYPES).find(name => BULLET_TYPES[name].includes(bullet));
+  return type || null;
+}
+
+/**
+ * Whether the UDF list attributes can't keep a list paragraph's marker as Word draws it: a bullet
+ * with no documented BulletType (another character, several, none, or a picture bullet), or a
+ * numbered level whose format has no NumberType family, whose level text isn't just its own
+ * number followed by a suffix its NumberType keeps, or whose numbering doesn't start at 1. A list
+ * missing from numbering.xml (format undefined) or a level without a number (none) has no marker
+ * to compare, so it isn't approximated.
+ * @param {Object} numbering - Paragraph numbering (level, and from numbering.xml format, lvlText,
+ *   bullet, picture and start)
+ * @returns {boolean}
+ */
+function listMarkerApproximated(numbering) {
+  const { level, format, lvlText = '', start } = numbering;
+  if (format === undefined || format === 'none') return false;
+  if (format === 'bullet') return Boolean(numbering.picture) || !bulletType(numbering.bullet);
+  if (!LIST_NUMBER_FORMATS.includes(format)) return true;
+  if (start !== undefined && start !== 1) return true;
+  const suffixes = format === 'decimal' ? ['.', ')', '-'] : ['.', ')'];
+  return !suffixes.some(suffix => lvlText === `%${level + 1}${suffix}`);
+}
+
 // Word ML namespace
 const WORD_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const DRAWING_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main';
