@@ -258,7 +258,7 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
     'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
     'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'doubleStrikethrough',
-    'listMarkers', 'paragraphBorders', 'hyperlinks'];
+    'underlineStyles', 'listMarkers', 'paragraphBorders', 'paragraphShading', 'hyperlinks'];
 
 // The scheme a link's address starts with (http://, https://, ftp://, ..., or mailto:), left off its
 // hyperlinks example and when checking whether the link's text shows the address
@@ -275,6 +275,12 @@ const HYPERLINK_SWITCHES_WITH_ARGUMENT = ['\\l', '\\o', '\\t'];
 // Vertical alignments a run can have (w:vertAlign w:val, ST_VerticalAlignRun, ECMA-376 Part 1, 17.18.96).
 // Superscript is written; subscript has no UDF attribute, so it stays on the baseline and is reported.
 const VERTICAL_ALIGNMENTS = ['baseline', 'superscript', 'subscript'];
+
+// Underline styles (w:u w:val, ST_Underline, ECMA-376 Part 1, 17.18.99) other than single and none.
+// The UDF has one underline, so text with any of these is written underline="true", a single
+// underline, and reported (underlineStyles).
+const STYLED_UNDERLINES = ['words', 'double', 'thick', 'dotted', 'dottedHeavy', 'dash', 'dashedHeavy', 'dashLong',
+    'dashLongHeavy', 'dotDash', 'dashDotHeavy', 'dotDotDash', 'dashDotDotHeavy', 'wave', 'wavyHeavy', 'wavyDouble'];
 
 // The edges of a paragraph's border (w:pBdr, ECMA-376 Part 1, 17.3.1.24): the box's four sides,
 // the line between paragraphs with the same borders, and a bar beside it
@@ -459,6 +465,35 @@ function bulletCharacter(lvlText, font) {
 function integerValue(element) {
     const value = element ? (element.getAttribute('w:val') || '').trim() : '';
     return /^-?\d+$/.test(value) ? Number(value) : null;
+}
+
+/**
+ * The color a shading (w:shd, in a run's w:rPr or a paragraph's w:pPr) draws: a solid pattern is
+ * drawn entirely in its pattern color (w:color), any other pattern is approximated by its
+ * background fill (w:fill)
+ * @param {Element|null} shd - The w:shd element
+ * @returns {string|null|undefined} '#RRGGBB'; null when it draws nothing ("nil", or an "auto" or
+ *   missing color), which overrides an earlier layer; undefined without the element, or for a
+ *   color that isn't 6 hex digits, which is ignored
+ */
+function shadingColor(shd) {
+    if (!shd) return undefined;
+    const pattern = shd.getAttribute('w:val');
+    const solidColor = pattern === 'solid' ? shd.getAttribute('w:color') : '';
+    const fill = solidColor && solidColor !== 'auto' ? solidColor : shd.getAttribute('w:fill');
+    if (pattern === 'nil' || !fill || fill === 'auto') return null;
+    if (/^[0-9A-Fa-f]{6}$/.test(fill)) return '#' + fill.toUpperCase();
+    return undefined;
+}
+
+/**
+ * Whether resolved run formatting (see parseRunFormatting) has an underline the UDF can only write
+ * as a single one (see STYLED_UNDERLINES)
+ * @param {Object} formatting
+ * @returns {boolean}
+ */
+function hasStyledUnderline(formatting) {
+    return formatting.underline === true && STYLED_UNDERLINES.includes(formatting.underlineStyle);
 }
 
 /**
@@ -1592,7 +1627,9 @@ class DocxParser {
      * @param {Array<[string, string]>} [findings] - Receives a [code, example] pair for each symbol
      *   (symbols), each equation (equations), each paragraph with hidden content (hiddenText), with
      *   unaccepted changes (trackedChanges, see hasRevisions), with subscript text (subscript), with
-     *   double-struck text (doubleStrikethrough), with a border (paragraphBorders, see hasParagraphBorder),
+     *   double-struck text (doubleStrikethrough), with a styled underline (underlineStyles, see
+     *   hasStyledUnderline), with a border (paragraphBorders, see hasParagraphBorder), with shading
+     *   (paragraphShading, see hasParagraphShading),
      *   and for each link whose address its text doesn't show (hyperlinks, see unshownLinkAddresses)
      * @param {Object} [relationships] - The notes part's relationships (see readRelationships)
      * @returns {string}
@@ -1606,6 +1643,7 @@ class DocxParser {
             const hidden = { found: false, text: '' };
             let subscript = false;
             let doubleStruck = false;
+            let styledUnderline = false;
             // Runs, and equations in place of the runs inside them. Deleted and moved-away runs
             // are left out, as in the body (see paragraphRuns).
             const runs = Array.from(para.getElementsByTagName('*')).filter(element =>
@@ -1619,7 +1657,9 @@ class DocxParser {
                     if (math.trim() !== '') {
                         text += math;
                         findings.push(['equations', shortExample(math)]);
-                        if (this.parseRunFormatting(run, style.run).doubleStrike) doubleStruck = true;
+                        const formatting = this.parseRunFormatting(run, style.run);
+                        if (formatting.doubleStrike) doubleStruck = true;
+                        if (hasStyledUnderline(formatting)) styledUnderline = true;
                     }
                     continue;
                 }
@@ -1647,6 +1687,7 @@ class DocxParser {
                 const shown = text.slice(runStart).trim() !== '';
                 if (formatting.vertAlign === 'subscript' && shown) subscript = true;
                 if (formatting.doubleStrike && shown) doubleStruck = true;
+                if (hasStyledUnderline(formatting) && shown) styledUnderline = true;
             }
             if (hidden.found) findings.push(['hiddenText', shortExample(hidden.text)]);
             for (const example of this.unshownLinkAddresses(para, this.paragraphRuns(para), style.run, relationships)) {
@@ -1655,8 +1696,13 @@ class DocxParser {
             if (this.hasRevisions(para)) findings.push(['trackedChanges', shortExample(text.slice(start).trim())]);
             if (subscript) findings.push(['subscript', shortExample(text.slice(start).trim())]);
             if (doubleStruck) findings.push(['doubleStrikethrough', shortExample(text.slice(start).trim())]);
-            if (this.hasParagraphBorder(style.paragraph, this.readParagraphProperties(pPr))) {
+            if (styledUnderline) findings.push(['underlineStyles', shortExample(text.slice(start).trim())]);
+            const own = this.readParagraphProperties(pPr);
+            if (this.hasParagraphBorder(style.paragraph, own)) {
                 findings.push(['paragraphBorders', shortExample(text.slice(start).trim())]);
+            }
+            if (this.hasParagraphShading(style.paragraph, own)) {
+                findings.push(['paragraphShading', shortExample(text.slice(start).trim())]);
             }
             text += ' ';
         }
@@ -2110,8 +2156,13 @@ class DocxParser {
         const lang = childElement(rPr, 'lang');
         if (lang && lang.getAttribute('w:val')) props.lang = lang.getAttribute('w:val');
 
+        // The underline, and its style (w:u w:val), which resolve together: a later layer's single or
+        // none replaces an inherited style (see STYLED_UNDERLINES)
         const u = childElement(rPr, 'u');
-        if (u && u.hasAttribute('w:val')) props.underline = u.getAttribute('w:val') !== 'none';
+        if (u && u.hasAttribute('w:val')) {
+            props.underlineStyle = u.getAttribute('w:val');
+            props.underline = props.underlineStyle !== 'none';
+        }
 
         // Superscript or subscript (w:vertAlign); an explicit baseline cancels an inherited one
         const vertAlign = childElement(rPr, 'vertAlign');
@@ -2145,17 +2196,9 @@ class DocxParser {
         if (highlightVal === 'none') props.highlight = null;
         else if (Object.hasOwn(HIGHLIGHT_COLORS, highlightVal)) props.highlight = '#' + HIGHLIGHT_COLORS[highlightVal];
 
-        // Run shading (w:shd): a solid pattern is drawn entirely in its pattern color (w:color),
-        // any other pattern is approximated by its background fill (w:fill). "nil", or an "auto"
-        // or missing color, is null; a color that isn't 6 hex digits is ignored.
-        const shd = childElement(rPr, 'shd');
-        if (shd) {
-            const pattern = shd.getAttribute('w:val');
-            const solidColor = pattern === 'solid' ? shd.getAttribute('w:color') : '';
-            const fill = solidColor && solidColor !== 'auto' ? solidColor : shd.getAttribute('w:fill');
-            if (pattern === 'nil' || !fill || fill === 'auto') props.shading = null;
-            else if (/^[0-9A-Fa-f]{6}$/.test(fill)) props.shading = '#' + fill.toUpperCase();
-        }
+        // Run shading (w:shd), see shadingColor
+        const shading = shadingColor(childElement(rPr, 'shd'));
+        if (shading !== undefined) props.shading = shading;
 
         return props;
     }
@@ -2231,6 +2274,11 @@ class DocxParser {
             }
             if (Object.keys(edges).length > 0) props.borderEdges = edges;
         }
+
+        // Paragraph shading (w:shd, see shadingColor), which the UDF can't draw: the documented
+        // <paragraph> has no background color. It is only reported (see hasParagraphShading).
+        const shading = shadingColor(childElement(pPr, 'shd'));
+        if (shading !== undefined) props.shading = shading;
 
         return props;
     }
@@ -2765,10 +2813,11 @@ class DocxParser {
 
         // The outline level only locates findings (see headingKind); it isn’t written. Page break
         // before is written as a page break ahead of a body paragraph (see bodyPageBreakBefore).
-        // Borders can't be written; they are reported below.
+        // Borders and shading can't be written; they are reported below.
         delete paragraph.outlineLevel;
         delete paragraph.pageBreakBefore;
         delete paragraph.borderEdges;
+        delete paragraph.shading;
 
         // Tab stops: each layer adds to or clears the stops of the layers under it
         delete paragraph.tabs;
@@ -2797,9 +2846,9 @@ class DocxParser {
 
         // Get runs (text with formatting). Hidden runs add nothing; their text is collected for the finding.
         const hidden = { found: false, text: '' };
-        const doubleStruck = { found: false };
+        const lost = { doubleStrike: false, underlineStyle: false };
         for (const run of runs) {
-            paragraph.runs.push(...this.parseRun(run, style.run, hidden, doubleStruck));
+            paragraph.runs.push(...this.parseRun(run, style.run, hidden, lost));
         }
         if (hidden.found) this.addFinding('hiddenText', shortExample(hidden.text));
 
@@ -2816,10 +2865,13 @@ class DocxParser {
         if (paragraph.runs.some(run => run.subscript && run.text.trim() !== '')) this.addFinding('subscript', shortExample(paragraphText(paragraph)));
 
         // Double-struck text, written with a single strikethrough (see parseRun)
-        if (doubleStruck.found) this.addFinding('doubleStrikethrough', shortExample(paragraphText(paragraph)));
+        if (lost.doubleStrike) this.addFinding('doubleStrikethrough', shortExample(paragraphText(paragraph)));
 
-        // Line heights, tab stops and borders the conversion loses, with the paragraph's text as the hint.
-        // A paragraph the generator doesn't write as one has no line height, stops or borders to lose.
+        // Underline styles other than single, written as a single underline (see parseRun)
+        if (lost.underlineStyle) this.addFinding('underlineStyles', shortExample(paragraphText(paragraph)));
+
+        // Line heights, tab stops, borders and shading the conversion loses, with the paragraph's text as
+        // the hint. A paragraph the generator doesn't write as one has no line height, stops, borders or shading to lose.
         if (paragraphIsWritten(paragraph, inCell)) {
             // A list marker the UDF list attributes approximate (see listMarkerApproximated)
             if (paragraph.numbering && listMarkerApproximated(paragraph.numbering)) {
@@ -2827,6 +2879,9 @@ class DocxParser {
             }
             if (this.hasParagraphBorder(style.paragraph, own)) {
                 this.addFinding('paragraphBorders', shortExample(paragraphText(paragraph)));
+            }
+            if (this.hasParagraphShading(style.paragraph, own)) {
+                this.addFinding('paragraphShading', shortExample(paragraphText(paragraph)));
             }
             if (LOST_LINE_RULES.includes(paragraph.lineRule)) {
                 this.addFinding('lineSpacing', shortExample(paragraphText(paragraph)));
@@ -2974,26 +3029,41 @@ class DocxParser {
     }
 
     /**
+     * Whether a paragraph is shaded (w:shd in w:pPr), which the UDF can't write: the nearest of the
+     * paragraph's own w:pPr, the paragraph style chain and the document defaults that sets a shading
+     * draws a color (see shadingColor), so a later w:val="nil" or "auto" fill clears an inherited one
+     * @param {Object} styleParagraph - The paragraph style's paragraph properties (see resolveStyle)
+     * @param {Object} own - The paragraph's own properties (see readParagraphProperties)
+     * @returns {boolean}
+     */
+    hasParagraphShading(styleParagraph, own) {
+        return Boolean({ ...this.styles.defaults.paragraph, ...styleParagraph, ...own }.shading);
+    }
+
+    /**
      * Parse a run element (text with formatting)
      * @param {Element} run - The run element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @param {{found: boolean, text: string}} [hidden] - Set when the run is hidden (w:vanish) and
      *   holds content: found becomes true and the run's text is appended to text
-     * @param {{found: boolean}} [doubleStruck] - found becomes true when the run is double-struck
-     *   (w:dstrike) and shows text other than whitespace
+     * @param {{doubleStrike: boolean, underlineStyle: boolean}} [lost] - Formatting the UDF can't keep,
+     *   set when the run shows text other than whitespace: doubleStrike becomes true when it is
+     *   double-struck (w:dstrike), and underlineStyle when its underline isn't single (see hasStyledUnderline)
      * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image,
      *   footnoteRef, endnoteRef). Empty for a hidden run: Word neither shows nor prints it. Text of
      *   a superscript run has superscript: true; text of a subscript run has subscript: true and is
      *   written on the baseline, as the UDF has no subscript. Text of a double-struck run (w:dstrike)
-     *   has strike: true, as the UDF has no double strikethrough.
+     *   has strike: true, as the UDF has no double strikethrough. A styled underline (w:u other than
+     *   single) is written as underline: true, as the UDF has one underline.
      */
-    parseRun(run, paragraphRun = {}, hidden = null, doubleStruck = null) {
-        if (run.namespaceURI === MATH_NS) return this.parseEquation(run, paragraphRun, hidden, doubleStruck);
+    parseRun(run, paragraphRun = {}, hidden = null, lost = null) {
+        if (run.namespaceURI === MATH_NS) return this.parseEquation(run, paragraphRun, hidden, lost);
         const items = [];
+        const resolved = this.parseRunFormatting(run, paragraphRun);
         // hidden, caps, smallCaps and lang decide how the run's text is written, vertAlign whether
-        // it is superscript or subscript, and doubleStrike whether it is struck; they aren't text attributes
-        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, doubleStrike, ...formatting } =
-            this.parseRunFormatting(run, paragraphRun);
+        // it is superscript or subscript, doubleStrike whether it is struck and underlineStyle only
+        // whether it is reported; they aren't text attributes
+        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, doubleStrike, underlineStyle, ...formatting } = resolved;
         if (vertAlign === 'superscript') formatting.superscript = true;
         else if (vertAlign === 'subscript') formatting.subscript = true;
         if (doubleStrike) formatting.strike = true;
@@ -3077,8 +3147,9 @@ class DocxParser {
             }
         }
 
-        if (doubleStrike && doubleStruck && items.some(item => item.type === 'text' && item.text.trim() !== '')) {
-            doubleStruck.found = true;
+        if (lost && items.some(item => item.type === 'text' && item.text.trim() !== '')) {
+            if (doubleStrike) lost.doubleStrike = true;
+            if (hasStyledUnderline(resolved)) lost.underlineStyle = true;
         }
         return items;
     }
@@ -3092,19 +3163,21 @@ class DocxParser {
      * @param {Element} oMath - The m:oMath element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @param {{found: boolean, text: string}} [hidden] - See parseRun; set by the equation's hidden runs
-     * @param {{found: boolean}} [doubleStruck] - See parseRun; set when the equation is double-struck
+     * @param {{doubleStrike: boolean, underlineStyle: boolean}} [lost] - See parseRun; set by the
+     *   equation's double strikethrough and styled underline
      * @returns {Array<Object>} Empty for an equation with no text, or one all hidden
      */
-    parseEquation(oMath, paragraphRun = {}, hidden = null, doubleStruck = null) {
+    parseEquation(oMath, paragraphRun = {}, hidden = null, lost = null) {
         const text = this.equationText(oMath, paragraphRun, hidden);
         if (text.trim() === '') return [];
+        const resolved = this.parseRunFormatting(oMath, paragraphRun);
         // hidden, caps, smallCaps, lang and vertAlign don't apply to the equation's text as a whole;
-        // double strikethrough is written as a strikethrough, as for a run
-        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, doubleStrike, ...formatting } =
-            this.parseRunFormatting(oMath, paragraphRun);
-        if (doubleStrike) {
-            formatting.strike = true;
-            if (doubleStruck) doubleStruck.found = true;
+        // double strikethrough is written as a strikethrough and a styled underline as an underline, as for a run
+        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, doubleStrike, underlineStyle, ...formatting } = resolved;
+        if (doubleStrike) formatting.strike = true;
+        if (lost) {
+            if (doubleStrike) lost.doubleStrike = true;
+            if (hasStyledUnderline(resolved)) lost.underlineStyle = true;
         }
 
         this.addFinding('equations', shortExample(text));
