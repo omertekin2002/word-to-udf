@@ -33,6 +33,7 @@ const FINDING_KEYS = {
     trackedChanges: 'notes.trackedChanges',
     sectionLayout: 'notes.sectionLayout',
     subscript: 'notes.subscript',
+    doubleStrikethrough: 'notes.doubleStrikethrough',
     paragraphBorders: 'notes.paragraphBorders'
 };
 
@@ -41,7 +42,8 @@ const PROGRESS_STAGES = ['progress.parsing', 'progress.converting', 'progress.co
 
 // Findings whose examples are document text, shown in quotes; the others are format names
 const QUOTED_EXAMPLE_CODES = ['hiddenText', 'nestedTables', 'missingImage', 'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops',
-    'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'paragraphBorders'];
+    'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'doubleStrikethrough',
+    'paragraphBorders'];
 
 // What separates the parts of a location line
 const LOCATION_SEPARATOR = ' · ';
