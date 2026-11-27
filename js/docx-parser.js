@@ -863,6 +863,9 @@ class DocxParser {
         this.location = { kind: 'document' };
         this.body = { paragraphs: 0, tables: 0, headings: { outline: null, petition: null } };
         this.documentParagraphs = null;
+        // Each parsed paragraph's resolved paragraph style id and whether it has contextual
+        // spacing (see applyContextualSpacing)
+        this.contextualSpacing = new WeakMap();
         this.endnotesMoved = false;
         // Decompression limits, in bytes; tests lower them instead of building huge files
         this.limits = { part: MAX_PART_BYTES, total: MAX_TOTAL_BYTES };
@@ -896,6 +899,7 @@ class DocxParser {
             this.location = { kind: 'document' };
             this.body = { paragraphs: 0, tables: 0, headings: { outline: null, petition: null } };
             this.documentParagraphs = null;
+            this.contextualSpacing = new WeakMap();
             this.endnotesMoved = false;
             this.embeddedChunks = 0;
             this.partBytes = new Map();
@@ -1366,14 +1370,23 @@ class DocxParser {
         await this.extractImages(shownRuns, this.partRelationships, true);
 
         // Every paragraph is written, as in a table cell (see paragraphIsWritten), except one
-        // Word's Accept All removes (see parseParagraphBlocks)
-        const parsed = paragraphs.flatMap(para => {
-            const paragraph = this.parseParagraph(para, this.paragraphRuns(para), true);
-            if (paragraphMarkDeleted(para) && nothingLeft(paragraph.runs)) return [];
+        // Word's Accept All removes (see parseParagraphBlocks). A table, which isn't converted,
+        // still separates the paragraphs on either side of it for contextual spacing.
+        const parsed = [];
+        const sequence = [];
+        for (const block of blocks) {
+            if (block.localName !== 'p') {
+                if (block.localName === 'tbl' || block.localName === 'altChunk') sequence.push(null);
+                continue;
+            }
+            const paragraph = this.parseParagraph(block, this.paragraphRuns(block), true);
+            if (paragraphMarkDeleted(block) && nothingLeft(paragraph.runs)) continue;
             if (paragraph.runs.some(run => run.omittedPictures)) dropped = true;
             paragraph.runs = paragraph.runs.filter(run => HEADER_FOOTER_RUN_TYPES.includes(run.type));
-            return [paragraph];
-        });
+            parsed.push(paragraph);
+            sequence.push(paragraph);
+        }
+        this.applyContextualSpacing(sequence);
         // A part whose only text is hidden (w:vanish), or whose pictures are all missing, shows nothing
         if (!parsed.some(paragraph => paragraph.runs.some(showsContent))) return { paragraphs: null, dropped };
         return { paragraphs: parsed, dropped };
@@ -1939,10 +1952,19 @@ class DocxParser {
      * @returns {{run: Object, paragraph: Object}} See resolveStyle
      */
     paragraphStyle(pPr) {
+        return this.resolveStyle('paragraph', this.paragraphStyleId(pPr));
+    }
+
+    /**
+     * The id of a paragraph's paragraph style: its w:pStyle when styles.xml defines it, else the
+     * default paragraph style's
+     * @param {Element|null} pPr - The paragraph's w:pPr
+     * @returns {string|null} null when there is no style at all
+     */
+    paragraphStyleId(pPr) {
         const pStyle = pPr && childElement(pPr, 'pStyle');
         const id = pStyle && pStyle.getAttribute('w:val');
-        return this.resolveStyle('paragraph',
-            this.styles.definitions.paragraph.has(id) ? id : this.styles.defaultParagraph);
+        return this.styles.definitions.paragraph.has(id) ? id : this.styles.defaultParagraph;
     }
 
     /**
@@ -2070,6 +2092,11 @@ class DocxParser {
         // Page break before (w:pageBreakBefore), which starts a body paragraph on a new page (see bodyPageBreakBefore)
         const pageBreakBefore = childElement(pPr, 'pageBreakBefore');
         if (pageBreakBefore) props.pageBreakBefore = this.isOn(pageBreakBefore);
+
+        // Contextual spacing (w:contextualSpacing), which drops the space between paragraphs of
+        // the same style (see applyContextualSpacing)
+        const contextualSpacing = childElement(pPr, 'contextualSpacing');
+        if (contextualSpacing) props.contextualSpacing = this.isOn(contextualSpacing);
 
         // Paragraph borders (w:pBdr), which the UDF can't draw: whether each edge it sets draws a
         // line. Edges inherit one by one (see resolveStyle and hasParagraphBorder).
@@ -2262,11 +2289,15 @@ class DocxParser {
         const finalSection = childElements(body, 'sectPr').pop() || null;
         const breaks = children.map(child => child.localName === 'p' ? sectionBreakOf(child) : null).filter(Boolean);
         const nextSection = new Map(breaks.map((sectPr, i) => [sectPr, i + 1 < breaks.length ? breaks[i + 1] : finalSection]));
+        // The body's own paragraphs, for contextual spacing; null where a table or embedded content is.
+        // Page breaks and section breaks don't separate paragraphs: Word applies it across them.
+        const sequence = [];
 
         for (const child of children) {
             if (child.localName === 'p') {
                 this.location = { kind: 'paragraph', paragraph: ++this.body.paragraphs, ...headingOf() };
                 const { paragraph, blocks } = this.parseParagraphBlocks(child);
+                if (paragraph) sequence.push(paragraph);
                 // Page breaks are block-level pageBreak items between the paragraphs and tables: the
                 // generator writes one only when something follows it, and never two in a row
                 if (paragraph && this.bodyPageBreakBefore(child)) elements.push({ type: 'pageBreak' });
@@ -2284,6 +2315,7 @@ class DocxParser {
                 const kind = paragraph && this.headingKind(child, paragraph);
                 if (kind) this.body.headings[kind] = shortExample(paragraphText(paragraph));
             } else if (child.localName === 'tbl') {
+                sequence.push(null);
                 const table = ++this.body.tables;
                 const heading = headingOf();
                 const parsed = this.parseTable(child, (row, cell) => {
@@ -2291,6 +2323,7 @@ class DocxParser {
                 });
                 if (parsed) elements.push(parsed);
             } else if (child.localName === 'altChunk') {
+                sequence.push(null);
                 // Embedded content takes a body paragraph's place: Word shows it where its first paragraph would be
                 this.location = { kind: 'paragraph', paragraph: ++this.body.paragraphs, ...headingOf() };
                 this.reportEmbeddedChunk(child);
@@ -2300,6 +2333,7 @@ class DocxParser {
         // The final section's columns: the <pageFormat> is written from its page setup, but not its columns
         if (finalSection && hasColumns(finalSection)) this.addFinding('sectionLayout', '', { kind: 'document' });
 
+        this.applyContextualSpacing(sequence);
         return elements;
     }
 
@@ -2400,21 +2434,50 @@ class DocxParser {
      */
     parseBlocks(container, inCell = false) {
         const elements = [];
+        // The container's own paragraphs, for contextual spacing; null where a table or embedded content is
+        const sequence = [];
 
         for (const child of this.contentChildren(container)) {
             const localName = child.localName;
 
             if (localName === 'p') {
-                elements.push(...this.parseParagraphBlocks(child, inCell).blocks);
+                const { paragraph, blocks } = this.parseParagraphBlocks(child, inCell);
+                if (paragraph) sequence.push(paragraph);
+                elements.push(...blocks);
             } else if (localName === 'tbl') {
+                sequence.push(null);
                 const table = this.parseTable(child);
                 if (table) elements.push(table);
             } else if (localName === 'altChunk') {
+                sequence.push(null);
                 this.reportEmbeddedChunk(child);
             }
         }
 
+        this.applyContextualSpacing(sequence);
         return elements;
+    }
+
+    /**
+     * Apply contextual spacing (w:contextualSpacing, ECMA-376 17.3.1.9) to a sequence of
+     * paragraphs: when a paragraph that has it is next to one of the same paragraph style, its
+     * space on that side is dropped. Each paragraph's own setting decides only its own spacing:
+     * the first of two loses its space after, the second its space before. Paragraphs are
+     * adjacent when they follow each other in the sequence; a paragraph left out isn't in it (see
+     * parseParagraphBlocks), and text boxes anchored in a paragraph are sequences of their own.
+     * @param {Array<Object|null>} sequence - Parsed paragraphs in document order, with null where
+     *   a table (or other block) stands between two of them
+     */
+    applyContextualSpacing(sequence) {
+        for (let i = 1; i < sequence.length; i++) {
+            const previous = sequence[i - 1];
+            const next = sequence[i];
+            const before = previous && this.contextualSpacing.get(previous);
+            const after = next && this.contextualSpacing.get(next);
+            if (!before || !after || before.style !== after.style) continue;
+            if (before.on && previous.spaceAfter) previous.spaceAfter = 0;
+            if (after.on && next.spaceBefore) next.spaceBefore = 0;
+        }
     }
 
     /**
@@ -2572,6 +2635,11 @@ class DocxParser {
         const own = this.readParagraphProperties(pPr);
         Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, own);
         paragraph.lineSpacing = this.lineSpacing(paragraph);
+
+        // Contextual spacing is settled against the neighbouring paragraphs once the sequence the
+        // paragraph is in has been parsed (see applyContextualSpacing)
+        this.contextualSpacing.set(paragraph, { style: this.paragraphStyleId(pPr), on: paragraph.contextualSpacing === true });
+        delete paragraph.contextualSpacing;
 
         // The outline level only locates findings (see headingKind); it isn’t written. Page break
         // before is written as a page break ahead of a body paragraph (see bodyPageBreakBefore).
