@@ -71,6 +71,9 @@ const CHUNK_CONTENT_TYPES = { mht: 'message/rfc822', html: 'text/html', htm: 'te
  *   that is the whole part as it is
  * @param {Object<string,Buffer>} [options.files] - More package parts, path -> bytes, with no relationship, e.g.
  *   { 'word/media/logo.png': PNG } for a picture only a header relates to
+ * @param {Object<string,Object<string,string>>} [options.links] - External hyperlink relationships
+ *   (TargetMode="External"), by the name under word/ of the part they belong to, then id -> address, e.g.
+ *   { 'document.xml': { rIdLink1: 'https://example.org/karar' }, 'footnotes.xml': { rIdNoteLink: '...' } }
  * @returns {Promise<Buffer>}
  */
 async function buildDocx(bodyXml, options = {}) {
@@ -78,18 +81,24 @@ async function buildDocx(bodyXml, options = {}) {
     const defaults = [];
     const overrides = [];
     const rels = [];
+    const links = options.links || {};
+    const linkRels = name => Object.entries(links[name] || {}).map(([relId, address]) =>
+        `<Relationship Id="${relId}" Type="${RELATIONSHIP_TYPE}hyperlink" Target="${address}" TargetMode="External"/>`);
     const wordPart = (name, rootTag, inner, type = rootTag, id = `rId_${rootTag}`, partRels = null) => {
         parts.push([`word/${name}`,
             `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:${rootTag} ${NAMESPACES}>${inner}</w:${rootTag}>`]);
         overrides.push(`<Override PartName="/word/${name}" ContentType="${WORDML_CONTENT_TYPE}${type}+xml"/>`);
         rels.push(`<Relationship Id="${id}" Type="${RELATIONSHIP_TYPE}${type}" Target="${name}"/>`);
-        if (partRels) {
+        const own = [
+            ...Object.entries(partRels || {}).map(([relId, target]) =>
+                `<Relationship Id="${relId}" Type="${RELATIONSHIP_TYPE}image" Target="${target}"/>`),
+            ...linkRels(name)
+        ];
+        if (own.length > 0) {
             parts.push([`word/_rels/${name}.rels`,
                 '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
                 '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-                Object.entries(partRels).map(([relId, target]) =>
-                    `<Relationship Id="${relId}" Type="${RELATIONSHIP_TYPE}image" Target="${target}"/>`).join('') +
-                '</Relationships>']);
+                own.join('') + '</Relationships>']);
         }
     };
 
@@ -146,6 +155,7 @@ async function buildDocx(bodyXml, options = {}) {
         if (!defaults.includes(entry)) defaults.push(entry);
     }
 
+    rels.push(...linkRels('document.xml'));
     if (rels.length > 0) {
         parts.push(['word/_rels/document.xml.rels',
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
