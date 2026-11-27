@@ -41,7 +41,9 @@ const HIGHLIGHT_COLORS = {
 };
 
 // On/off properties that toggle, rather than override, between the paragraph and
-// character style levels (ECMA-376 Part 1, 17.7.3)
+// character style levels (ECMA-376 Part 1, 17.7.3). Double strikethrough (w:dstrike) isn't
+// one: unlike w:strike, the standard doesn't call it a toggle property (17.3.2.9), so a later
+// layer simply overrides it.
 const TOGGLE_PROPERTIES = ['bold', 'italic', 'strike', 'hidden', 'caps', 'smallCaps'];
 
 // Run children that hold a picture, text box, chart or shape: DrawingML w:drawing, and the
@@ -196,6 +198,15 @@ const TABLE_EDGES = {
     insideV: ['insideV']
 };
 
+// Table alignments (w:tblPr/w:jc w:val) that don't put the table at the left margin. left, start
+// and none are the default; the UDF's <table> has no alignment (see tablePlacement)
+const MOVED_TABLE_ALIGNMENTS = ['center', 'right', 'end'];
+
+// How far a table's indent (w:tblInd, in twips) may be from 0 before it is reported (see
+// tablePlacement): ⅛ in. Word 2007–2010 indent a table by -108 or -115 twips by default, only so
+// that the cell text lines up with the margin.
+const TABLE_INDENT_TOLERANCE = 180;
+
 // Cell edges a w:tcBorders sets
 const CELL_EDGES = {
     top: TABLE_EDGES.top,
@@ -255,11 +266,30 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024;
 // conversion drops or simplifies, so the user can fix it in Word before filing
 const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables', 'missingImage', 'unsupportedImage',
     'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops', 'symbols', 'tableBorders',
-    'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'paragraphBorders'];
+    'tablePlacement', 'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'doubleStrikethrough',
+    'underlineStyles', 'listMarkers', 'paragraphBorders', 'paragraphShading', 'hyperlinks'];
+
+// The scheme a link's address starts with (http://, https://, ftp://, ..., or mailto:), left off its
+// hyperlinks example and when checking whether the link's text shows the address
+const LINK_SCHEME = /^(?:[a-z][a-z0-9+.-]*:\/\/|mailto:)/i;
+
+// Run content that adds to a link's shown text (see unshownLinkAddresses), besides the whitespace
+// elements: text, symbols and non-breaking hyphens
+const LINK_TEXT_ELEMENTS = ['t', 'sym', 'noBreakHyphen'];
+
+// Switches of a HYPERLINK field instruction that take an argument (ECMA-376 Part 1, 17.16.5.25): the
+// bookmark (\l), the tooltip (\o) and the target frame (\t). The others (\m, \n) take none.
+const HYPERLINK_SWITCHES_WITH_ARGUMENT = ['\\l', '\\o', '\\t'];
 
 // Vertical alignments a run can have (w:vertAlign w:val, ST_VerticalAlignRun, ECMA-376 Part 1, 17.18.96).
 // Superscript is written; subscript has no UDF attribute, so it stays on the baseline and is reported.
 const VERTICAL_ALIGNMENTS = ['baseline', 'superscript', 'subscript'];
+
+// Underline styles (w:u w:val, ST_Underline, ECMA-376 Part 1, 17.18.99) other than single and none.
+// The UDF has one underline, so text with any of these is written underline="true", a single
+// underline, and reported (underlineStyles).
+const STYLED_UNDERLINES = ['words', 'double', 'thick', 'dotted', 'dottedHeavy', 'dash', 'dashedHeavy', 'dashLong',
+    'dashLongHeavy', 'dotDash', 'dashDotHeavy', 'dotDotDash', 'dashDotDotHeavy', 'wave', 'wavyHeavy', 'wavyDouble'];
 
 // The edges of a paragraph's border (w:pBdr, ECMA-376 Part 1, 17.3.1.24): the box's four sides,
 // the line between paragraphs with the same borders, and a bar beside it
@@ -355,6 +385,40 @@ function shortExample(text) {
 }
 
 /**
+ * The address a HYPERLINK field instruction links to: its first argument that is neither a switch
+ * nor a switch's argument, e.g. the address in HYPERLINK "<address>" \o "tip"
+ * @param {string} instruction - The field instruction (w:instrText of a complex field, w:instr of a simple one)
+ * @returns {string} '' for another field type, or a link to a bookmark only (HYPERLINK \l "name")
+ */
+function hyperlinkFieldAddress(instruction) {
+    const match = /^\s*HYPERLINK(?=[\s"]|$)([\s\S]*)$/i.exec(instruction);
+    if (!match) return '';
+    const tokens = Array.from(match[1].matchAll(/"([^"]*)"|(\S+)/g), ([, quoted, bare]) => ({ quoted: quoted !== undefined, text: quoted ?? bare }));
+    for (let i = 0; i < tokens.length; i++) {
+        const { quoted, text } = tokens[i];
+        if (!quoted && text.startsWith('\\')) {
+            if (HYPERLINK_SWITCHES_WITH_ARGUMENT.includes(text.toLowerCase())) i++;
+            continue;
+        }
+        if (text.trim() !== '') return text.trim();
+    }
+    return '';
+}
+
+/**
+ * Whether a link's text already shows its address: it contains the address, compared ignoring case,
+ * a leading scheme (see LINK_SCHEME), a leading www. and trailing slashes, so a text showing
+ * www.<domain> shows the address https://www.<domain>/
+ * @param {string} text - The link's shown text
+ * @param {string} address - Where it links to
+ * @returns {boolean}
+ */
+function linkShowsAddress(text, address) {
+    const core = address.trim().replace(LINK_SCHEME, '').replace(/^www\./i, '').replace(/\/+$/, '').toLowerCase();
+    return text.toLowerCase().includes(core);
+}
+
+/**
  * Unicode text of a symbol (w:sym), from SYMBOL_FONTS, and its symbols finding example: the
  * font and code, then an arrow and the text it became. A symbol left out has no arrow.
  * @param {Element} sym - The w:sym element
@@ -366,13 +430,79 @@ function symbolText(sym, runFont = '') {
     const font = (sym.getAttribute('w:font') || runFont || '').trim();
     const char = (sym.getAttribute('w:char') || '').trim().toUpperCase();
     const code = /^[0-9A-F]{1,4}$/.test(char) ? parseInt(char, 16) : -1;
-    const table = SYMBOL_FONTS[font.toLowerCase()];
-    // F0xx is the private use form of the code, 00xx the plain one
-    const highByte = code >> 8;
-    const text = table && code >= 0 && (highByte === 0xF0 || highByte === 0) &&
-        Object.prototype.hasOwnProperty.call(table, code & 0xFF) ? table[code & 0xFF] : '';
+    const text = symbolFontCharacter(font, code);
     const label = `${font || '?'} ${char || '?'}`;
     return { text, example: shortExample(text ? `${label} → ${text}` : label) };
+}
+
+/**
+ * Unicode text of a character code in a symbol font, from SYMBOL_FONTS
+ * @param {string} font - The font name
+ * @param {number} code - The character code: F0xx, the private use form, or 00xx, the plain one
+ * @returns {string} '' when the font has no table, or its table doesn't list the code
+ */
+function symbolFontCharacter(font, code) {
+    const table = SYMBOL_FONTS[font.trim().toLowerCase()];
+    const highByte = code >> 8;
+    return table && code >= 0 && (highByte === 0xF0 || highByte === 0) &&
+        Object.prototype.hasOwnProperty.call(table, code & 0xFF) ? table[code & 0xFF] : '';
+}
+
+/**
+ * The character a bullet list level draws: its level text (w:lvlText), read through its font
+ * (w:lvl/w:rPr/w:rFonts) when that is a symbol font in SYMBOL_FONTS, as for w:sym. A level text
+ * of one character a symbol font's table lists becomes that table's character; one in the private
+ * use form (F0xx) the table doesn't list has none; any other level text is drawn as written.
+ * @param {string} lvlText - The level text
+ * @param {string} font - The level's font, or ''
+ * @returns {string} The bullet as Unicode text, '' when it has no equivalent
+ */
+function bulletCharacter(lvlText, font) {
+    const characters = Array.from(lvlText);
+    if (!SYMBOL_FONTS[font.trim().toLowerCase()] || characters.length !== 1) return lvlText;
+    const code = characters[0].codePointAt(0);
+    const text = symbolFontCharacter(font, code);
+    if (text) return text;
+    return code >> 8 === 0xF0 ? '' : lvlText;
+}
+
+/**
+ * The whole number in an element's w:val, such as w:start's
+ * @param {Element|null} element
+ * @returns {number|null} null without the element, or for a w:val that isn't a whole number
+ */
+function integerValue(element) {
+    const value = element ? (element.getAttribute('w:val') || '').trim() : '';
+    return /^-?\d+$/.test(value) ? Number(value) : null;
+}
+
+/**
+ * The color a shading (w:shd, in a run's w:rPr or a paragraph's w:pPr) draws: a solid pattern is
+ * drawn entirely in its pattern color (w:color), any other pattern is approximated by its
+ * background fill (w:fill)
+ * @param {Element|null} shd - The w:shd element
+ * @returns {string|null|undefined} '#RRGGBB'; null when it draws nothing ("nil", or an "auto" or
+ *   missing color), which overrides an earlier layer; undefined without the element, or for a
+ *   color that isn't 6 hex digits, which is ignored
+ */
+function shadingColor(shd) {
+    if (!shd) return undefined;
+    const pattern = shd.getAttribute('w:val');
+    const solidColor = pattern === 'solid' ? shd.getAttribute('w:color') : '';
+    const fill = solidColor && solidColor !== 'auto' ? solidColor : shd.getAttribute('w:fill');
+    if (pattern === 'nil' || !fill || fill === 'auto') return null;
+    if (/^[0-9A-Fa-f]{6}$/.test(fill)) return '#' + fill.toUpperCase();
+    return undefined;
+}
+
+/**
+ * Whether resolved run formatting (see parseRunFormatting) has an underline the UDF can only write
+ * as a single one (see STYLED_UNDERLINES)
+ * @param {Object} formatting
+ * @returns {boolean}
+ */
+function hasStyledUnderline(formatting) {
+    return formatting.underline === true && STYLED_UNDERLINES.includes(formatting.underlineStyle);
 }
 
 /**
@@ -863,6 +993,9 @@ class DocxParser {
         this.location = { kind: 'document' };
         this.body = { paragraphs: 0, tables: 0, headings: { outline: null, petition: null } };
         this.documentParagraphs = null;
+        // Each parsed paragraph's resolved paragraph style id and whether it has contextual
+        // spacing (see applyContextualSpacing)
+        this.contextualSpacing = new WeakMap();
         this.endnotesMoved = false;
         // Decompression limits, in bytes; tests lower them instead of building huge files
         this.limits = { part: MAX_PART_BYTES, total: MAX_TOTAL_BYTES };
@@ -896,6 +1029,7 @@ class DocxParser {
             this.location = { kind: 'document' };
             this.body = { paragraphs: 0, tables: 0, headings: { outline: null, petition: null } };
             this.documentParagraphs = null;
+            this.contextualSpacing = new WeakMap();
             this.endnotesMoved = false;
             this.embeddedChunks = 0;
             this.partBytes = new Map();
@@ -1366,14 +1500,23 @@ class DocxParser {
         await this.extractImages(shownRuns, this.partRelationships, true);
 
         // Every paragraph is written, as in a table cell (see paragraphIsWritten), except one
-        // Word's Accept All removes (see parseParagraphBlocks)
-        const parsed = paragraphs.flatMap(para => {
-            const paragraph = this.parseParagraph(para, this.paragraphRuns(para), true);
-            if (paragraphMarkDeleted(para) && nothingLeft(paragraph.runs)) return [];
+        // Word's Accept All removes (see parseParagraphBlocks). A table, which isn't converted,
+        // still separates the paragraphs on either side of it for contextual spacing.
+        const parsed = [];
+        const sequence = [];
+        for (const block of blocks) {
+            if (block.localName !== 'p') {
+                if (block.localName === 'tbl' || block.localName === 'altChunk') sequence.push(null);
+                continue;
+            }
+            const paragraph = this.parseParagraph(block, this.paragraphRuns(block), true);
+            if (paragraphMarkDeleted(block) && nothingLeft(paragraph.runs)) continue;
             if (paragraph.runs.some(run => run.omittedPictures)) dropped = true;
             paragraph.runs = paragraph.runs.filter(run => HEADER_FOOTER_RUN_TYPES.includes(run.type));
-            return [paragraph];
-        });
+            parsed.push(paragraph);
+            sequence.push(paragraph);
+        }
+        this.applyContextualSpacing(sequence);
         // A part whose only text is hidden (w:vanish), or whose pictures are all missing, shows nothing
         if (!parsed.some(paragraph => paragraph.runs.some(showsContent))) return { paragraphs: null, dropped };
         return { paragraphs: parsed, dropped };
@@ -1448,6 +1591,15 @@ class DocxParser {
 
         try {
             const notesDoc = parseXml(await this.readXmlPart(notesFile));
+            // The notes' links resolve through the notes part's own relationships. Notes whose
+            // relationships can't be read are still converted; only their links go unreported.
+            let relationships = {};
+            try {
+                relationships = await this.readRelationships(notesFile.name);
+            } catch (error) {
+                rethrowFatal(error);
+                console.warn(`Could not read the ${type}s' relationships:`, error);
+            }
 
             for (const note of notesDoc.getElementsByTagNameNS(WORD_NS, type)) {
                 const id = note.getAttribute('w:id');
@@ -1463,7 +1615,7 @@ class DocxParser {
                     row.remove();
                     findings.push(['trackedChanges', '']);
                 }
-                notes[id] = this.noteText(note, findings);
+                notes[id] = this.noteText(note, findings, relationships);
                 this.noteFindings[type][id] = findings;
                 this.noteParagraphs[type][id] = this.parseNoteParagraphs(note);
             }
@@ -1483,11 +1635,15 @@ class DocxParser {
      * @param {Element} note - The w:footnote or w:endnote element
      * @param {Array<[string, string]>} [findings] - Receives a [code, example] pair for each symbol
      *   (symbols), each equation (equations), each paragraph with hidden content (hiddenText), with
-     *   unaccepted changes (trackedChanges, see hasRevisions), with subscript text (subscript) and
-     *   with a border (paragraphBorders, see hasParagraphBorder)
+     *   unaccepted changes (trackedChanges, see hasRevisions), with subscript text (subscript), with
+     *   double-struck text (doubleStrikethrough), with a styled underline (underlineStyles, see
+     *   hasStyledUnderline), with a border (paragraphBorders, see hasParagraphBorder), with shading
+     *   (paragraphShading, see hasParagraphShading),
+     *   and for each link whose address its text doesn't show (hyperlinks, see unshownLinkAddresses)
+     * @param {Object} [relationships] - The notes part's relationships (see readRelationships)
      * @returns {string}
      */
-    noteText(note, findings = []) {
+    noteText(note, findings = [], relationships = {}) {
         let text = '';
         for (const para of note.getElementsByTagNameNS(WORD_NS, 'p')) {
             const start = text.length;
@@ -1495,6 +1651,8 @@ class DocxParser {
             const style = this.paragraphStyle(pPr);
             const hidden = { found: false, text: '' };
             let subscript = false;
+            let doubleStruck = false;
+            let styledUnderline = false;
             // Runs, and equations in place of the runs inside them. Deleted and moved-away runs
             // are left out, as in the body (see paragraphRuns).
             const runs = Array.from(para.getElementsByTagName('*')).filter(element =>
@@ -1508,6 +1666,9 @@ class DocxParser {
                     if (math.trim() !== '') {
                         text += math;
                         findings.push(['equations', shortExample(math)]);
+                        const formatting = this.parseRunFormatting(run, style.run);
+                        if (formatting.doubleStrike) doubleStruck = true;
+                        if (hasStyledUnderline(formatting)) styledUnderline = true;
                     }
                     continue;
                 }
@@ -1532,13 +1693,25 @@ class DocxParser {
                         text += ' ';
                     }
                 }
-                if (formatting.vertAlign === 'subscript' && text.slice(runStart).trim() !== '') subscript = true;
+                const shown = text.slice(runStart).trim() !== '';
+                if (formatting.vertAlign === 'subscript' && shown) subscript = true;
+                if (formatting.doubleStrike && shown) doubleStruck = true;
+                if (hasStyledUnderline(formatting) && shown) styledUnderline = true;
             }
             if (hidden.found) findings.push(['hiddenText', shortExample(hidden.text)]);
+            for (const example of this.unshownLinkAddresses(para, this.paragraphRuns(para), style.run, relationships)) {
+                findings.push(['hyperlinks', example]);
+            }
             if (this.hasRevisions(para)) findings.push(['trackedChanges', shortExample(text.slice(start).trim())]);
             if (subscript) findings.push(['subscript', shortExample(text.slice(start).trim())]);
-            if (this.hasParagraphBorder(style.paragraph, this.readParagraphProperties(pPr))) {
+            if (doubleStruck) findings.push(['doubleStrikethrough', shortExample(text.slice(start).trim())]);
+            if (styledUnderline) findings.push(['underlineStyles', shortExample(text.slice(start).trim())]);
+            const own = this.readParagraphProperties(pPr);
+            if (this.hasParagraphBorder(style.paragraph, own)) {
                 findings.push(['paragraphBorders', shortExample(text.slice(start).trim())]);
+            }
+            if (this.hasParagraphShading(style.paragraph, own)) {
+                findings.push(['paragraphShading', shortExample(text.slice(start).trim())]);
             }
             text += ' ';
         }
@@ -1644,7 +1817,7 @@ class DocxParser {
 
     /**
      * Parse list definitions from the numbering part (word/numbering.xml) into
-     * this.numbering[numId][ilvl] = { format, lvlText }
+     * this.numbering[numId][ilvl] = { format, lvlText, bullet, picture, start } (see parseLevel)
      */
     async parseNumbering() {
         const numberingFile = this.zip.file(this.relatedPart('numbering', 'word/numbering.xml'));
@@ -1667,10 +1840,14 @@ class DocxParser {
                 const abstractNumId = childElement(num, 'abstractNumId');
                 const levels = { ...(abstractNumId && abstractLevels[abstractNumId.getAttribute('w:val')]) };
 
-                // A level override replaces the whole abstract level, defaults included
+                // A level override replaces the whole abstract level, defaults included. A start
+                // override (Word's Restart at or Set Numbering Value) replaces only its start value.
                 for (const override of childElements(num, 'lvlOverride')) {
+                    const ilvl = override.getAttribute('w:ilvl') || '0';
                     const lvl = childElement(override, 'lvl');
-                    if (lvl) levels[override.getAttribute('w:ilvl') || '0'] = this.parseLevel(lvl);
+                    if (lvl) levels[ilvl] = this.parseLevel(lvl);
+                    const start = integerValue(childElement(override, 'startOverride'));
+                    if (start !== null && levels[ilvl]) levels[ilvl] = { ...levels[ilvl], start };
                 }
 
                 this.numbering[num.getAttribute('w:numId')] = levels;
@@ -1771,9 +1948,12 @@ class DocxParser {
     }
 
     /**
-     * Read the number format and level text of a numbering level
+     * Read the number format, level text, bullet and start value of a numbering level
      * @param {Element} lvl - The w:lvl element
-     * @returns {{format?: string, lvlText?: string}} Only the values the level sets
+     * @returns {{format?: string, lvlText?: string, bullet?: string, picture?: boolean, start?: number}}
+     *   Only the values the level sets. A bullet level (numFmt bullet) also has bullet, the character
+     *   its level text draws (see bulletCharacter), and picture, true for a picture bullet
+     *   (w:lvlPicBulletId). start is the w:start value.
      */
     parseLevel(lvl) {
         const level = {};
@@ -1781,6 +1961,16 @@ class DocxParser {
         if (numFmt && numFmt.hasAttribute('w:val')) level.format = numFmt.getAttribute('w:val');
         const lvlText = childElement(lvl, 'lvlText');
         if (lvlText && lvlText.hasAttribute('w:val')) level.lvlText = lvlText.getAttribute('w:val');
+        if (level.format === 'bullet') {
+            // The level's font: w:ascii, else w:hAnsi
+            const rPr = childElement(lvl, 'rPr');
+            const rFonts = rPr && childElement(rPr, 'rFonts');
+            const font = rFonts ? rFonts.getAttribute('w:ascii') || rFonts.getAttribute('w:hAnsi') || '' : '';
+            level.bullet = bulletCharacter(level.lvlText || '', font);
+            if (childElement(lvl, 'lvlPicBulletId')) level.picture = true;
+        }
+        const start = integerValue(childElement(lvl, 'start'));
+        if (start !== null) level.start = start;
         return level;
     }
 
@@ -1832,8 +2022,8 @@ class DocxParser {
     /**
      * Parse the styles part (word/styles.xml): the document defaults (w:docDefaults),
      * the paragraph and character styles, each with the properties it sets itself, and
-     * the table styles' borders. w:basedOn chains are resolved on first use (see
-     * resolveStyle and tableBorders).
+     * the table styles' borders, alignment and indent. w:basedOn chains are resolved on first
+     * use (see resolveStyle and resolvedTableStyle).
      */
     async parseStyles() {
         const stylesFile = this.zip.file(this.relatedPart('styles', 'word/styles.xml'));
@@ -1869,7 +2059,8 @@ class DocxParser {
                     definitions.set(id, {
                         basedOn: basedOn ? basedOn.getAttribute('w:val') : null,
                         borders: this.readBorders(tblPr && childElement(tblPr, 'tblBorders'), TABLE_EDGES),
-                        cellBorders: this.readBorders(tcPr && childElement(tcPr, 'tcBorders'), CELL_EDGES)
+                        cellBorders: this.readBorders(tcPr && childElement(tcPr, 'tcBorders'), CELL_EDGES),
+                        placement: this.readTablePlacement(tblPr)
                     });
                     if (this.styles.defaultTable === null && this.isOn(style, 'w:default', false)) {
                         this.styles.defaultTable = id;
@@ -1939,10 +2130,19 @@ class DocxParser {
      * @returns {{run: Object, paragraph: Object}} See resolveStyle
      */
     paragraphStyle(pPr) {
+        return this.resolveStyle('paragraph', this.paragraphStyleId(pPr));
+    }
+
+    /**
+     * The id of a paragraph's paragraph style: its w:pStyle when styles.xml defines it, else the
+     * default paragraph style's
+     * @param {Element|null} pPr - The paragraph's w:pPr
+     * @returns {string|null} null when there is no style at all
+     */
+    paragraphStyleId(pPr) {
         const pStyle = pPr && childElement(pPr, 'pStyle');
         const id = pStyle && pStyle.getAttribute('w:val');
-        return this.resolveStyle('paragraph',
-            this.styles.definitions.paragraph.has(id) ? id : this.styles.defaultParagraph);
+        return this.styles.definitions.paragraph.has(id) ? id : this.styles.defaultParagraph;
     }
 
     /**
@@ -1955,8 +2155,8 @@ class DocxParser {
         const props = {};
         if (!rPr) return props;
 
-        const onOff = [['b', 'bold'], ['i', 'italic'], ['strike', 'strike'], ['vanish', 'hidden'],
-            ['caps', 'caps'], ['smallCaps', 'smallCaps']];
+        const onOff = [['b', 'bold'], ['i', 'italic'], ['strike', 'strike'], ['dstrike', 'doubleStrike'],
+            ['vanish', 'hidden'], ['caps', 'caps'], ['smallCaps', 'smallCaps']];
         for (const [name, key] of onOff) {
             const el = childElement(rPr, name);
             if (el) props[key] = this.isOn(el);
@@ -1966,8 +2166,13 @@ class DocxParser {
         const lang = childElement(rPr, 'lang');
         if (lang && lang.getAttribute('w:val')) props.lang = lang.getAttribute('w:val');
 
+        // The underline, and its style (w:u w:val), which resolve together: a later layer's single or
+        // none replaces an inherited style (see STYLED_UNDERLINES)
         const u = childElement(rPr, 'u');
-        if (u && u.hasAttribute('w:val')) props.underline = u.getAttribute('w:val') !== 'none';
+        if (u && u.hasAttribute('w:val')) {
+            props.underlineStyle = u.getAttribute('w:val');
+            props.underline = props.underlineStyle !== 'none';
+        }
 
         // Superscript or subscript (w:vertAlign); an explicit baseline cancels an inherited one
         const vertAlign = childElement(rPr, 'vertAlign');
@@ -2001,17 +2206,9 @@ class DocxParser {
         if (highlightVal === 'none') props.highlight = null;
         else if (Object.hasOwn(HIGHLIGHT_COLORS, highlightVal)) props.highlight = '#' + HIGHLIGHT_COLORS[highlightVal];
 
-        // Run shading (w:shd): a solid pattern is drawn entirely in its pattern color (w:color),
-        // any other pattern is approximated by its background fill (w:fill). "nil", or an "auto"
-        // or missing color, is null; a color that isn't 6 hex digits is ignored.
-        const shd = childElement(rPr, 'shd');
-        if (shd) {
-            const pattern = shd.getAttribute('w:val');
-            const solidColor = pattern === 'solid' ? shd.getAttribute('w:color') : '';
-            const fill = solidColor && solidColor !== 'auto' ? solidColor : shd.getAttribute('w:fill');
-            if (pattern === 'nil' || !fill || fill === 'auto') props.shading = null;
-            else if (/^[0-9A-Fa-f]{6}$/.test(fill)) props.shading = '#' + fill.toUpperCase();
-        }
+        // Run shading (w:shd), see shadingColor
+        const shading = shadingColor(childElement(rPr, 'shd'));
+        if (shading !== undefined) props.shading = shading;
 
         return props;
     }
@@ -2071,6 +2268,11 @@ class DocxParser {
         const pageBreakBefore = childElement(pPr, 'pageBreakBefore');
         if (pageBreakBefore) props.pageBreakBefore = this.isOn(pageBreakBefore);
 
+        // Contextual spacing (w:contextualSpacing), which drops the space between paragraphs of
+        // the same style (see applyContextualSpacing)
+        const contextualSpacing = childElement(pPr, 'contextualSpacing');
+        if (contextualSpacing) props.contextualSpacing = this.isOn(contextualSpacing);
+
         // Paragraph borders (w:pBdr), which the UDF can't draw: whether each edge it sets draws a
         // line. Edges inherit one by one (see resolveStyle and hasParagraphBorder).
         const pBdr = childElement(pPr, 'pBdr');
@@ -2082,6 +2284,11 @@ class DocxParser {
             }
             if (Object.keys(edges).length > 0) props.borderEdges = edges;
         }
+
+        // Paragraph shading (w:shd, see shadingColor), which the UDF can't draw: the documented
+        // <paragraph> has no background color. It is only reported (see hasParagraphShading).
+        const shading = shadingColor(childElement(pPr, 'shd'));
+        if (shading !== undefined) props.shading = shading;
 
         return props;
     }
@@ -2262,11 +2469,15 @@ class DocxParser {
         const finalSection = childElements(body, 'sectPr').pop() || null;
         const breaks = children.map(child => child.localName === 'p' ? sectionBreakOf(child) : null).filter(Boolean);
         const nextSection = new Map(breaks.map((sectPr, i) => [sectPr, i + 1 < breaks.length ? breaks[i + 1] : finalSection]));
+        // The body's own paragraphs, for contextual spacing; null where a table or embedded content is.
+        // Page breaks and section breaks don't separate paragraphs: Word applies it across them.
+        const sequence = [];
 
         for (const child of children) {
             if (child.localName === 'p') {
                 this.location = { kind: 'paragraph', paragraph: ++this.body.paragraphs, ...headingOf() };
                 const { paragraph, blocks } = this.parseParagraphBlocks(child);
+                if (paragraph) sequence.push(paragraph);
                 // Page breaks are block-level pageBreak items between the paragraphs and tables: the
                 // generator writes one only when something follows it, and never two in a row
                 if (paragraph && this.bodyPageBreakBefore(child)) elements.push({ type: 'pageBreak' });
@@ -2284,6 +2495,7 @@ class DocxParser {
                 const kind = paragraph && this.headingKind(child, paragraph);
                 if (kind) this.body.headings[kind] = shortExample(paragraphText(paragraph));
             } else if (child.localName === 'tbl') {
+                sequence.push(null);
                 const table = ++this.body.tables;
                 const heading = headingOf();
                 const parsed = this.parseTable(child, (row, cell) => {
@@ -2291,6 +2503,7 @@ class DocxParser {
                 });
                 if (parsed) elements.push(parsed);
             } else if (child.localName === 'altChunk') {
+                sequence.push(null);
                 // Embedded content takes a body paragraph's place: Word shows it where its first paragraph would be
                 this.location = { kind: 'paragraph', paragraph: ++this.body.paragraphs, ...headingOf() };
                 this.reportEmbeddedChunk(child);
@@ -2300,6 +2513,7 @@ class DocxParser {
         // The final section's columns: the <pageFormat> is written from its page setup, but not its columns
         if (finalSection && hasColumns(finalSection)) this.addFinding('sectionLayout', '', { kind: 'document' });
 
+        this.applyContextualSpacing(sequence);
         return elements;
     }
 
@@ -2400,21 +2614,50 @@ class DocxParser {
      */
     parseBlocks(container, inCell = false) {
         const elements = [];
+        // The container's own paragraphs, for contextual spacing; null where a table or embedded content is
+        const sequence = [];
 
         for (const child of this.contentChildren(container)) {
             const localName = child.localName;
 
             if (localName === 'p') {
-                elements.push(...this.parseParagraphBlocks(child, inCell).blocks);
+                const { paragraph, blocks } = this.parseParagraphBlocks(child, inCell);
+                if (paragraph) sequence.push(paragraph);
+                elements.push(...blocks);
             } else if (localName === 'tbl') {
+                sequence.push(null);
                 const table = this.parseTable(child);
                 if (table) elements.push(table);
             } else if (localName === 'altChunk') {
+                sequence.push(null);
                 this.reportEmbeddedChunk(child);
             }
         }
 
+        this.applyContextualSpacing(sequence);
         return elements;
+    }
+
+    /**
+     * Apply contextual spacing (w:contextualSpacing, ECMA-376 17.3.1.9) to a sequence of
+     * paragraphs: when a paragraph that has it is next to one of the same paragraph style, its
+     * space on that side is dropped. Each paragraph's own setting decides only its own spacing:
+     * the first of two loses its space after, the second its space before. Paragraphs are
+     * adjacent when they follow each other in the sequence; a paragraph left out isn't in it (see
+     * parseParagraphBlocks), and text boxes anchored in a paragraph are sequences of their own.
+     * @param {Array<Object|null>} sequence - Parsed paragraphs in document order, with null where
+     *   a table (or other block) stands between two of them
+     */
+    applyContextualSpacing(sequence) {
+        for (let i = 1; i < sequence.length; i++) {
+            const previous = sequence[i - 1];
+            const next = sequence[i];
+            const before = previous && this.contextualSpacing.get(previous);
+            const after = next && this.contextualSpacing.get(next);
+            if (!before || !after || before.style !== after.style) continue;
+            if (before.on && previous.spaceAfter) previous.spaceAfter = 0;
+            if (after.on && next.spaceBefore) next.spaceBefore = 0;
+        }
     }
 
     /**
@@ -2573,12 +2816,18 @@ class DocxParser {
         Object.assign(paragraph, this.styles.defaults.paragraph, style.paragraph, own);
         paragraph.lineSpacing = this.lineSpacing(paragraph);
 
+        // Contextual spacing is settled against the neighbouring paragraphs once the sequence the
+        // paragraph is in has been parsed (see applyContextualSpacing)
+        this.contextualSpacing.set(paragraph, { style: this.paragraphStyleId(pPr), on: paragraph.contextualSpacing === true });
+        delete paragraph.contextualSpacing;
+
         // The outline level only locates findings (see headingKind); it isn’t written. Page break
         // before is written as a page break ahead of a body paragraph (see bodyPageBreakBefore).
-        // Borders can't be written; they are reported below.
+        // Borders and shading can't be written; they are reported below.
         delete paragraph.outlineLevel;
         delete paragraph.pageBreakBefore;
         delete paragraph.borderEdges;
+        delete paragraph.shading;
 
         // Tab stops: each layer adds to or clears the stops of the layers under it
         delete paragraph.tabs;
@@ -2597,6 +2846,9 @@ class DocxParser {
                 // A level without w:numFmt is decimal
                 paragraph.numbering.format = definition.format || 'decimal';
                 paragraph.numbering.lvlText = definition.lvlText || '';
+                for (const key of ['bullet', 'picture', 'start']) {
+                    if (definition[key] !== undefined) paragraph.numbering[key] = definition[key];
+                }
             }
         }
 
@@ -2604,10 +2856,17 @@ class DocxParser {
 
         // Get runs (text with formatting). Hidden runs add nothing; their text is collected for the finding.
         const hidden = { found: false, text: '' };
+        const lost = { doubleStrike: false, underlineStyle: false };
         for (const run of runs) {
-            paragraph.runs.push(...this.parseRun(run, style.run, hidden));
+            paragraph.runs.push(...this.parseRun(run, style.run, hidden, lost));
         }
         if (hidden.found) this.addFinding('hiddenText', shortExample(hidden.text));
+
+        // Links whose address the text doesn't show: the UDF has no links, so the address is lost.
+        // A header's or footer's links resolve through that part's relationships.
+        for (const example of this.unshownLinkAddresses(para, runs, style.run, this.partRelationships || this.relationships)) {
+            this.addFinding('hyperlinks', example);
+        }
 
         // Unaccepted changes: the paragraph is converted as if they were accepted
         if (this.hasRevisions(para)) this.addFinding('trackedChanges', shortExample(paragraphText(paragraph)));
@@ -2615,11 +2874,24 @@ class DocxParser {
         // Subscript text, written on the baseline (see parseRun)
         if (paragraph.runs.some(run => run.subscript && run.text.trim() !== '')) this.addFinding('subscript', shortExample(paragraphText(paragraph)));
 
-        // Line heights, tab stops and borders the conversion loses, with the paragraph's text as the hint.
-        // A paragraph the generator doesn't write as one has no line height, stops or borders to lose.
+        // Double-struck text, written with a single strikethrough (see parseRun)
+        if (lost.doubleStrike) this.addFinding('doubleStrikethrough', shortExample(paragraphText(paragraph)));
+
+        // Underline styles other than single, written as a single underline (see parseRun)
+        if (lost.underlineStyle) this.addFinding('underlineStyles', shortExample(paragraphText(paragraph)));
+
+        // Line heights, tab stops, borders and shading the conversion loses, with the paragraph's text as
+        // the hint. A paragraph the generator doesn't write as one has no line height, stops, borders or shading to lose.
         if (paragraphIsWritten(paragraph, inCell)) {
+            // A list marker the UDF list attributes approximate (see listMarkerApproximated)
+            if (paragraph.numbering && listMarkerApproximated(paragraph.numbering)) {
+                this.addFinding('listMarkers', shortExample(paragraphText(paragraph)));
+            }
             if (this.hasParagraphBorder(style.paragraph, own)) {
                 this.addFinding('paragraphBorders', shortExample(paragraphText(paragraph)));
+            }
+            if (this.hasParagraphShading(style.paragraph, own)) {
+                this.addFinding('paragraphShading', shortExample(paragraphText(paragraph)));
             }
             if (LOST_LINE_RULES.includes(paragraph.lineRule)) {
                 this.addFinding('lineSpacing', shortExample(paragraphText(paragraph)));
@@ -2665,6 +2937,95 @@ class DocxParser {
     }
 
     /**
+     * The links a paragraph shows whose address its text doesn't show (see linkShowsAddress), as
+     * hyperlinks examples: a w:hyperlink whose r:id names an external relationship of the part it is
+     * in, and a HYPERLINK field, complex (w:fldChar begin, its w:instrText, separate, the result, end)
+     * or simple (w:fldSimple), a field nested in another field's result included. A link's text is
+     * what its runs show, symbols included (see symbolText): hidden runs add nothing, and deleted and moved-away runs aren't among the
+     * runs (see paragraphRuns). Internal links (w:anchor only, HYPERLINK \l), links with no text and a
+     * w:hyperlink whose relationship is missing aren't listed. Only reads: nothing is recorded.
+     * @param {Element} para - The w:p element
+     * @param {Array<Element>} runs - Its runs (see paragraphRuns)
+     * @param {Object} styleRun - Run properties from the paragraph's style (see resolveStyle)
+     * @param {Object} relationships - The relationships of the part the paragraph is in (see readRelationships)
+     * @returns {Array<string>} One example per link, in the order the links start: the link's text,
+     *   then → and its address without the scheme, e.g. Yargıtay kararı → example.org/karar
+     */
+    unshownLinkAddresses(para, runs, styleRun, relationships) {
+        const links = [];
+        const newLink = address => {
+            const link = { address, text: '' };
+            links.push(link);
+            return link;
+        };
+        // The link of each w:hyperlink and w:fldSimple met, null for one that isn't an external link
+        const wrapperLinks = new Map();
+        const wrapperLink = element => {
+            if (!wrapperLinks.has(element)) {
+                let address = '';
+                if (element.localName === 'hyperlink') {
+                    const id = element.getAttributeNS(RELATIONSHIPS_NS, 'id');
+                    const relationship = id && Object.prototype.hasOwnProperty.call(relationships, id) ? relationships[id] : null;
+                    // An external target has no part name (see readRelationships)
+                    if (relationship && relationship.target && relationship.path === null) address = relationship.target.trim();
+                } else {
+                    address = hyperlinkFieldAddress(element.getAttribute('w:instr') || '');
+                }
+                wrapperLinks.set(element, address ? newLink(address) : null);
+            }
+            return wrapperLinks.get(element);
+        };
+        // The complex fields open at this point, outermost first
+        const fields = [];
+
+        for (const run of runs) {
+            if (run.namespaceURI !== WORD_NS) continue;
+            // The links of the w:hyperlink and w:fldSimple elements around the run, outermost first
+            const around = [];
+            for (let element = run.parentElement; element && element !== para; element = element.parentElement) {
+                if (element.namespaceURI === WORD_NS && (element.localName === 'hyperlink' || element.localName === 'fldSimple')) {
+                    around.unshift(element);
+                }
+            }
+            const wrappers = around.map(wrapperLink).filter(Boolean);
+            const { hidden, fontFamily } = this.parseRunFormatting(run, styleRun);
+
+            for (const child of run.children) {
+                if (child.namespaceURI !== WORD_NS) continue;
+                const field = fields[fields.length - 1];
+                if (child.localName === 'fldChar') {
+                    const type = child.getAttribute('w:fldCharType');
+                    if (type === 'begin') {
+                        fields.push({ instruction: '', inResult: false, link: null });
+                    } else if (type === 'separate' && field && !field.inResult) {
+                        field.inResult = true;
+                        const address = hyperlinkFieldAddress(field.instruction);
+                        if (address) field.link = newLink(address);
+                    } else if (type === 'end') {
+                        fields.pop();
+                    }
+                } else if (child.localName === 'instrText') {
+                    if (field && !field.inResult) field.instruction += child.textContent || '';
+                } else if (!hidden && (LINK_TEXT_ELEMENTS.includes(child.localName) || NOTE_WHITESPACE_ELEMENTS.includes(child.localName))) {
+                    // The text parseRun writes: a symbol as its Unicode text, a non-breaking hyphen as a hyphen
+                    const text = child.localName === 't' ? child.textContent || ''
+                        : child.localName === 'sym' ? symbolText(child, fontFamily).text
+                            : child.localName === 'noBreakHyphen' ? '-' : ' ';
+                    for (const link of wrappers) link.text += text;
+                    // A field's result shows the results of the fields nested in it
+                    for (const open of fields) {
+                        if (open.link) open.link.text += text;
+                    }
+                }
+            }
+        }
+
+        return links
+            .filter(({ text, address }) => text.trim() !== '' && !linkShowsAddress(text, address))
+            .map(({ text, address }) => shortExample(`${text.trim()} → ${address.replace(LINK_SCHEME, '')}`));
+    }
+
+    /**
      * Whether a paragraph draws a border line (w:pBdr), which the UDF can't write: an edge whose
      * line style isn't nil or none, from the document defaults, the paragraph style chain or the
      * paragraph's own w:pPr. Each edge inherits on its own, so an edge set to none hides only that edge.
@@ -2678,24 +3039,44 @@ class DocxParser {
     }
 
     /**
+     * Whether a paragraph is shaded (w:shd in w:pPr), which the UDF can't write: the nearest of the
+     * paragraph's own w:pPr, the paragraph style chain and the document defaults that sets a shading
+     * draws a color (see shadingColor), so a later w:val="nil" or "auto" fill clears an inherited one
+     * @param {Object} styleParagraph - The paragraph style's paragraph properties (see resolveStyle)
+     * @param {Object} own - The paragraph's own properties (see readParagraphProperties)
+     * @returns {boolean}
+     */
+    hasParagraphShading(styleParagraph, own) {
+        return Boolean({ ...this.styles.defaults.paragraph, ...styleParagraph, ...own }.shading);
+    }
+
+    /**
      * Parse a run element (text with formatting)
      * @param {Element} run - The run element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @param {{found: boolean, text: string}} [hidden] - Set when the run is hidden (w:vanish) and
      *   holds content: found becomes true and the run's text is appended to text
+     * @param {{doubleStrike: boolean, underlineStyle: boolean}} [lost] - Formatting the UDF can't keep,
+     *   set when the run shows text other than whitespace: doubleStrike becomes true when it is
+     *   double-struck (w:dstrike), and underlineStyle when its underline isn't single (see hasStyledUnderline)
      * @returns {Array<Object>} Parsed items in document order (text, tab, break, pageBreak, image,
      *   footnoteRef, endnoteRef). Empty for a hidden run: Word neither shows nor prints it. Text of
      *   a superscript run has superscript: true; text of a subscript run has subscript: true and is
-     *   written on the baseline, as the UDF has no subscript.
+     *   written on the baseline, as the UDF has no subscript. Text of a double-struck run (w:dstrike)
+     *   has strike: true, as the UDF has no double strikethrough. A styled underline (w:u other than
+     *   single) is written as underline: true, as the UDF has one underline.
      */
-    parseRun(run, paragraphRun = {}, hidden = null) {
-        if (run.namespaceURI === MATH_NS) return this.parseEquation(run, paragraphRun, hidden);
+    parseRun(run, paragraphRun = {}, hidden = null, lost = null) {
+        if (run.namespaceURI === MATH_NS) return this.parseEquation(run, paragraphRun, hidden, lost);
         const items = [];
-        // hidden, caps, smallCaps and lang decide how the run's text is written, and vertAlign whether
-        // it is superscript or subscript; they aren't text attributes
-        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, ...formatting } = this.parseRunFormatting(run, paragraphRun);
+        const resolved = this.parseRunFormatting(run, paragraphRun);
+        // hidden, caps, smallCaps and lang decide how the run's text is written, vertAlign whether
+        // it is superscript or subscript, doubleStrike whether it is struck and underlineStyle only
+        // whether it is reported; they aren't text attributes
+        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, doubleStrike, underlineStyle, ...formatting } = resolved;
         if (vertAlign === 'superscript') formatting.superscript = true;
         else if (vertAlign === 'subscript') formatting.subscript = true;
+        if (doubleStrike) formatting.strike = true;
 
         if (isHidden) {
             const { shows, text } = hiddenRunContent(run);
@@ -2776,6 +3157,10 @@ class DocxParser {
             }
         }
 
+        if (lost && items.some(item => item.type === 'text' && item.text.trim() !== '')) {
+            if (doubleStrike) lost.doubleStrike = true;
+            if (hasStyledUnderline(resolved)) lost.underlineStyle = true;
+        }
         return items;
     }
 
@@ -2788,13 +3173,22 @@ class DocxParser {
      * @param {Element} oMath - The m:oMath element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @param {{found: boolean, text: string}} [hidden] - See parseRun; set by the equation's hidden runs
+     * @param {{doubleStrike: boolean, underlineStyle: boolean}} [lost] - See parseRun; set by the
+     *   equation's double strikethrough and styled underline
      * @returns {Array<Object>} Empty for an equation with no text, or one all hidden
      */
-    parseEquation(oMath, paragraphRun = {}, hidden = null) {
+    parseEquation(oMath, paragraphRun = {}, hidden = null, lost = null) {
         const text = this.equationText(oMath, paragraphRun, hidden);
         if (text.trim() === '') return [];
-        // hidden, caps, smallCaps, lang and vertAlign don't apply to the equation's text as a whole
-        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, ...formatting } = this.parseRunFormatting(oMath, paragraphRun);
+        const resolved = this.parseRunFormatting(oMath, paragraphRun);
+        // hidden, caps, smallCaps, lang and vertAlign don't apply to the equation's text as a whole;
+        // double strikethrough is written as a strikethrough and a styled underline as an underline, as for a run
+        const { hidden: isHidden, caps, smallCaps, lang, vertAlign, doubleStrike, underlineStyle, ...formatting } = resolved;
+        if (doubleStrike) formatting.strike = true;
+        if (lost) {
+            if (doubleStrike) lost.doubleStrike = true;
+            if (hasStyledUnderline(resolved)) lost.underlineStyle = true;
+        }
 
         this.addFinding('equations', shortExample(text));
         const items = [];
@@ -3191,7 +3585,10 @@ class DocxParser {
             }
         }
 
-        const edges = this.tableBorders(childElement(tbl, 'tblPr'));
+        const tblPr = childElement(tbl, 'tblPr');
+        const edges = this.tableBorders(tblPr);
+        // Where the table's first cell is: a nested table's findings are located at its outer cell
+        const startLocation = this.location;
 
         // Get rows and cells (only this table's own, not those of nested tables). The cells'
         // properties come first: they decide which cells continue a vertical merge. A row marked
@@ -3267,6 +3664,14 @@ class DocxParser {
                 }
             });
             reportDeleted(deletedRows[table.rows.length]);
+            // A table written as a table that Word doesn't draw at the left margin, inline: the
+            // <table> has no alignment, indent or position. Located at its first cell, with the
+            // first text of the cells the generator writes.
+            if (!flattened && this.tableMoved(tblPr)) {
+                const shown = table.rows.flatMap((row, i) => row.cells.filter((cell, j) => !merges[i][j].joinsAbove));
+                const location = enterCell ? (enterCell(1, 1), this.location) : startLocation;
+                this.addFinding('tablePlacement', shortExample(firstText(shown.flatMap(cell => cell.paragraphs))), location);
+            }
         } finally {
             this.tableDepth = depth - 1;
         }
@@ -3328,6 +3733,72 @@ class DocxParser {
     }
 
     /**
+     * A table's style (w:tblStyle, else the default table style) with its w:basedOn chain applied
+     * underneath it: the nearest style that sets each border edge, cell border edge, alignment and
+     * indent wins. Resolved once per style.
+     * @param {Element|null} tblPr - The table's w:tblPr
+     * @returns {{borders: Object<string,?Object>, cells: Object<string,?Object>,
+     *   placement: {jc?: string, ind?: {w: number, type: string}}}|null} Only what the chain
+     *   sets (see readBorders and readTablePlacement); null without a styles part
+     */
+    resolvedTableStyle(tblPr) {
+        if (!this.styles.loaded) return null;
+        const tblStyle = tblPr && childElement(tblPr, 'tblStyle');
+        const id = tblStyle && tblStyle.getAttribute('w:val');
+        const definitions = this.styles.definitions.table;
+        const styleId = definitions.has(id) ? id : this.styles.defaultTable;
+        const resolved = this.styles.resolved.table;
+        if (!resolved.has(styleId)) {
+            const chain = [];
+            for (let sid = styleId; definitions.has(sid) && !chain.includes(definitions.get(sid)); sid = definitions.get(sid).basedOn) {
+                chain.unshift(definitions.get(sid));
+            }
+            resolved.set(styleId, {
+                borders: Object.assign({}, ...chain.map(style => style.borders)),
+                cells: Object.assign({}, ...chain.map(style => style.cellBorders)),
+                placement: Object.assign({}, ...chain.map(style => style.placement))
+            });
+        }
+        return resolved.get(styleId);
+    }
+
+    /**
+     * Read the alignment (w:jc) and indent (w:tblInd) a table's or table style's w:tblPr sets
+     * @param {Element|null} tblPr - The w:tblPr
+     * @returns {{jc?: string, ind?: {w: number, type: string}}} Only what it sets: jc is the
+     *   w:jc w:val; ind is the w:tblInd width in twips (0 when missing or not a whole number) and
+     *   its w:type (dxa when missing)
+     */
+    readTablePlacement(tblPr) {
+        const placement = {};
+        const jc = tblPr && childElement(tblPr, 'jc');
+        if (jc && jc.hasAttribute('w:val')) placement.jc = jc.getAttribute('w:val');
+        const ind = tblPr && childElement(tblPr, 'tblInd');
+        if (ind) {
+            const w = (ind.getAttribute('w:w') || '').trim();
+            placement.ind = { w: /^-?\d+$/.test(w) ? Number(w) : 0, type: ind.getAttribute('w:type') || 'dxa' };
+        }
+        return placement;
+    }
+
+    /**
+     * Whether Word draws a table somewhere other than at the left margin, inline with the text
+     * (see tablePlacement): its alignment, resolved through its table style chain to its own
+     * w:tblPr (see resolvedTableStyle), is center, right or end; its indent, resolved the same
+     * way, is a dxa width more than TABLE_INDENT_TOLERANCE from 0 (nil is 0; pct and auto aren't
+     * read); or it floats (w:tblpPr)
+     * @param {Element|null} tblPr - The table's w:tblPr
+     * @returns {boolean}
+     */
+    tableMoved(tblPr) {
+        if (tblPr && childElement(tblPr, 'tblpPr')) return true;
+        const style = this.resolvedTableStyle(tblPr);
+        const { jc, ind } = Object.assign({}, style && style.placement, this.readTablePlacement(tblPr));
+        if (MOVED_TABLE_ALIGNMENTS.includes(jc)) return true;
+        return Boolean(ind) && ind.type === 'dxa' && Math.abs(ind.w) > TABLE_INDENT_TOLERANCE;
+    }
+
+    /**
      * The line each of a table's six edges draws: its table style (w:tblStyle, else the default
      * table style) with its w:basedOn chain, then the table's own w:tblBorders. The nearest
      * layer that sets an edge wins, and an edge nothing sets has no line. Without a styles
@@ -3344,23 +3815,9 @@ class DocxParser {
     tableBorders(tblPr) {
         let base;
         let cells = {};
-        if (this.styles.loaded) {
-            const tblStyle = tblPr && childElement(tblPr, 'tblStyle');
-            const id = tblStyle && tblStyle.getAttribute('w:val');
-            const definitions = this.styles.definitions.table;
-            const styleId = definitions.has(id) ? id : this.styles.defaultTable;
-            const resolved = this.styles.resolved.table;
-            if (!resolved.has(styleId)) {
-                const chain = [];
-                for (let sid = styleId; definitions.has(sid) && !chain.includes(definitions.get(sid)); sid = definitions.get(sid).basedOn) {
-                    chain.unshift(definitions.get(sid));
-                }
-                resolved.set(styleId, {
-                    borders: Object.assign({}, ...chain.map(style => style.borders)),
-                    cells: Object.assign({}, ...chain.map(style => style.cellBorders))
-                });
-            }
-            ({ borders: base, cells } = resolved.get(styleId));
+        const style = this.resolvedTableStyle(tblPr);
+        if (style) {
+            ({ borders: base, cells } = style);
         } else {
             base = Object.fromEntries(Object.keys(TABLE_EDGES).map(edge => [edge, DEFAULT_BORDER_LINE]));
         }

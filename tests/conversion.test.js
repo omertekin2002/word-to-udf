@@ -837,7 +837,7 @@ test('a paragraph style\'s w:numPr numbers the paragraph, directly or through w:
     // Only the numbering object carries the list; no style-only keys leak into the paragraph
     const first = parsed.elements[0];
     // Copied into this realm: the parser's objects come from the vm context
-    assert.deepEqual({ ...first.numbering }, { level: 0, numId: '5', format: 'decimal', lvlText: '%1.' });
+    assert.deepEqual({ ...first.numbering }, { level: 0, numId: '5', format: 'decimal', lvlText: '%1.', start: 1 });
     for (const key of ['numId', 'level', 'ilvl', 'numPr']) assert.equal(first[key], undefined, key);
 });
 
