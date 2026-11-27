@@ -1525,6 +1525,7 @@ class DocxParser {
                     if (math.trim() !== '') {
                         text += math;
                         findings.push(['equations', shortExample(math)]);
+                        if (this.parseRunFormatting(run, style.run).doubleStrike) doubleStruck = true;
                     }
                     continue;
                 }
@@ -2771,7 +2772,7 @@ class DocxParser {
      *   has strike: true, as the UDF has no double strikethrough.
      */
     parseRun(run, paragraphRun = {}, hidden = null, doubleStruck = null) {
-        if (run.namespaceURI === MATH_NS) return this.parseEquation(run, paragraphRun, hidden);
+        if (run.namespaceURI === MATH_NS) return this.parseEquation(run, paragraphRun, hidden, doubleStruck);
         const items = [];
         // hidden, caps, smallCaps and lang decide how the run's text is written, vertAlign whether
         // it is superscript or subscript, and doubleStrike whether it is struck; they aren't text attributes
@@ -2875,16 +2876,20 @@ class DocxParser {
      * @param {Element} oMath - The m:oMath element
      * @param {Object} [paragraphRun] - Run properties from the paragraph's style (see resolveStyle)
      * @param {{found: boolean, text: string}} [hidden] - See parseRun; set by the equation's hidden runs
+     * @param {{found: boolean}} [doubleStruck] - See parseRun; set when the equation is double-struck
      * @returns {Array<Object>} Empty for an equation with no text, or one all hidden
      */
-    parseEquation(oMath, paragraphRun = {}, hidden = null) {
+    parseEquation(oMath, paragraphRun = {}, hidden = null, doubleStruck = null) {
         const text = this.equationText(oMath, paragraphRun, hidden);
         if (text.trim() === '') return [];
         // hidden, caps, smallCaps, lang and vertAlign don't apply to the equation's text as a whole;
         // double strikethrough is written as a strikethrough, as for a run
         const { hidden: isHidden, caps, smallCaps, lang, vertAlign, doubleStrike, ...formatting } =
             this.parseRunFormatting(oMath, paragraphRun);
-        if (doubleStrike) formatting.strike = true;
+        if (doubleStrike) {
+            formatting.strike = true;
+            if (doubleStruck) doubleStruck.found = true;
+        }
 
         this.addFinding('equations', shortExample(text));
         const items = [];

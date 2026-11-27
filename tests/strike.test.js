@@ -162,6 +162,17 @@ test('a hidden double-struck run in a footnote adds no note', async () => {
     assert.equal(finding(parsed, 'doubleStrikethrough'), undefined);
 });
 
+test('an equation in a double-struck paragraph style is written struck through and reported, in the body and a footnote', async () => {
+    const oMath = text => `<m:oMath><m:r><m:t>${text}</m:t></m:r></m:oMath>`;
+    const styles = paragraphStyle('CiftPara', DSTRIKE);
+    const { doc, content, parsed } = await convertBody(
+        p(oMath('A/365'), '<w:pStyle w:val="CiftPara"/>') + p(oMath('x+1')) + p(r('Dipnot') + footnoteRef(1)),
+        { styles, footnotes: { 1: p(oMath('B/2'), '<w:pStyle w:val="CiftPara"/>') } });
+    assert.equal(attrs(doc, content, 'A/365').strikethrough, 'true');
+    assert.equal(attrs(doc, content, 'x+1').strikethrough, undefined);
+    assert.deepEqual(occurrences(parsed, 'doubleStrikethrough').map(o => o.example), ['A/365', 'B/2']);
+});
+
 test('the petition fixtures give no doubleStrikethrough note', async () => {
     for (const petition of petitions) {
         const { DocxParser } = require('./helpers').loadConverter();
