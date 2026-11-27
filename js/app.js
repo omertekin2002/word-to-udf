@@ -28,6 +28,7 @@ const FINDING_KEYS = {
     tabStops: 'notes.tabStops',
     symbols: 'notes.symbols',
     tableBorders: 'notes.tableBorders',
+    tablePlacement: 'notes.tablePlacement',
     equations: 'notes.equations',
     embeddedContent: 'notes.embeddedContent',
     trackedChanges: 'notes.trackedChanges',
@@ -46,7 +47,7 @@ const PROGRESS_STAGES = ['progress.parsing', 'progress.converting', 'progress.co
 
 // Findings whose examples are document text, shown in quotes; the others are format names
 const QUOTED_EXAMPLE_CODES = ['hiddenText', 'nestedTables', 'missingImage', 'unconvertedDrawing', 'notesMoved', 'endnotesMoved', 'lineSpacing', 'tabStops',
-    'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'doubleStrikethrough',
+    'tablePlacement', 'equations', 'embeddedContent', 'trackedChanges', 'sectionLayout', 'subscript', 'doubleStrikethrough',
     'underlineStyles', 'listMarkers', 'paragraphBorders', 'paragraphShading', 'hyperlinks'];
 
 // What separates the parts of a location line
