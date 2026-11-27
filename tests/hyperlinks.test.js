@@ -147,6 +147,19 @@ test('a field nested in a link field\'s result is read, and the outer link keeps
     ]);
 });
 
+test('a link whose text is a symbol or holds a non-breaking hyphen is reported with that text', async () => {
+    const { parsed } = await convertBody(
+        p(hyperlink('rIdBox', '<w:r><w:sym w:font="Wingdings" w:char="F0FE"/></w:r>')) +
+        p(hyperlink('rIdLaw', r('6100') + '<w:r><w:noBreakHyphen/></w:r>' + r('HMK'))),
+        { links: { 'document.xml': { rIdBox: 'https://example.org/onay', rIdLaw: 'https://example.org/hmk' } } });
+    assert.deepEqual(occurrences(parsed, 'hyperlinks').map(o => o.example),
+        ['☑ → example.org/onay', '6100-HMK → example.org/hmk']);
+    // A symbol with no Unicode equivalent shows nothing, so the link isn't reported
+    const unknown = await convertBody(p(hyperlink('rIdBox', '<w:r><w:sym w:font="Webdings" w:char="F021"/></w:r>')),
+        { links: { 'document.xml': { rIdBox: 'https://example.org/onay' } } });
+    assert.equal(finding(unknown.parsed, 'hyperlinks'), undefined);
+});
+
 test('a hidden part of a link\'s text is left out of its example; a hidden field code still makes it a link', async () => {
     const { parsed } = await convertBody(p(
         hyperlink('rIdLink1', r('Yargıtay') + r(' gizli', '<w:vanish/>') + r(' kararı')) +

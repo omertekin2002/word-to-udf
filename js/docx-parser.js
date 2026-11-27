@@ -264,6 +264,10 @@ const FINDING_CODES = ['headersFooters', 'comments', 'hiddenText', 'nestedTables
 // hyperlinks example and when checking whether the link's text shows the address
 const LINK_SCHEME = /^(?:[a-z][a-z0-9+.-]*:\/\/|mailto:)/i;
 
+// Run content that adds to a link's shown text (see unshownLinkAddresses), besides the whitespace
+// elements: text, symbols and non-breaking hyphens
+const LINK_TEXT_ELEMENTS = ['t', 'sym', 'noBreakHyphen'];
+
 // Switches of a HYPERLINK field instruction that take an argument (ECMA-376 Part 1, 17.16.5.25): the
 // bookmark (\l), the tooltip (\o) and the target frame (\t). The others (\m, \n) take none.
 const HYPERLINK_SWITCHES_WITH_ARGUMENT = ['\\l', '\\o', '\\t'];
@@ -2872,7 +2876,7 @@ class DocxParser {
      * hyperlinks examples: a w:hyperlink whose r:id names an external relationship of the part it is
      * in, and a HYPERLINK field, complex (w:fldChar begin, its w:instrText, separate, the result, end)
      * or simple (w:fldSimple), a field nested in another field's result included. A link's text is
-     * what its runs show: hidden runs add nothing, and deleted and moved-away runs aren't among the
+     * what its runs show, symbols included (see symbolText): hidden runs add nothing, and deleted and moved-away runs aren't among the
      * runs (see paragraphRuns). Internal links (w:anchor only, HYPERLINK \l), links with no text and a
      * w:hyperlink whose relationship is missing aren't listed. Only reads: nothing is recorded.
      * @param {Element} para - The w:p element
@@ -2919,7 +2923,7 @@ class DocxParser {
                 }
             }
             const wrappers = around.map(wrapperLink).filter(Boolean);
-            const hidden = this.parseRunFormatting(run, styleRun).hidden;
+            const { hidden, fontFamily } = this.parseRunFormatting(run, styleRun);
 
             for (const child of run.children) {
                 if (child.namespaceURI !== WORD_NS) continue;
@@ -2937,8 +2941,11 @@ class DocxParser {
                     }
                 } else if (child.localName === 'instrText') {
                     if (field && !field.inResult) field.instruction += child.textContent || '';
-                } else if (!hidden && (child.localName === 't' || NOTE_WHITESPACE_ELEMENTS.includes(child.localName))) {
-                    const text = child.localName === 't' ? child.textContent || '' : ' ';
+                } else if (!hidden && (LINK_TEXT_ELEMENTS.includes(child.localName) || NOTE_WHITESPACE_ELEMENTS.includes(child.localName))) {
+                    // The text parseRun writes: a symbol as its Unicode text, a non-breaking hyphen as a hyphen
+                    const text = child.localName === 't' ? child.textContent || ''
+                        : child.localName === 'sym' ? symbolText(child, fontFamily).text
+                            : child.localName === 'noBreakHyphen' ? '-' : ' ';
                     for (const link of wrappers) link.text += text;
                     // A field's result shows the results of the fields nested in it
                     for (const open of fields) {
